@@ -2,10 +2,10 @@ import { format } from "date-fns";
 import { Layers, MapPin, Paperclip } from "lucide-react";
 
 import { SensitiveValue } from "@/components/sensitive-value";
+import { StateBadge, initialsOf } from "@/components/state-badge";
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
 import { Badge } from "@/components/ui/badge";
 import { Separator } from "@/components/ui/separator";
-import { cn } from "@/lib/utils";
 
 /** Plain (JSON-serializable) data shown in the right-hand visitor panel. */
 export interface VisitorPanelData {
@@ -33,46 +33,9 @@ export interface VisitorPanelData {
   chunkProducts: string[];
 }
 
-const STATE_STYLES: Record<string, string> = {
-  resolved:
-    "border-transparent bg-emerald-100 text-emerald-700 dark:bg-emerald-500/15 dark:text-emerald-400",
-  unresolved:
-    "border-transparent bg-amber-100 text-amber-700 dark:bg-amber-500/15 dark:text-amber-400",
-  pending:
-    "border-transparent bg-zinc-100 text-zinc-600 dark:bg-zinc-500/15 dark:text-zinc-400",
-};
-
-/** Colored conversation-state badge (resolved / unresolved / pending). */
-export function StateBadge({
-  state,
-  className,
-}: {
-  state: string | null;
-  className?: string;
-}) {
-  if (!state) return null;
-  return (
-    <Badge
-      className={cn(
-        "capitalize",
-        STATE_STYLES[state] ?? STATE_STYLES.pending,
-        className
-      )}
-    >
-      {state}
-    </Badge>
-  );
-}
-
-function initials(nickname: string | null, email: string | null): string {
-  const source = nickname?.trim() || email?.trim();
-  if (!source) return "?";
-  const parts = source.split(/[\s@._-]+/).filter(Boolean);
-  if (parts.length >= 2) {
-    return (parts[0].charAt(0) + parts[1].charAt(0)).toUpperCase();
-  }
-  return source.slice(0, 2).toUpperCase();
-}
+// Shared across the inbox list, detail header and RAG results so state
+// colors and avatar initials never drift between screens.
+export { StateBadge };
 
 function SectionLabel({ children }: { children: React.ReactNode }) {
   return (
@@ -121,7 +84,7 @@ export function VisitorPanel({ data }: { data: VisitorPanelData }) {
             <AvatarImage src={data.visitorAvatar} alt="" />
           ) : null}
           <AvatarFallback className="text-sm font-medium">
-            {initials(data.visitorNickname, data.visitorEmail)}
+            {initialsOf(data.visitorNickname, data.visitorEmail)}
           </AvatarFallback>
         </Avatar>
         <div className="min-w-0">
@@ -237,7 +200,7 @@ export function VisitorPanel({ data }: { data: VisitorPanelData }) {
                 <AvatarImage src={data.assignedOperator.avatar} alt="" />
               ) : null}
               <AvatarFallback className="text-[10px] font-medium">
-                {initials(data.assignedOperator.name, null)}
+                {initialsOf(data.assignedOperator.name)}
               </AvatarFallback>
             </Avatar>
             <span className="truncate text-xs font-medium">

@@ -105,7 +105,8 @@ Progress (last page reached, counts, failed sessions) is persisted to `SyncLog` 
 ### Incremental sync
 
 ```bash
-npm run sync:crisp:incremental
+npm run sync:crisp:incremental              # since the last successful run
+npm run sync:crisp:incremental -- --page=N  # resume an interrupted run
 ```
 
 Only syncs conversations updated since the last successful run, with a 1-hour overlap window to absorb clock skew. Falls back to a full sync when the database has never been synced. Designed for cron:
@@ -122,7 +123,8 @@ Only syncs conversations updated since the last successful run, with a 1-hour ov
 
 - **Rate limiting** — all Crisp requests are serialized through one process-wide queue with a minimum inter-request delay (`CRISP_REQUEST_INTERVAL_MS`, default 150 ms).
 - **Backoff** — retryable failures (429/5xx/network) retry with exponential backoff (2s, 4s, 8s, ... capped at 60s), honouring `Retry-After` when present, up to `CRISP_MAX_RETRIES`.
-- **Failed sessions** — a conversation that fails to sync is logged to `SyncLog.failedSessions` and the run continues; nothing aborts the whole sync.
+- **Failed sessions** — a conversation that fails to sync is logged to `SyncLog.failedSessions` and the run continues. At the end of the run every failed session is **retried once**; if any still fail, the run is marked `failed` so the incremental checkpoint does not advance past them (they will be picked up again on the next run).
+- **Single-flight guard** — besides the in-process lock, a sync refuses to start while a `SyncLog` row is still `running` (rows older than 6 h are treated as crashed). If a run was killed hard, mark its log row `failed` to unblock.
 - **Single-conversation resync** — re-fetch one conversation (and rebuild its chunks) without a full run:
 
   ```bash

@@ -64,6 +64,7 @@ export function middleware(request: NextRequest): NextResponse {
 }
 
 export const config = {
-  // Protect everything except Next.js internals and static assets.
-  matcher: ["/((?!_next/static|_next/image|favicon.ico|robots.txt).*)"],
+  // Protect everything except Next.js internals and static assets
+  // (icon.svg is the app favicon served from src/app/icon.svg).
+  matcher: ["/((?!_next/static|_next/image|favicon.ico|icon.svg|robots.txt).*)"],
 };

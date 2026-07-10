@@ -1,6 +1,7 @@
 import { format } from "date-fns";
 import { ExternalLink, FileText, Info, Mail, StickyNote } from "lucide-react";
 
+import { initialsOf } from "@/components/state-badge";
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
 import { cn } from "@/lib/utils";
 
@@ -33,14 +34,6 @@ function formatFileSize(bytes: number | null): string | null {
     unit += 1;
   }
   return `${unit === 0 ? value : value.toFixed(1)} ${units[unit]}`;
-}
-
-function initials(name: string): string {
-  const parts = name.split(/[\s@._-]+/).filter(Boolean);
-  if (parts.length >= 2) {
-    return (parts[0].charAt(0) + parts[1].charAt(0)).toUpperCase();
-  }
-  return name.slice(0, 2).toUpperCase() || "?";
 }
 
 function Timestamp({
@@ -209,7 +202,7 @@ export function ChatMessage({
           <AvatarImage src={message.senderAvatar} alt="" />
         ) : null}
         <AvatarFallback className="text-[10px] font-medium">
-          {initials(message.senderName)}
+          {initialsOf(message.senderName)}
         </AvatarFallback>
       </Avatar>
 

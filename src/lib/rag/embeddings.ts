@@ -77,6 +77,17 @@ export async function embedTexts(texts: string[]): Promise<number[][]> {
     const safeBatch = batch.map((t) => (t.trim().length > 0 ? t : " "));
     vectors.push(...(await requestEmbeddings(safeBatch)));
   }
+  // Guard against a model that ignores the `dimensions` parameter: a wrong
+  // width would fail the pgvector insert, or worse, silently produce
+  // meaningless cosine scores in the JSON fallback path.
+  const badVector = vectors.find((v) => v.length !== EMBEDDING_DIMENSIONS);
+  if (badVector) {
+    throw new Error(
+      `Embedding model "${getEnv().OPENAI_EMBEDDING_MODEL}" returned ` +
+        `${badVector.length}-dimensional vectors; expected ${EMBEDDING_DIMENSIONS}. ` +
+        "Use a model that supports the dimensions parameter (e.g. text-embedding-3-small)."
+    );
+  }
   return vectors;
 }
 

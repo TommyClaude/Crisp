@@ -15,6 +15,7 @@ import {
 } from "lucide-react";
 import { toast } from "sonner";
 
+import { StateBadge } from "@/components/state-badge";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardFooter, CardHeader } from "@/components/ui/card";
@@ -67,15 +68,6 @@ const MODE_META: Record<
     className:
       "border-zinc-200 bg-zinc-50 text-zinc-700 dark:border-zinc-500/30 dark:bg-zinc-500/10 dark:text-zinc-400",
   },
-};
-
-const STATE_CLASSES: Record<string, string> = {
-  resolved:
-    "border-emerald-200 bg-emerald-50 text-emerald-700 dark:border-emerald-500/30 dark:bg-emerald-500/10 dark:text-emerald-400",
-  pending:
-    "border-amber-200 bg-amber-50 text-amber-700 dark:border-amber-500/30 dark:bg-amber-500/10 dark:text-amber-400",
-  unresolved:
-    "border-zinc-200 bg-zinc-100 text-zinc-700 dark:border-zinc-500/30 dark:bg-zinc-500/10 dark:text-zinc-400",
 };
 
 const MAX_TAGS = 4;
@@ -281,9 +273,6 @@ export function RagSearch() {
 
 function ResultCard({ result }: { result: RagSearchResult }) {
   const { conversation } = result;
-  const stateClass = conversation.state
-    ? STATE_CLASSES[conversation.state.toLowerCase()]
-    : undefined;
   const extraTags = conversation.tags.length - MAX_TAGS;
 
   return (
@@ -341,14 +330,7 @@ function ResultCard({ result }: { result: RagSearchResult }) {
             </span>
           )}
           <span className="flex min-w-0 flex-wrap items-center gap-1">
-            {conversation.state && (
-              <Badge
-                variant="outline"
-                className={cn("capitalize", stateClass)}
-              >
-                {conversation.state}
-              </Badge>
-            )}
+            <StateBadge state={conversation.state} />
             {conversation.tags.slice(0, MAX_TAGS).map((tag) => (
               <Badge key={tag} variant="secondary">
                 {tag}

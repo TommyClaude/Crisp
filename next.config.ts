@@ -1,14 +1,9 @@
 import type { NextConfig } from "next";
 
 const nextConfig: NextConfig = {
-  // Crisp-hosted avatars and file attachments are served from these hosts.
-  images: {
-    remotePatterns: [
-      { protocol: "https", hostname: "image.crisp.chat" },
-      { protocol: "https", hostname: "storage.crisp.chat" },
-      { protocol: "https", hostname: "client.crisp.chat" },
-    ],
-  },
+  // Avatars and attachments intentionally render via plain <img>, not
+  // next/image: Crisp file URLs are signed, short-lived and can point at
+  // arbitrary hosts, which the image optimizer would reject.
 };
 
 export default nextConfig;

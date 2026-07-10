@@ -15,17 +15,9 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { Switch } from "@/components/ui/switch";
-
-const KNOWN_PRODUCTS = [
-  "FileBird",
-  "YayMail",
-  "YayCurrency",
-  "YaySMTP",
-  "Brandy",
-  "YayCommerce",
-  "WooCommerce",
-  "WordPress",
-];
+// Client-safe pure module — keeps the filter options in lockstep with the
+// products the chunker actually detects and stores.
+import { KNOWN_PRODUCTS } from "@/lib/rag/products";
 
 const FILTER_KEYS = [
   "search",

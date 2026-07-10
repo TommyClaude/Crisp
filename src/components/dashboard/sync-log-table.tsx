@@ -105,7 +105,12 @@ export function SyncLogTable({ logs }: { logs: SerializedSyncLog[] }) {
             <TableCell>
               <StatusBadge status={log.status} />
             </TableCell>
-            <TableCell className="text-muted-foreground tabular-nums">
+            {/* Local-timezone formatting differs between server and browser;
+                suppress the expected hydration diff on this cell. */}
+            <TableCell
+              className="text-muted-foreground tabular-nums"
+              suppressHydrationWarning
+            >
               {formatStarted(log.startedAt)}
             </TableCell>
             <TableCell className="text-muted-foreground tabular-nums">

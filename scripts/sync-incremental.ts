@@ -9,10 +9,24 @@ import "dotenv/config";
 import { runIncrementalSync } from "../src/lib/sync/sync-service";
 import { prisma } from "../src/lib/db";
 
+function parsePageArg(): number | undefined {
+  const arg = process.argv.find((a) => a.startsWith("--page="));
+  if (!arg) return undefined;
+  const page = Number(arg.split("=")[1]);
+  if (!Number.isInteger(page) || page < 1) {
+    console.error(`Invalid --page value: ${arg}`);
+    process.exit(1);
+  }
+  return page;
+}
+
 async function main() {
-  console.log("Starting incremental Crisp sync...");
+  const startPage = parsePageArg();
+  console.log(
+    `Starting incremental Crisp sync${startPage ? ` from page ${startPage}` : ""}...`
+  );
   try {
-    const result = await runIncrementalSync();
+    const result = await runIncrementalSync({ startPage });
     console.log(
       `Sync ${result.status}: ${result.conversationsSynced} conversations, ${result.messagesSynced} messages (log ${result.syncLogId})`
     );

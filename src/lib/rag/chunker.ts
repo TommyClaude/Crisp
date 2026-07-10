@@ -156,7 +156,12 @@ export function buildChunksForConversation(
 
   const header: Record<string, string> = { session: conversation.sessionId, date };
   if (product) header.product = product;
-  if (conversation.tags.length > 0) header.tags = conversation.tags.join(", ");
+  if (conversation.tags.length > 0) {
+    // Crisp segments are operator-entered free text — teams sometimes tag
+    // conversations with a customer email or order/phone identifier, so tags
+    // go through the same redaction as the body.
+    header.tags = redactText(conversation.tags.join(", "));
+  }
   if (language) header.language = language;
   const headerText = Object.entries(header)
     .map(([k, v]) => `${k[0].toUpperCase()}${k.slice(1)}: ${v}`)
@@ -173,8 +178,10 @@ export function buildChunksForConversation(
     if (bodyParts.length === 0) return;
     const body = bodyParts.join("\n\n");
     for (const piece of splitLongText(body, MAX_CHUNK_CHARS * 1.5)) {
-      // Only the body is redacted — the header is assembled from known-safe
-      // metadata (sessionId, date, product, tags, language).
+      // The body is redacted above and tags were redacted when the header was
+      // built; the remaining header fields (sessionId, date, product,
+      // language) are system-generated and must survive verbatim — running
+      // redactText over the full header would mangle the session UUID.
       chunks.push({
         chunkIndex: chunks.length,
         messageIds,

@@ -222,6 +222,21 @@ async function runSync(options: RunSyncOptions): Promise<SyncRunResult> {
     throw new Error("A sync is already running");
   }
 
+  // DB-level single-flight guard: the in-memory flag above only protects one
+  // process; a CLI run and the web app (or two app instances) share the DB.
+  // Runs older than the staleness window are assumed crashed and ignored.
+  const staleBefore = new Date(Date.now() - 6 * 60 * 60 * 1000);
+  const activeRun = await prisma.syncLog.findFirst({
+    where: { status: "running", startedAt: { gte: staleBefore } },
+    select: { id: true, startedAt: true },
+  });
+  if (activeRun) {
+    throw new Error(
+      `A sync appears to be running already (SyncLog ${activeRun.id}, started ${activeRun.startedAt.toISOString()}). ` +
+        "If that run crashed, mark it failed or wait for it to be considered stale."
+    );
+  }
+
   const syncLog = await prisma.syncLog.create({
     data: {
       kind: options.kind,
@@ -257,6 +272,12 @@ async function runSync(options: RunSyncOptions): Promise<SyncRunResult> {
       const conversations = await client.listConversations(page);
       if (!conversations || conversations.length === 0) break;
 
+      // Incremental mode: the list is roughly newest-activity-first, but
+      // Crisp's sort key (activity) is not identical to updated_at, so a
+      // single stale conversation must not end the run. Instead, skip stale
+      // conversations individually and stop once an ENTIRE page is stale.
+      let sawFreshConversation = false;
+
       for (const conversation of conversations) {
         if (state.cancelRequested) {
           status = "cancelled";
@@ -265,16 +286,14 @@ async function runSync(options: RunSyncOptions): Promise<SyncRunResult> {
         const sessionId = conversation.session_id;
         if (!sessionId) continue;
 
-        // Incremental mode: list is sorted by recent activity, so the first
-        // conversation older than the checkpoint ends the whole run.
         if (
           updatedSinceMs !== null &&
           typeof conversation.updated_at === "number" &&
           conversation.updated_at < updatedSinceMs
         ) {
-          reachedCheckpoint = true;
-          break;
+          continue;
         }
+        sawFreshConversation = true;
 
         state.lastSessionId = sessionId;
         state.statusMessage = `syncing ${sessionId} (page ${page})`;
@@ -307,7 +326,50 @@ async function runSync(options: RunSyncOptions): Promise<SyncRunResult> {
           failedSessions: state.failedSessions,
         },
       });
+      if (updatedSinceMs !== null && !sawFreshConversation) {
+        reachedCheckpoint = true;
+      }
       page += 1;
+    }
+
+    // Retry pass: transient per-conversation failures usually heal on a
+    // second attempt. Anything that still fails downgrades the run to
+    // "failed" so the incremental checkpoint does not advance past it —
+    // otherwise a conversation that never gets touched again would be
+    // permanently missing from the archive.
+    if (status === "completed" && state.failedSessions.length > 0) {
+      const stillFailed: string[] = [];
+      for (const sessionId of state.failedSessions) {
+        if (state.cancelRequested) {
+          stillFailed.push(sessionId);
+          continue;
+        }
+        state.statusMessage = `retrying failed conversation ${sessionId}`;
+        try {
+          const conversation = await client.getConversation(sessionId);
+          const messages = await client.getAllMessages(sessionId);
+          const result = await syncConversationPayload(conversation, messages);
+          state.conversationsSynced += 1;
+          state.messagesSynced += result.messageCount;
+          if (conversation.state === "resolved") {
+            try {
+              await rebuildChunksForConversation(result.conversationId);
+            } catch (error) {
+              console.warn(`Chunk rebuild failed for ${sessionId}:`, error);
+            }
+          }
+        } catch (error) {
+          console.error(`Retry failed for conversation ${sessionId}:`, error);
+          stillFailed.push(sessionId);
+        }
+      }
+      state.failedSessions = stillFailed;
+      if (stillFailed.length > 0) {
+        status = "failed";
+        errorMessage =
+          `${stillFailed.length} conversation(s) failed after retry; ` +
+          "the incremental checkpoint was not advanced. See failedSessions.";
+      }
     }
   } catch (error) {
     status = "failed";
@@ -348,16 +410,22 @@ export function runFullSync(options?: { startPage?: number }): Promise<SyncRunRe
  * (with a one-hour overlap). Falls back to a full sync when no successful
  * run exists yet.
  */
-export async function runIncrementalSync(): Promise<SyncRunResult> {
+export async function runIncrementalSync(options?: {
+  startPage?: number;
+}): Promise<SyncRunResult> {
   const lastSuccess = await prisma.syncLog.findFirst({
     where: { status: "completed", kind: { in: ["full", "incremental"] } },
     orderBy: { startedAt: "desc" },
   });
   if (!lastSuccess) {
-    return runSync({ kind: "full" });
+    return runSync({ kind: "full", startPage: options?.startPage });
   }
   const updatedSince = new Date(
     lastSuccess.startedAt.getTime() - INCREMENTAL_OVERLAP_MS
   );
-  return runSync({ kind: "incremental", updatedSince });
+  return runSync({
+    kind: "incremental",
+    updatedSince,
+    startPage: options?.startPage,
+  });
 }

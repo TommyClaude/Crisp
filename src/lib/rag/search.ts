@@ -54,10 +54,13 @@ export async function hasPgvector(): Promise<boolean> {
       LIMIT 1
     `;
     pgvectorAvailable = rows.length > 0;
-  } catch {
-    pgvectorAvailable = false;
+    return pgvectorAvailable;
+  } catch (error) {
+    // A transient DB error must not pin a pgvector-enabled database to the
+    // slow fallback path for the process lifetime — only cache success.
+    console.error("pgvector detection failed (will retry next call):", error);
+    return false;
   }
-  return pgvectorAvailable;
 }
 
 /** Format a float array as a pgvector literal: [0.1,0.2,...]. */
@@ -74,20 +77,23 @@ export async function storeChunkEmbeddings(
   vectors: number[][]
 ): Promise<void> {
   const usePgvector = await hasPgvector();
-  for (let i = 0; i < chunkIds.length; i++) {
-    if (usePgvector) {
-      await prisma.$executeRaw`
-        UPDATE "EmbeddingChunk"
-        SET embedding = ${toVectorLiteral(vectors[i])}::vector,
-            "embeddingJson" = NULL
-        WHERE id = ${chunkIds[i]}
-      `;
-    } else {
-      await prisma.embeddingChunk.update({
-        where: { id: chunkIds[i] },
-        data: { embeddingJson: vectors[i] },
-      });
-    }
+  const writes = chunkIds.map((id, i) =>
+    usePgvector
+      ? prisma.$executeRaw`
+          UPDATE "EmbeddingChunk"
+          SET embedding = ${toVectorLiteral(vectors[i])}::vector,
+              "embeddingJson" = NULL
+          WHERE id = ${id}
+        `
+      : prisma.embeddingChunk.update({
+          where: { id },
+          data: { embeddingJson: vectors[i] },
+        })
+  );
+  // Batch the row updates to avoid one DB round-trip per chunk.
+  const BATCH = 25;
+  for (let i = 0; i < writes.length; i += BATCH) {
+    await prisma.$transaction(writes.slice(i, i + BATCH));
   }
 }
 
@@ -208,7 +214,10 @@ async function keywordCandidateIds(
       .filter((t) => t.length > 1);
     if (terms.length < 2) return [];
     return await runFullTextQuery(terms.join(" OR "), limit);
-  } catch {
+  } catch (error) {
+    // Don't silently degrade to "no results" when the SQL itself is broken
+    // (e.g. FTS migration not applied) — surface it in the logs.
+    console.error("Full-text chunk search failed:", error);
     return [];
   }
 }
@@ -243,7 +252,13 @@ async function keywordSearch(
   });
 }
 
-/** Cosine re-ranking over JSON-stored embeddings (no pgvector). */
+/**
+ * Cosine re-ranking over JSON-stored embeddings (no pgvector).
+ * Candidates are fetched with a slim select (id + embedding only); the full
+ * chunk rows and conversations are hydrated only for the top-k winners, so a
+ * query never drags thousands of chunk texts across the wire. For large
+ * archives, enable pgvector (prisma/sql/enable-pgvector.sql) instead.
+ */
 async function hybridSearch(
   query: string,
   queryVector: number[],
@@ -258,13 +273,13 @@ async function hybridSearch(
         ? { id: { in: prefilterIds }, embeddingJson: { not: Prisma.DbNull } }
         : { embeddingJson: { not: Prisma.DbNull } },
     orderBy: { createdAt: "desc" },
-    take: 2000,
-    include: { conversation: { select: conversationSelect } },
+    take: 1000,
+    select: { id: true, embeddingJson: true },
   });
 
-  const scored = candidates
+  const winners = candidates
     .map((chunk) => ({
-      chunk,
+      id: chunk.id,
       similarity: cosineSimilarity(
         queryVector,
         (chunk.embeddingJson as number[]) ?? []
@@ -272,10 +287,17 @@ async function hybridSearch(
     }))
     .sort((a, b) => b.similarity - a.similarity)
     .slice(0, limit);
+  if (winners.length === 0) return [];
 
-  return scored.map(({ chunk, similarity }) =>
-    toResult(chunk, chunk.conversation, similarity)
-  );
+  const chunks = await prisma.embeddingChunk.findMany({
+    where: { id: { in: winners.map((w) => w.id) } },
+    include: { conversation: { select: conversationSelect } },
+  });
+  const byId = new Map(chunks.map((c) => [c.id, c]));
+  return winners.flatMap(({ id, similarity }) => {
+    const chunk = byId.get(id);
+    return chunk ? [toResult(chunk, chunk.conversation, similarity)] : [];
+  });
 }
 
 export async function ragSearch(

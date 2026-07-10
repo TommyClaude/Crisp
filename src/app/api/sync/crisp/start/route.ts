@@ -47,7 +47,7 @@ export async function POST(request: NextRequest) {
   const { mode, startPage } = parsed.data;
   const run =
     mode === "incremental"
-      ? runIncrementalSync()
+      ? runIncrementalSync({ startPage })
       : runFullSync({ startPage });
   // Fire-and-forget: the run updates SyncLog + in-memory progress itself.
   run.catch((error) => console.error("Background sync failed:", error));

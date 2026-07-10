@@ -34,25 +34,19 @@ export async function rebuildChunksForConversation(
   const created = await prisma.$transaction(async (tx) => {
     await tx.embeddingChunk.deleteMany({ where: { conversationId } });
     if (chunks.length === 0) return [] as Array<{ id: string; chunkText: string }>;
-    const rows = [];
-    for (const chunk of chunks) {
-      rows.push(
-        await tx.embeddingChunk.create({
-          data: {
-            conversationId,
-            chunkIndex: chunk.chunkIndex,
-            messageIds: chunk.messageIds,
-            chunkText: chunk.chunkText,
-            product: chunk.product,
-            topic: chunk.topic,
-            language: chunk.language,
-            rawJson: chunk.rawJson,
-          },
-          select: { id: true, chunkText: true },
-        })
-      );
-    }
-    return rows;
+    return tx.embeddingChunk.createManyAndReturn({
+      data: chunks.map((chunk) => ({
+        conversationId,
+        chunkIndex: chunk.chunkIndex,
+        messageIds: chunk.messageIds,
+        chunkText: chunk.chunkText,
+        product: chunk.product,
+        topic: chunk.topic,
+        language: chunk.language,
+        rawJson: chunk.rawJson,
+      })),
+      select: { id: true, chunkText: true },
+    });
   });
 
   const wantEmbeddings = options?.withEmbeddings ?? true;
