@@ -7,6 +7,7 @@ import {
 } from "@/components/conversations/conversation-row";
 import { ConversationFilters } from "@/components/conversations/filters";
 import { ListPagination } from "@/components/conversations/list-pagination";
+import { CrispTabs } from "@/components/crisp/crisp-tabs";
 import { getFilterOptions, listConversations } from "@/lib/conversations";
 
 export const dynamic = "force-dynamic";
@@ -70,12 +71,15 @@ export default async function ConversationsPage({
 
   return (
     <div className="mx-auto w-full max-w-7xl px-6 py-8">
-      <header className="mb-6">
-        <h1 className="text-2xl font-semibold tracking-tight">Conversations</h1>
-        <p className="text-muted-foreground mt-1 text-sm">
-          {result.total.toLocaleString("en-US")}{" "}
-          {result.total === 1 ? "archived conversation" : "archived conversations"}
-        </p>
+      <header className="mb-6 space-y-4">
+        <div>
+          <h1 className="text-2xl font-semibold tracking-tight">Crisp</h1>
+          <p className="text-muted-foreground mt-1 text-sm">
+            {result.total.toLocaleString("en-US")}{" "}
+            {result.total === 1 ? "archived conversation" : "archived conversations"}
+          </p>
+        </div>
+        <CrispTabs />
       </header>
 
       <div className="flex flex-col gap-6 md:flex-row md:items-start">

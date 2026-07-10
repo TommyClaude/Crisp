@@ -134,7 +134,7 @@ export default async function ConversationDetailPage({
       <header className="bg-background/90 supports-[backdrop-filter]:bg-background/75 sticky top-0 z-10 border-b backdrop-blur">
         <div className="flex items-center gap-3 px-6 py-3">
           <Link
-            href="/conversations"
+            href="/crisp/conversations"
             aria-label="Back to conversations"
             className="text-muted-foreground hover:bg-accent hover:text-foreground -ml-2 shrink-0 rounded-md p-1.5 transition-colors"
           >

@@ -38,7 +38,7 @@ export function ConversationRow({ item }: { item: ConversationRowItem }) {
 
   return (
     <Link
-      href={`/conversations/${item.sessionId}`}
+      href={`/crisp/conversations/${item.sessionId}`}
       className="hover:bg-muted flex items-start gap-3 px-4 py-3 transition-colors"
     >
       <Avatar className="mt-0.5 size-9">

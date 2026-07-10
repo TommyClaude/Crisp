@@ -203,13 +203,14 @@ export async function getFilterOptions(): Promise<{
   };
 }
 
-/** Aggregate stats for the dashboard. */
+/** Aggregate stats for the Crisp dashboard tab. */
 export async function getDashboardStats() {
   const [
     totalConversations,
     totalMessages,
     totalChunks,
     resolvedCount,
+    brandCount,
     lastSync,
     recentLogs,
   ] = await Promise.all([
@@ -217,6 +218,7 @@ export async function getDashboardStats() {
     prisma.message.count(),
     prisma.embeddingChunk.count(),
     prisma.conversation.count({ where: { state: "resolved" } }),
+    prisma.brand.count(),
     prisma.syncLog.findFirst({
       where: { status: "completed" },
       orderBy: { finishedAt: "desc" },
@@ -228,6 +230,7 @@ export async function getDashboardStats() {
     totalMessages,
     totalChunks,
     resolvedCount,
+    brandCount,
     lastSync,
     recentLogs,
   };

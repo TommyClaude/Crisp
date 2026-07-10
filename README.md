@@ -136,7 +136,7 @@ Only syncs conversations updated since the last successful run, with a 1-hour ov
 
 ### From the dashboard
 
-`/dashboard` has **Full sync**, **Incremental sync** and **Stop** buttons backed by `POST /api/sync/crisp/start` and `POST /api/sync/crisp/stop`, with live progress from `GET /api/sync/crisp/status`. Only one sync can run at a time (a second start returns `409`). Stop is graceful: the conversation in flight finishes, progress is persisted, and the log is marked `cancelled`.
+`/crisp/dashboard` has **Full sync**, **Incremental sync** and **Stop** buttons backed by `POST /api/sync/crisp/start` and `POST /api/sync/crisp/stop`, with live progress from `GET /api/sync/crisp/status`. Only one sync can run at a time (a second start returns `409`). Stop is graceful: the conversation in flight finishes, progress is persisted, and the log is marked `cancelled`.
 
 ### Reliability details
 
@@ -220,9 +220,10 @@ All routes require Basic auth (see Security). All bodies/queries are Zod-validat
 
 | Page | What it shows |
 | --- | --- |
-| `/dashboard` | Totals (conversations, messages, chunks, resolved), sync controls with live progress, recent sync log table |
-| `/conversations` | Filterable, paginated conversation list (state, tag, product, operator, email, attachments, date range, search) |
-| `/conversations/{sessionId}` | Chat-style message log with attachments, visitor panel (masked PII), resync/rebuild actions, chunk summaries |
+| `/dashboard` | Global overview: open threads / drafts ready / reviewed, knowledge-chunk totals (chats vs docs), latest forum threads, knowledge-source summary |
+| `/crisp/dashboard` | Crisp tab: conversation/message/brand totals, sync controls with live progress, recent sync log table |
+| `/crisp/conversations` | Crisp tab: filterable, paginated conversation list (state, tag, product, brand, operator, email, attachments, date range, search) |
+| `/crisp/conversations/{sessionId}` | Chat-style message log with attachments, visitor panel (masked PII), resync/rebuild actions, chunk summaries |
 | `/rag` | Search playground: query the chunk store (all sources / chats only / docs only), see mode + similarity scores + source conversation or docs-page links |
 | `/brands` | Manage brands — one per Crisp website; the sync covers every brand listed |
 | `/plugins` | Manage plugins per brand (detection keywords, wp.org slug) and their docs sources, with one-click ingest and live crawl status |

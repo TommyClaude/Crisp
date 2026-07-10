@@ -48,7 +48,7 @@ function toContextSummary(result: RagSearchResult): ContextChunkSummary {
       ? `Chat with ${result.conversation.visitorNickname ?? "visitor"} (${result.conversation.sessionId})`
       : "Archived chat",
     link: result.conversation
-      ? `/conversations/${result.conversation.sessionId}`
+      ? `/crisp/conversations/${result.conversation.sessionId}`
       : null,
     excerpt: result.chunkText.slice(0, 400),
     product: result.product,

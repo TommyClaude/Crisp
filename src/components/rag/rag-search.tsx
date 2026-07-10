@@ -350,7 +350,7 @@ function ResultCard({ result }: { result: RagSearchResult }) {
           {conversation ? (
             <>
               <Link
-                href={`/conversations/${conversation.sessionId}`}
+                href={`/crisp/conversations/${conversation.sessionId}`}
                 className="group text-foreground flex min-w-0 items-center gap-1.5 font-medium transition-colors hover:text-blue-600 dark:hover:text-blue-400"
               >
                 <MessagesSquare className="text-muted-foreground size-3.5 transition-colors group-hover:text-blue-600 dark:group-hover:text-blue-400" />

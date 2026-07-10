@@ -37,6 +37,42 @@ export function StateBadge({
   );
 }
 
+/**
+ * Single source of truth for support-thread / suggestion statuses
+ * (used on the global dashboard and the Suggestions page).
+ */
+const THREAD_STATUS_STYLES: Record<string, string> = {
+  new: "border-transparent bg-blue-100 text-blue-700 dark:bg-blue-500/15 dark:text-blue-400",
+  drafted:
+    "border-transparent bg-violet-100 text-violet-700 dark:bg-violet-500/15 dark:text-violet-400",
+  failed:
+    "border-transparent bg-red-100 text-red-700 dark:bg-red-500/15 dark:text-red-400",
+  reviewed:
+    "border-transparent bg-emerald-100 text-emerald-700 dark:bg-emerald-500/15 dark:text-emerald-400",
+  dismissed:
+    "border-transparent bg-zinc-100 text-zinc-600 dark:bg-zinc-500/15 dark:text-zinc-400",
+};
+
+export function ThreadStatusBadge({
+  status,
+  className,
+}: {
+  status: string;
+  className?: string;
+}) {
+  return (
+    <Badge
+      className={cn(
+        "capitalize",
+        THREAD_STATUS_STYLES[status] ?? THREAD_STATUS_STYLES.new,
+        className
+      )}
+    >
+      {status}
+    </Badge>
+  );
+}
+
 /** Avatar-fallback initials derived from a nickname or email. */
 export function initialsOf(
   nickname: string | null | undefined,

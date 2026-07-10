@@ -19,6 +19,7 @@ import {
 } from "lucide-react";
 import { toast } from "sonner";
 
+import { ThreadStatusBadge } from "@/components/state-badge";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
@@ -34,7 +35,6 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import { cn } from "@/lib/utils";
 
 export interface ContextChunkItem {
   source: "crisp_chat" | "plugin_docs";
@@ -60,16 +60,6 @@ export interface SuggestionThreadItem {
   fetchedAt: string;
   plugin: { id: string; name: string };
 }
-
-const STATUS_STYLES: Record<string, string> = {
-  new: "bg-blue-100 text-blue-700 dark:bg-blue-500/15 dark:text-blue-400",
-  drafted:
-    "bg-violet-100 text-violet-700 dark:bg-violet-500/15 dark:text-violet-400",
-  failed: "bg-red-100 text-red-700 dark:bg-red-500/15 dark:text-red-400",
-  reviewed:
-    "bg-emerald-100 text-emerald-700 dark:bg-emerald-500/15 dark:text-emerald-400",
-  dismissed: "bg-zinc-100 text-zinc-600 dark:bg-zinc-500/15 dark:text-zinc-400",
-};
 
 const STATUS_FILTERS = ["all", "new", "drafted", "failed", "reviewed", "dismissed"];
 const ALL = "__all__";
@@ -238,14 +228,7 @@ function ThreadCard({ thread }: { thread: SuggestionThreadItem }) {
     <Card className="gap-3 py-4">
       <CardHeader className="px-4">
         <div className="flex min-w-0 flex-wrap items-center gap-2">
-          <Badge
-            className={cn(
-              "border-transparent capitalize",
-              STATUS_STYLES[thread.status] ?? STATUS_STYLES.new
-            )}
-          >
-            {thread.status}
-          </Badge>
+          <ThreadStatusBadge status={thread.status} />
           <Badge variant="secondary">{thread.plugin.name}</Badge>
           {thread.publishedAt ? (
             <span className="text-muted-foreground text-xs" suppressHydrationWarning>

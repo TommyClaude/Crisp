@@ -16,9 +16,9 @@ import { cn } from "@/lib/utils";
 
 const NAV_LINKS = [
   { href: "/dashboard", label: "Dashboard", icon: LayoutDashboard },
-  { href: "/conversations", label: "Conversations", icon: MessagesSquare },
-  { href: "/rag", label: "RAG Search", icon: Sparkles },
   { href: "/suggestions", label: "Suggestions", icon: Lightbulb },
+  { href: "/crisp", label: "Crisp", icon: MessagesSquare },
+  { href: "/rag", label: "RAG Search", icon: Sparkles },
   { href: "/brands", label: "Brands", icon: Building2 },
   { href: "/plugins", label: "Plugins & Docs", icon: Package },
 ] as const;
