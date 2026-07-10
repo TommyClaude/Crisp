@@ -2,6 +2,7 @@ import { prisma } from "@/lib/db";
 import { embeddingsConfigured } from "@/env";
 import { buildChunksForConversation } from "./chunker";
 import { embedTexts } from "./embeddings";
+import { getProductDefinitions } from "./product-defs";
 import { storeChunkEmbeddings } from "./search";
 
 export interface RebuildResult {
@@ -28,7 +29,8 @@ export async function rebuildChunksForConversation(
 
   const chunks = buildChunksForConversation(
     conversation,
-    conversation.messages
+    conversation.messages,
+    await getProductDefinitions()
   );
 
   const created = await prisma.$transaction(async (tx) => {

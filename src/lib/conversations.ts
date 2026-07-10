@@ -1,5 +1,6 @@
 import { Prisma } from "@prisma/client";
 import { prisma } from "@/lib/db";
+import { KNOWN_PRODUCTS } from "@/lib/rag/products";
 
 /** Filterable, paginated conversation listing for the admin UI and API. */
 
@@ -9,6 +10,7 @@ export interface ConversationListFilters {
   state?: string;
   tag?: string;
   product?: string;
+  brandId?: string;
   email?: string;
   operatorId?: string;
   hasAttachment?: boolean;
@@ -73,6 +75,7 @@ export async function listConversations(
   const and: Prisma.ConversationWhereInput[] = [];
 
   if (filters.state) where.state = filters.state;
+  if (filters.brandId) where.brandId = filters.brandId;
   if (filters.tag) where.tags = { has: filters.tag };
   if (filters.email) {
     where.visitorEmail = { contains: filters.email, mode: "insensitive" };
@@ -166,8 +169,10 @@ export async function getFilterOptions(): Promise<{
   states: string[];
   tags: string[];
   operators: Array<{ crispUserId: string; name: string | null }>;
+  brands: Array<{ id: string; name: string }>;
+  products: string[];
 }> {
-  const [states, tagRows, operators] = await Promise.all([
+  const [states, tagRows, operators, brands, plugins] = await Promise.all([
     prisma.conversation.findMany({
       where: { state: { not: null } },
       select: { state: true },
@@ -180,11 +185,21 @@ export async function getFilterOptions(): Promise<{
       select: { crispUserId: true, name: true },
       orderBy: { name: "asc" },
     }),
+    prisma.brand.findMany({
+      select: { id: true, name: true },
+      orderBy: { name: "asc" },
+    }),
+    prisma.plugin.findMany({ select: { name: true }, orderBy: { name: "asc" } }),
   ]);
   return {
     states: states.map((s) => s.state!).filter(Boolean).sort(),
     tags: tagRows.map((t) => t.tag),
     operators,
+    brands,
+    // Product options come from managed plugins; fall back to the built-in
+    // detector list on a fresh install.
+    products:
+      plugins.length > 0 ? plugins.map((p) => p.name) : [...KNOWN_PRODUCTS],
   };
 }
 

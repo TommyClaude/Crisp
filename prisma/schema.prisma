@@ -15,9 +15,82 @@ datasource db {
   url      = env("DATABASE_URL")
 }
 
+// A brand = one Crisp website (e.g. YayCommerce, Ninja Team). Sync iterates
+// all brands; CRISP_WEBSITE_ID in .env is only a legacy single-site fallback
+// used when this table is empty.
+model Brand {
+  id             String   @id @default(cuid())
+  name           String
+  slug           String   @unique
+  domain         String?
+  crispWebsiteId String   @unique
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  plugins       Plugin[]
+  conversations Conversation[]
+}
+
+// A product/plugin owned by a brand (FileBird, YayMail...). Detection
+// keywords drive product tagging of chunks; wpOrgSlug is reserved for the
+// future wp.org forum watcher.
+model Plugin {
+  id                String   @id @default(cuid())
+  brandId           String
+  brand             Brand    @relation(fields: [brandId], references: [id], onDelete: Cascade)
+  name              String   @unique
+  slug              String   @unique
+  wpOrgSlug         String?
+  detectionKeywords String[] @default([])
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+
+  docsSources DocsSource[]
+  chunks      EmbeddingChunk[]
+
+  @@index([brandId])
+}
+
+// A crawlable documentation source for a plugin (site URL or sitemap.xml).
+model DocsSource {
+  id            String    @id @default(cuid())
+  pluginId      String
+  plugin        Plugin    @relation(fields: [pluginId], references: [id], onDelete: Cascade)
+  type          String    @default("url") // url (same-path crawl) | sitemap
+  url           String
+  status        String    @default("idle") // idle | crawling | completed | failed
+  lastCrawledAt DateTime?
+  pageCount     Int       @default(0)
+  chunkCount    Int       @default(0)
+  error         String?
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+
+  pages DocsPage[]
+
+  @@index([pluginId])
+}
+
+model DocsPage {
+  id            String     @id @default(cuid())
+  docsSourceId  String
+  docsSource    DocsSource @relation(fields: [docsSourceId], references: [id], onDelete: Cascade)
+  url           String
+  title         String?
+  contentText   String
+  contentHash   String // sha256 of contentText — unchanged pages keep their chunks
+  lastCrawledAt DateTime   @default(now())
+
+  chunks EmbeddingChunk[]
+
+  @@unique([docsSourceId, url])
+}
+
 model Conversation {
   id                 String    @id @default(cuid())
   websiteId          String
+  brandId            String?
+  brand              Brand?    @relation(fields: [brandId], references: [id], onDelete: SetNull)
   sessionId          String    @unique
   state              String? // pending | unresolved | resolved
   inbox              String?
@@ -45,6 +118,7 @@ model Conversation {
   chunks   EmbeddingChunk[]
 
   @@index([websiteId])
+  @@index([brandId])
   @@index([state])
   @@index([visitorEmail])
   @@index([updatedAtCrisp])
@@ -115,11 +189,16 @@ model ConversationFile {
 }
 
 model EmbeddingChunk {
-  id             String       @id @default(cuid())
-  conversationId String
-  conversation   Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
-  chunkIndex     Int          @default(0)
-  messageIds     String[]     @default([])
+  id             String        @id @default(cuid())
+  source         String        @default("crisp_chat") // crisp_chat | plugin_docs
+  conversationId String?
+  conversation   Conversation? @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  pluginId       String?
+  plugin         Plugin?       @relation(fields: [pluginId], references: [id], onDelete: SetNull)
+  docsPageId     String?
+  docsPage       DocsPage?     @relation(fields: [docsPageId], references: [id], onDelete: Cascade)
+  chunkIndex     Int           @default(0)
+  messageIds     String[]      @default([])
   chunkText      String
   product        String?
   topic          String?
@@ -129,9 +208,12 @@ model EmbeddingChunk {
   // when pgvector is available.
   embeddingJson  Json?
   rawJson        Json?
-  createdAt      DateTime     @default(now())
+  createdAt      DateTime      @default(now())
 
   @@index([conversationId])
+  @@index([source])
+  @@index([pluginId])
+  @@index([docsPageId])
   @@index([product])
   @@index([language])
 }

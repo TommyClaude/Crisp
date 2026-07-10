@@ -40,14 +40,12 @@ function sleep(ms: number): Promise<void> {
  */
 export class CrispClient {
   private readonly authHeader: string;
-  private readonly websiteId: string;
   private readonly minIntervalMs: number;
   private readonly maxRetries: number;
   private lastRequestAt = 0;
   private queue: Promise<unknown> = Promise.resolve();
 
   constructor(options?: {
-    websiteId?: string;
     identifier?: string;
     key?: string;
     minIntervalMs?: number;
@@ -56,7 +54,6 @@ export class CrispClient {
     const env = getEnv();
     const identifier = options?.identifier ?? env.CRISP_IDENTIFIER;
     const key = options?.key ?? env.CRISP_KEY;
-    this.websiteId = options?.websiteId ?? env.CRISP_WEBSITE_ID;
     this.minIntervalMs =
       options?.minIntervalMs ?? env.CRISP_REQUEST_INTERVAL_MS;
     this.maxRetries = options?.maxRetries ?? env.CRISP_MAX_RETRIES;
@@ -165,16 +162,22 @@ export class CrispClient {
   }
 
   /** List conversations, most recently active first. Page starts at 1. */
-  listConversations(page: number): Promise<CrispConversation[]> {
+  listConversations(
+    websiteId: string,
+    page: number
+  ): Promise<CrispConversation[]> {
     return this.request<CrispConversation[]>(
-      crispEndpoints.listConversations(this.websiteId, page)
+      crispEndpoints.listConversations(websiteId, page)
     );
   }
 
   /** Fetch a single conversation (includes meta and assignment). */
-  getConversation(sessionId: string): Promise<CrispConversation> {
+  getConversation(
+    websiteId: string,
+    sessionId: string
+  ): Promise<CrispConversation> {
     return this.request<CrispConversation>(
-      crispEndpoints.getConversation(this.websiteId, sessionId)
+      crispEndpoints.getConversation(websiteId, sessionId)
     );
   }
 
@@ -183,11 +186,12 @@ export class CrispClient {
    * Pass `timestampBefore` (ms epoch) to fetch older messages.
    */
   getMessagesBatch(
+    websiteId: string,
     sessionId: string,
     timestampBefore?: number
   ): Promise<CrispMessage[]> {
     return this.request<CrispMessage[]>(
-      crispEndpoints.getMessages(this.websiteId, sessionId),
+      crispEndpoints.getMessages(websiteId, sessionId),
       { timestamp_before: timestampBefore }
     );
   }
@@ -197,14 +201,21 @@ export class CrispClient {
    * `timestamp_before` until an empty/repeated batch is returned.
    * Result is sorted by timestamp ascending.
    */
-  async getAllMessages(sessionId: string): Promise<CrispMessage[]> {
+  async getAllMessages(
+    websiteId: string,
+    sessionId: string
+  ): Promise<CrispMessage[]> {
     const seen = new Map<string, CrispMessage>();
     let timestampBefore: number | undefined = undefined;
     // Hard cap as a safety net against pathological pagination loops.
     const MAX_BATCHES = 500;
 
     for (let i = 0; i < MAX_BATCHES; i++) {
-      const batch = await this.getMessagesBatch(sessionId, timestampBefore);
+      const batch = await this.getMessagesBatch(
+        websiteId,
+        sessionId,
+        timestampBefore
+      );
       if (!batch || batch.length === 0) break;
 
       let added = 0;
@@ -236,11 +247,12 @@ export class CrispClient {
 
   /** Fetch conversation metas. Returns null when the endpoint is unavailable. */
   async getConversationMetas(
+    websiteId: string,
     sessionId: string
   ): Promise<CrispConversationMeta | null> {
     try {
       return await this.request<CrispConversationMeta>(
-        crispEndpoints.getConversationMetas(this.websiteId, sessionId)
+        crispEndpoints.getConversationMetas(websiteId, sessionId)
       );
     } catch (error) {
       if (error instanceof CrispApiError && error.status === 404) return null;
@@ -249,10 +261,10 @@ export class CrispClient {
   }
 
   /** List operators; returns [] when the endpoint/scope is unavailable. */
-  async listOperators(): Promise<CrispOperatorListEntry[]> {
+  async listOperators(websiteId: string): Promise<CrispOperatorListEntry[]> {
     try {
       return await this.request<CrispOperatorListEntry[]>(
-        crispEndpoints.listOperators(this.websiteId)
+        crispEndpoints.listOperators(websiteId)
       );
     } catch {
       return [];

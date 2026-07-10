@@ -15,15 +15,13 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { Switch } from "@/components/ui/switch";
-// Client-safe pure module — keeps the filter options in lockstep with the
-// products the chunker actually detects and stores.
-import { KNOWN_PRODUCTS } from "@/lib/rag/products";
 
 const FILTER_KEYS = [
   "search",
   "state",
   "tag",
   "product",
+  "brandId",
   "email",
   "operatorId",
   "hasAttachment",
@@ -38,12 +36,16 @@ interface ConversationFiltersProps {
   states: string[];
   tags: string[];
   operators: Array<{ crispUserId: string; name: string | null }>;
+  brands: Array<{ id: string; name: string }>;
+  products: string[];
 }
 
 export function ConversationFilters({
   states,
   tags,
   operators,
+  brands,
+  products,
 }: ConversationFiltersProps) {
   const router = useRouter();
   const pathname = usePathname();
@@ -171,7 +173,7 @@ export function ConversationFilters({
           </SelectTrigger>
           <SelectContent>
             <SelectItem value={ALL}>All products</SelectItem>
-            {KNOWN_PRODUCTS.map((product) => (
+            {products.map((product) => (
               <SelectItem key={product} value={product}>
                 {product}
               </SelectItem>
@@ -179,6 +181,33 @@ export function ConversationFilters({
           </SelectContent>
         </Select>
       </div>
+
+      {brands.length > 0 ? (
+        <div className="space-y-1.5">
+          <Label
+            htmlFor="filter-brand"
+            className="text-muted-foreground text-xs"
+          >
+            Brand
+          </Label>
+          <Select
+            value={selectValue("brandId")}
+            onValueChange={onSelectChange("brandId")}
+          >
+            <SelectTrigger id="filter-brand" size="sm" className="w-full">
+              <SelectValue placeholder="All brands" />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value={ALL}>All brands</SelectItem>
+              {brands.map((brand) => (
+                <SelectItem key={brand.id} value={brand.id}>
+                  {brand.name}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+        </div>
+      ) : null}
 
       <div className="space-y-1.5">
         <Label

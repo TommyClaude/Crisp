@@ -5,6 +5,7 @@ import Link from "next/link";
 import { format } from "date-fns";
 import {
   ArrowUpRight,
+  BookOpen,
   LoaderCircle,
   MessagesSquare,
   RefreshCw,
@@ -24,12 +25,16 @@ import { cn } from "@/lib/utils";
 /** Mirrors RagSearchResponse from GET /api/rag/search (server lib types stay server-side). */
 type RagSearchMode = "vector" | "hybrid" | "keyword";
 
+type ChunkSource = "crisp_chat" | "plugin_docs";
+
 interface RagSearchResult {
   chunkId: string;
   chunkText: string;
+  source: ChunkSource;
   product: string | null;
   topic: string | null;
   language: string | null;
+  pluginName: string | null;
   similarity: number | null;
   conversation: {
     sessionId: string;
@@ -37,7 +42,11 @@ interface RagSearchResult {
     visitorNickname: string | null;
     tags: string[];
     createdAtCrisp: string | null;
-  };
+  } | null;
+  docsPage: {
+    url: string;
+    title: string | null;
+  } | null;
 }
 
 interface RagSearchResponse {
@@ -86,6 +95,7 @@ export function RagSearch() {
   const [rebuilding, setRebuilding] = React.useState(false);
   const [response, setResponse] = React.useState<RagSearchResponse | null>(null);
   const [error, setError] = React.useState<string | null>(null);
+  const [source, setSource] = React.useState<ChunkSource | "all">("all");
 
   const handleSearch = async (event: React.FormEvent<HTMLFormElement>) => {
     event.preventDefault();
@@ -95,8 +105,9 @@ export function RagSearch() {
     setLoading(true);
     setError(null);
     try {
+      const sourceParam = source === "all" ? "" : `&source=${source}`;
       const res = await fetch(
-        `/api/rag/search?query=${encodeURIComponent(trimmed)}&limit=10`,
+        `/api/rag/search?query=${encodeURIComponent(trimmed)}&limit=10${sourceParam}`,
         { cache: "no-store" }
       );
       const data: unknown = await res.json().catch(() => null);
@@ -186,9 +197,26 @@ export function RagSearch() {
           </form>
 
           <div className="flex flex-wrap items-center justify-between gap-2 border-t pt-4">
-            <p className="text-muted-foreground text-xs">
-              Retrieves the top 10 chunks from the embedded conversation index.
-            </p>
+            <div className="flex items-center gap-1">
+              {(
+                [
+                  ["all", "All sources"],
+                  ["crisp_chat", "Chats"],
+                  ["plugin_docs", "Docs"],
+                ] as const
+              ).map(([value, label]) => (
+                <Button
+                  key={value}
+                  type="button"
+                  size="sm"
+                  variant={source === value ? "secondary" : "ghost"}
+                  className="h-7 px-2.5 text-xs"
+                  onClick={() => setSource(value)}
+                >
+                  {label}
+                </Button>
+              ))}
+            </div>
             <Button
               type="button"
               variant="outline"
@@ -272,13 +300,21 @@ export function RagSearch() {
 }
 
 function ResultCard({ result }: { result: RagSearchResult }) {
-  const { conversation } = result;
-  const extraTags = conversation.tags.length - MAX_TAGS;
+  const { conversation, docsPage } = result;
+  const extraTags = conversation ? conversation.tags.length - MAX_TAGS : 0;
 
   return (
     <Card className="gap-3 py-4">
       <CardHeader className="px-4">
         <div className="flex min-w-0 flex-wrap items-center gap-2">
+          <Badge variant="outline" className="gap-1">
+            {result.source === "plugin_docs" ? (
+              <BookOpen className="size-3" />
+            ) : (
+              <MessagesSquare className="size-3" />
+            )}
+            {result.source === "plugin_docs" ? "Docs" : "Chat"}
+          </Badge>
           {result.product && (
             <Badge className="border-transparent bg-blue-600 text-white dark:bg-blue-600">
               {result.product}
@@ -311,35 +347,57 @@ function ResultCard({ result }: { result: RagSearchResult }) {
       </CardContent>
       <CardFooter className="border-t px-4 [.border-t]:pt-3">
         <div className="flex w-full min-w-0 flex-wrap items-center gap-x-3 gap-y-1.5 text-xs">
-          <Link
-            href={`/conversations/${conversation.sessionId}`}
-            className="group text-foreground flex min-w-0 items-center gap-1.5 font-medium transition-colors hover:text-blue-600 dark:hover:text-blue-400"
-          >
-            <MessagesSquare className="text-muted-foreground size-3.5 transition-colors group-hover:text-blue-600 dark:group-hover:text-blue-400" />
-            <span className="truncate">
-              {conversation.visitorNickname ?? "Unknown visitor"}
-            </span>
-            <span className="text-muted-foreground font-mono">
-              {shortSessionId(conversation.sessionId)}
-            </span>
-            <ArrowUpRight className="size-3 opacity-0 transition-opacity group-hover:opacity-100" />
-          </Link>
-          {conversation.createdAtCrisp && (
-            <span className="text-muted-foreground">
-              {format(new Date(conversation.createdAtCrisp), "MMM d, yyyy")}
-            </span>
+          {conversation ? (
+            <>
+              <Link
+                href={`/conversations/${conversation.sessionId}`}
+                className="group text-foreground flex min-w-0 items-center gap-1.5 font-medium transition-colors hover:text-blue-600 dark:hover:text-blue-400"
+              >
+                <MessagesSquare className="text-muted-foreground size-3.5 transition-colors group-hover:text-blue-600 dark:group-hover:text-blue-400" />
+                <span className="truncate">
+                  {conversation.visitorNickname ?? "Unknown visitor"}
+                </span>
+                <span className="text-muted-foreground font-mono">
+                  {shortSessionId(conversation.sessionId)}
+                </span>
+                <ArrowUpRight className="size-3 opacity-0 transition-opacity group-hover:opacity-100" />
+              </Link>
+              {conversation.createdAtCrisp && (
+                <span className="text-muted-foreground">
+                  {format(new Date(conversation.createdAtCrisp), "MMM d, yyyy")}
+                </span>
+              )}
+              <span className="flex min-w-0 flex-wrap items-center gap-1">
+                <StateBadge state={conversation.state} />
+                {conversation.tags.slice(0, MAX_TAGS).map((tag) => (
+                  <Badge key={tag} variant="secondary">
+                    {tag}
+                  </Badge>
+                ))}
+                {extraTags > 0 && (
+                  <span className="text-muted-foreground">+{extraTags}</span>
+                )}
+              </span>
+            </>
+          ) : docsPage ? (
+            <a
+              href={docsPage.url}
+              target="_blank"
+              rel="noreferrer"
+              className="group text-foreground flex min-w-0 items-center gap-1.5 font-medium transition-colors hover:text-blue-600 dark:hover:text-blue-400"
+            >
+              <BookOpen className="text-muted-foreground size-3.5 transition-colors group-hover:text-blue-600 dark:group-hover:text-blue-400" />
+              <span className="truncate">
+                {docsPage.title ?? docsPage.url}
+              </span>
+              {result.pluginName && (
+                <Badge variant="secondary">{result.pluginName}</Badge>
+              )}
+              <ArrowUpRight className="size-3 opacity-0 transition-opacity group-hover:opacity-100" />
+            </a>
+          ) : (
+            <span className="text-muted-foreground">Source unavailable</span>
           )}
-          <span className="flex min-w-0 flex-wrap items-center gap-1">
-            <StateBadge state={conversation.state} />
-            {conversation.tags.slice(0, MAX_TAGS).map((tag) => (
-              <Badge key={tag} variant="secondary">
-                {tag}
-              </Badge>
-            ))}
-            {extraTags > 0 && (
-              <span className="text-muted-foreground">+{extraTags}</span>
-            )}
-          </span>
         </div>
       </CardFooter>
     </Card>

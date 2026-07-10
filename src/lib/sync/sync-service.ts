@@ -1,6 +1,6 @@
 import { prisma } from "@/lib/db";
 import { getEnv } from "@/env";
-import { getCrispClient } from "@/lib/crisp/client";
+import { CrispApiError, getCrispClient } from "@/lib/crisp/client";
 import type { CrispConversation, CrispMessage } from "@/lib/crisp/types";
 import { rebuildChunksForConversation } from "@/lib/rag/rebuild";
 import {
@@ -31,6 +31,41 @@ export interface SyncRunResult {
   error?: string;
 }
 
+/** One Crisp website to sync — a Brand row, or the legacy env fallback. */
+export interface SyncTarget {
+  brandId: string | null;
+  websiteId: string;
+  name: string;
+}
+
+/**
+ * Websites to sync: every Brand in the database, or — when none are
+ * configured yet — the legacy CRISP_WEBSITE_ID from .env.
+ */
+export async function getSyncTargets(): Promise<SyncTarget[]> {
+  const brands = await prisma.brand.findMany({ orderBy: { createdAt: "asc" } });
+  if (brands.length > 0) {
+    return brands.map((brand) => ({
+      brandId: brand.id,
+      websiteId: brand.crispWebsiteId,
+      name: brand.name,
+    }));
+  }
+  const env = getEnv();
+  if (env.CRISP_WEBSITE_ID) {
+    console.warn(
+      "[sync] No brands configured — falling back to CRISP_WEBSITE_ID from .env. " +
+        "Add your brands (one per Crisp website) in /brands."
+    );
+    return [
+      { brandId: null, websiteId: env.CRISP_WEBSITE_ID, name: "default" },
+    ];
+  }
+  throw new Error(
+    "Nothing to sync: add at least one brand in /brands (or set CRISP_WEBSITE_ID in .env)."
+  );
+}
+
 /** Ensure an Operator row exists for a Crisp user id; returns crispUserId. */
 async function ensureOperator(
   crispUserId: string,
@@ -57,9 +92,9 @@ async function ensureOperator(
 }
 
 /** Best-effort import of the operator roster (non-fatal when unavailable). */
-async function syncOperatorRoster(): Promise<void> {
+async function syncOperatorRoster(websiteId: string): Promise<void> {
   const client = getCrispClient();
-  const operators = await client.listOperators();
+  const operators = await client.listOperators(websiteId);
   for (const entry of operators) {
     const details = entry.details ?? entry;
     if (!details.user_id) continue;
@@ -80,15 +115,17 @@ async function syncOperatorRoster(): Promise<void> {
  */
 export async function syncConversationPayload(
   conversation: CrispConversation,
-  messages: CrispMessage[]
+  messages: CrispMessage[],
+  target?: Pick<SyncTarget, "brandId" | "websiteId">
 ): Promise<{ conversationId: string; messageCount: number }> {
-  const env = getEnv();
   const sessionId = conversation.session_id;
   if (!sessionId) throw new Error("Conversation payload missing session_id");
 
+  const fallbackWebsiteId =
+    target?.websiteId ?? getEnv().CRISP_WEBSITE_ID ?? "unknown";
   const { assignedCrispUserId, ...columns } = conversationToColumns(
     conversation,
-    env.CRISP_WEBSITE_ID
+    fallbackWebsiteId
   );
 
   // The assignment FK references Operator.crispUserId — make sure it exists.
@@ -99,9 +136,14 @@ export async function syncConversationPayload(
     create: {
       sessionId,
       ...columns,
+      brandId: target?.brandId ?? null,
       assignedOperatorId: assignedCrispUserId,
     },
-    update: { ...columns, assignedOperatorId: assignedCrispUserId },
+    update: {
+      ...columns,
+      ...(target?.brandId ? { brandId: target.brandId } : {}),
+      assignedOperatorId: assignedCrispUserId,
+    },
   });
 
   // Upsert operators discovered in message payloads before messages
@@ -191,9 +233,45 @@ export async function resyncConversation(sessionId: string): Promise<{
   chunksCreated: number;
 }> {
   const client = getCrispClient();
-  const conversation = await client.getConversation(sessionId);
-  const messages = await client.getAllMessages(sessionId);
-  const result = await syncConversationPayload(conversation, messages);
+
+  // Resolve which website the session belongs to: a previously synced
+  // conversation knows its websiteId; otherwise probe the configured targets.
+  const existing = await prisma.conversation.findUnique({
+    where: { sessionId },
+    select: { websiteId: true, brandId: true },
+  });
+  let target: Pick<SyncTarget, "brandId" | "websiteId"> | null = existing
+    ? { websiteId: existing.websiteId, brandId: existing.brandId }
+    : null;
+  let conversation: CrispConversation | null = null;
+
+  if (target) {
+    conversation = await client.getConversation(target.websiteId, sessionId);
+  } else {
+    for (const candidate of await getSyncTargets()) {
+      try {
+        conversation = await client.getConversation(
+          candidate.websiteId,
+          sessionId
+        );
+        target = candidate;
+        break;
+      } catch (error) {
+        if (error instanceof CrispApiError && error.status === 404) continue;
+        throw error;
+      }
+    }
+    if (!conversation || !target) {
+      throw new CrispApiError(
+        `Conversation ${sessionId} not found on any configured Crisp website`,
+        404,
+        "resync"
+      );
+    }
+  }
+
+  const messages = await client.getAllMessages(target.websiteId, sessionId);
+  const result = await syncConversationPayload(conversation, messages, target);
 
   let chunksCreated = 0;
   try {
@@ -252,84 +330,112 @@ async function runSync(options: RunSyncOptions): Promise<SyncRunResult> {
   let errorMessage: string | undefined;
 
   try {
-    try {
-      await syncOperatorRoster();
-    } catch (error) {
-      console.warn("Operator roster sync failed (non-fatal):", error);
-    }
+    const targets = await getSyncTargets();
+    // Remember which website a failed session belongs to for the retry pass.
+    const failedTargets = new Map<string, SyncTarget>();
 
-    let page = options.startPage ?? 1;
-    let reachedCheckpoint = false;
-
-    while (page < MAX_PAGES && !reachedCheckpoint) {
+    for (let t = 0; t < targets.length; t++) {
+      const target = targets[t];
       if (state.cancelRequested) {
         status = "cancelled";
         break;
       }
 
-      state.currentPage = page;
-      state.statusMessage = `fetching page ${page}`;
-      const conversations = await client.listConversations(page);
-      if (!conversations || conversations.length === 0) break;
+      try {
+        await syncOperatorRoster(target.websiteId);
+      } catch (error) {
+        console.warn(
+          `Operator roster sync failed for ${target.name} (non-fatal):`,
+          error
+        );
+      }
 
-      // Incremental mode: the list is roughly newest-activity-first, but
-      // Crisp's sort key (activity) is not identical to updated_at, so a
-      // single stale conversation must not end the run. Instead, skip stale
-      // conversations individually and stop once an ENTIRE page is stale.
-      let sawFreshConversation = false;
+      // startPage resumes the FIRST brand only — later brands always start
+      // from page 1 (their progress was not what got interrupted).
+      let page = t === 0 ? (options.startPage ?? 1) : 1;
+      let reachedCheckpoint = false;
 
-      for (const conversation of conversations) {
+      while (page < MAX_PAGES && !reachedCheckpoint) {
         if (state.cancelRequested) {
           status = "cancelled";
           break;
         }
-        const sessionId = conversation.session_id;
-        if (!sessionId) continue;
 
-        if (
-          updatedSinceMs !== null &&
-          typeof conversation.updated_at === "number" &&
-          conversation.updated_at < updatedSinceMs
-        ) {
-          continue;
-        }
-        sawFreshConversation = true;
+        state.currentPage = page;
+        state.statusMessage = `[${target.name}] fetching page ${page}`;
+        const conversations = await client.listConversations(
+          target.websiteId,
+          page
+        );
+        if (!conversations || conversations.length === 0) break;
 
-        state.lastSessionId = sessionId;
-        state.statusMessage = `syncing ${sessionId} (page ${page})`;
-        try {
-          const messages = await client.getAllMessages(sessionId);
-          const result = await syncConversationPayload(conversation, messages);
-          state.conversationsSynced += 1;
-          state.messagesSynced += result.messageCount;
+        // Incremental mode: the list is roughly newest-activity-first, but
+        // Crisp's sort key (activity) is not identical to updated_at, so a
+        // single stale conversation must not end the run. Instead, skip stale
+        // conversations individually and stop once an ENTIRE page is stale.
+        let sawFreshConversation = false;
 
-          if (conversation.state === "resolved") {
-            try {
-              await rebuildChunksForConversation(result.conversationId);
-            } catch (error) {
-              console.warn(`Chunk rebuild failed for ${sessionId}:`, error);
-            }
+        for (const conversation of conversations) {
+          if (state.cancelRequested) {
+            status = "cancelled";
+            break;
           }
-        } catch (error) {
-          console.error(`Failed to sync conversation ${sessionId}:`, error);
-          state.failedSessions.push(sessionId);
-        }
-      }
+          const sessionId = conversation.session_id;
+          if (!sessionId) continue;
 
-      // Persist page-level progress so the run is resumable.
-      await prisma.syncLog.update({
-        where: { id: syncLog.id },
-        data: {
-          pageTo: page,
-          conversationsSynced: state.conversationsSynced,
-          messagesSynced: state.messagesSynced,
-          failedSessions: state.failedSessions,
-        },
-      });
-      if (updatedSinceMs !== null && !sawFreshConversation) {
-        reachedCheckpoint = true;
+          if (
+            updatedSinceMs !== null &&
+            typeof conversation.updated_at === "number" &&
+            conversation.updated_at < updatedSinceMs
+          ) {
+            continue;
+          }
+          sawFreshConversation = true;
+
+          state.lastSessionId = sessionId;
+          state.statusMessage = `[${target.name}] syncing ${sessionId} (page ${page})`;
+          try {
+            const messages = await client.getAllMessages(
+              target.websiteId,
+              sessionId
+            );
+            const result = await syncConversationPayload(
+              conversation,
+              messages,
+              target
+            );
+            state.conversationsSynced += 1;
+            state.messagesSynced += result.messageCount;
+
+            if (conversation.state === "resolved") {
+              try {
+                await rebuildChunksForConversation(result.conversationId);
+              } catch (error) {
+                console.warn(`Chunk rebuild failed for ${sessionId}:`, error);
+              }
+            }
+          } catch (error) {
+            console.error(`Failed to sync conversation ${sessionId}:`, error);
+            state.failedSessions.push(sessionId);
+            failedTargets.set(sessionId, target);
+          }
+        }
+
+        // Persist page-level progress so the run is resumable.
+        await prisma.syncLog.update({
+          where: { id: syncLog.id },
+          data: {
+            pageTo: page,
+            conversationsSynced: state.conversationsSynced,
+            messagesSynced: state.messagesSynced,
+            failedSessions: state.failedSessions,
+          },
+        });
+        if (updatedSinceMs !== null && !sawFreshConversation) {
+          reachedCheckpoint = true;
+        }
+        page += 1;
       }
-      page += 1;
     }
 
     // Retry pass: transient per-conversation failures usually heal on a
@@ -344,11 +450,26 @@ async function runSync(options: RunSyncOptions): Promise<SyncRunResult> {
           stillFailed.push(sessionId);
           continue;
         }
+        const target = failedTargets.get(sessionId);
+        if (!target) {
+          stillFailed.push(sessionId);
+          continue;
+        }
         state.statusMessage = `retrying failed conversation ${sessionId}`;
         try {
-          const conversation = await client.getConversation(sessionId);
-          const messages = await client.getAllMessages(sessionId);
-          const result = await syncConversationPayload(conversation, messages);
+          const conversation = await client.getConversation(
+            target.websiteId,
+            sessionId
+          );
+          const messages = await client.getAllMessages(
+            target.websiteId,
+            sessionId
+          );
+          const result = await syncConversationPayload(
+            conversation,
+            messages,
+            target
+          );
           state.conversationsSynced += 1;
           state.messagesSynced += result.messageCount;
           if (conversation.state === "resolved") {

@@ -10,6 +10,7 @@ const querySchema = z.object({
   state: z.string().optional(),
   tag: z.string().optional(),
   product: z.string().optional(),
+  brandId: z.string().optional(),
   email: z.string().optional(),
   operatorId: z.string().optional(),
   hasAttachment: z

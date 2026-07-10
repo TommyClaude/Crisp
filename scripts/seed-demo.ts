@@ -6,14 +6,62 @@
  *   npm run seed:demo
  */
 import "dotenv/config";
+import { createHash } from "crypto";
 import { prisma } from "../src/lib/db";
+import { invalidateProductDefinitions } from "../src/lib/rag/product-defs";
 import { syncConversationPayload } from "../src/lib/sync/sync-service";
 import { rebuildChunksForConversation } from "../src/lib/rag/rebuild";
 import type { CrispConversation, CrispMessage } from "../src/lib/crisp/types";
 
-const WEBSITE_ID = process.env.CRISP_WEBSITE_ID ?? "demo-website";
 const DAY = 24 * 60 * 60 * 1000;
 const NOW = Date.now();
+
+/** Demo brands — one per (fake) Crisp website, mirroring a real multi-brand setup. */
+const DEMO_BRANDS = [
+  {
+    slug: "demo-yaycommerce",
+    name: "YayCommerce",
+    domain: "yaycommerce.com",
+    crispWebsiteId: "demo-website-yaycommerce",
+    plugins: [
+      { name: "YayMail", slug: "demo-yaymail", keywords: ["yay mail"], wpOrgSlug: "yaymail" },
+      { name: "YayCurrency", slug: "demo-yaycurrency", keywords: ["yay currency"], wpOrgSlug: "yaycurrency" },
+      { name: "YaySMTP", slug: "demo-yaysmtp", keywords: ["yay smtp"], wpOrgSlug: "yaysmtp" },
+    ],
+  },
+  {
+    slug: "demo-ninjateam",
+    name: "Ninja Team",
+    domain: "ninjateam.org",
+    crispWebsiteId: "demo-website-ninjateam",
+    plugins: [
+      { name: "FileBird", slug: "demo-filebird", keywords: ["file bird", "njt-filebird"], wpOrgSlug: "filebird" },
+    ],
+  },
+] as const;
+
+/** Fake docs pages so RAG search demonstrates mixed chat+docs retrieval. */
+const DEMO_DOCS: Array<{
+  plugin: string;
+  url: string;
+  title: string;
+  content: string;
+}> = [
+  {
+    plugin: "FileBird",
+    url: "https://docs.example.com/filebird/clear-cache/",
+    title: "FileBird — Clearing caches and restoring folders",
+    content:
+      "If your media folders disappear after an update, go to FileBird > Settings > Tools and click 'Clear all caches'. Folders are stored in the database and are never deleted by an update.\n\nIf folders still do not appear, deactivate other media library plugins to rule out conflicts, then reload wp-admin.",
+  },
+  {
+    plugin: "YayMail",
+    url: "https://docs.example.com/yaymail/outlook-images/",
+    title: "YayMail — Fixing stretched images in Outlook",
+    content:
+      "Outlook desktop ignores max-width on images. Set an explicit pixel width (for example 180px) on the logo element instead of a percentage.\n\nThis renders correctly across Outlook, Gmail and Apple Mail.",
+  },
+];
 
 const OPERATORS = [
   { user_id: "op_anna", nickname: "Anna Nguyen", avatar: null },
@@ -22,6 +70,8 @@ const OPERATORS = [
 
 interface DemoSpec {
   sessionId: string;
+  /** Which demo brand's Crisp website this conversation belongs to. */
+  brandSlug: (typeof DEMO_BRANDS)[number]["slug"];
   state: string;
   nickname: string;
   email: string;
@@ -43,6 +93,7 @@ interface DemoSpec {
 const DEMO_CONVERSATIONS: DemoSpec[] = [
   {
     sessionId: "session_demo_filebird_folders",
+    brandSlug: "demo-ninjateam",
     state: "resolved",
     nickname: "Sarah Mitchell",
     email: "sarah.mitchell@example-store.com",
@@ -75,6 +126,7 @@ const DEMO_CONVERSATIONS: DemoSpec[] = [
   },
   {
     sessionId: "session_demo_yaymail_template",
+    brandSlug: "demo-yaycommerce",
     state: "resolved",
     nickname: "Tomás Herrera",
     email: "tomas@herrera-imports.mx",
@@ -108,6 +160,7 @@ const DEMO_CONVERSATIONS: DemoSpec[] = [
   },
   {
     sessionId: "session_demo_yaycurrency_checkout",
+    brandSlug: "demo-yaycommerce",
     state: "resolved",
     nickname: "Lena Fischer",
     email: "lena.fischer@alpenshop.de",
@@ -134,6 +187,7 @@ const DEMO_CONVERSATIONS: DemoSpec[] = [
   },
   {
     sessionId: "session_demo_yaysmtp_gmail",
+    brandSlug: "demo-yaycommerce",
     state: "unresolved",
     nickname: "Priya Sharma",
     email: "priya@sharma-consulting.in",
@@ -157,6 +211,7 @@ const DEMO_CONVERSATIONS: DemoSpec[] = [
   },
   {
     sessionId: "session_demo_wordpress_migration",
+    brandSlug: "demo-ninjateam",
     state: "pending",
     nickname: "Jack O'Neill",
     email: "jack@oneill-media.co.uk",
@@ -178,11 +233,15 @@ const DEMO_CONVERSATIONS: DemoSpec[] = [
   },
 ];
 
+function websiteIdFor(spec: DemoSpec): string {
+  return DEMO_BRANDS.find((b) => b.slug === spec.brandSlug)!.crispWebsiteId;
+}
+
 function buildConversation(spec: DemoSpec): CrispConversation {
   const updatedAt = NOW - spec.daysAgo * DAY + spec.exchanges.length * 600_000;
   return {
     session_id: spec.sessionId,
-    website_id: WEBSITE_ID,
+    website_id: websiteIdFor(spec),
     state: spec.state,
     created_at: NOW - spec.daysAgo * DAY,
     updated_at: updatedAt,
@@ -218,7 +277,7 @@ function buildMessages(spec: DemoSpec): CrispMessage[] {
     const timestamp = start + index * 600_000;
     const base: CrispMessage = {
       session_id: spec.sessionId,
-      website_id: WEBSITE_ID,
+      website_id: websiteIdFor(spec),
       from: exchange.from,
       origin: "chat",
       fingerprint: sessionHash(spec.sessionId) * 100 + index,
@@ -240,16 +299,90 @@ function buildMessages(spec: DemoSpec): CrispMessage[] {
 
 async function main() {
   console.log("Seeding demo data through the real sync pipeline...");
-  // Idempotency: drop previous demo rows (cascades messages/files/chunks).
+  // Idempotency: drop previous demo rows (cascades messages/files/chunks,
+  // plugins, docs sources and docs pages).
   await prisma.conversation.deleteMany({
     where: { sessionId: { startsWith: "session_demo_" } },
   });
+  await prisma.brand.deleteMany({ where: { slug: { startsWith: "demo-" } } });
+
+  // Brands + plugins (drives multi-website sync and product detection).
+  const brandIdBySlug = new Map<string, string>();
+  const pluginIdByName = new Map<string, string>();
+  for (const spec of DEMO_BRANDS) {
+    const brand = await prisma.brand.create({
+      data: {
+        name: spec.name,
+        slug: spec.slug,
+        domain: spec.domain,
+        crispWebsiteId: spec.crispWebsiteId,
+      },
+    });
+    brandIdBySlug.set(spec.slug, brand.id);
+    for (const pluginSpec of spec.plugins) {
+      const plugin = await prisma.plugin.create({
+        data: {
+          brandId: brand.id,
+          name: pluginSpec.name,
+          slug: pluginSpec.slug,
+          wpOrgSlug: pluginSpec.wpOrgSlug,
+          detectionKeywords: [...pluginSpec.keywords],
+        },
+      });
+      pluginIdByName.set(pluginSpec.name, plugin.id);
+    }
+    console.log(`  ✓ brand ${spec.name} (${spec.plugins.length} plugins)`);
+  }
+  invalidateProductDefinitions();
+
   for (const spec of DEMO_CONVERSATIONS) {
     const conversation = buildConversation(spec);
     const messages = buildMessages(spec);
-    const result = await syncConversationPayload(conversation, messages);
+    const result = await syncConversationPayload(conversation, messages, {
+      brandId: brandIdBySlug.get(spec.brandSlug) ?? null,
+      websiteId: websiteIdFor(spec),
+    });
     await rebuildChunksForConversation(result.conversationId);
     console.log(`  ✓ ${spec.sessionId} (${messages.length} messages)`);
+  }
+
+  // Fake docs pages + chunks (bypasses the crawler — the URLs are not real).
+  for (const doc of DEMO_DOCS) {
+    const pluginId = pluginIdByName.get(doc.plugin);
+    if (!pluginId) continue;
+    const source = await prisma.docsSource.create({
+      data: {
+        pluginId,
+        url: doc.url,
+        type: "url",
+        status: "completed",
+        lastCrawledAt: new Date(),
+        pageCount: 1,
+        chunkCount: 1,
+      },
+    });
+    const page = await prisma.docsPage.create({
+      data: {
+        docsSourceId: source.id,
+        url: doc.url,
+        title: doc.title,
+        contentText: doc.content,
+        contentHash: createHash("sha256").update(doc.content).digest("hex"),
+      },
+    });
+    await prisma.embeddingChunk.create({
+      data: {
+        source: "plugin_docs",
+        pluginId,
+        docsPageId: page.id,
+        chunkIndex: 0,
+        chunkText: `[Docs: ${doc.plugin} | ${doc.title} | ${doc.url}]\n${doc.content}`,
+        product: doc.plugin,
+        topic: doc.title,
+        rawJson: { url: doc.url },
+      },
+    });
+    console.log(`  ✓ docs page for ${doc.plugin}`);
   }
   await prisma.syncLog.create({
     data: {

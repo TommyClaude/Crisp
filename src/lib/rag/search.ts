@@ -12,17 +12,28 @@ import { cosineSimilarity, embedTexts } from "./embeddings";
  *   3. "keyword" — no OpenAI key → Postgres full-text search with ILIKE
  *                  fallback.
  *
- * Every result links back to its source conversation.
+ * Chunks come from two sources — archived Crisp conversations
+ * ("crisp_chat") and crawled plugin documentation ("plugin_docs") — and
+ * every result links back to its source conversation or docs page.
  */
 
 export type RagSearchMode = "vector" | "hybrid" | "keyword";
+export type ChunkSource = "crisp_chat" | "plugin_docs";
+
+export interface RagSearchFilters {
+  source?: ChunkSource;
+  pluginId?: string;
+  brandId?: string;
+}
 
 export interface RagSearchResult {
   chunkId: string;
   chunkText: string;
+  source: ChunkSource;
   product: string | null;
   topic: string | null;
   language: string | null;
+  pluginName: string | null;
   similarity: number | null;
   conversation: {
     sessionId: string;
@@ -30,7 +41,11 @@ export interface RagSearchResult {
     visitorNickname: string | null;
     tags: string[];
     createdAtCrisp: string | null;
-  };
+  } | null;
+  docsPage: {
+    url: string;
+    title: string | null;
+  } | null;
 }
 
 export interface RagSearchResponse {
@@ -105,87 +120,125 @@ const conversationSelect = {
   createdAtCrisp: true,
 } satisfies Prisma.ConversationSelect;
 
-type ConversationSummary = {
-  sessionId: string;
-  state: string | null;
-  visitorNickname: string | null;
-  tags: string[];
-  createdAtCrisp: Date | null;
-};
+const chunkHydrateInclude = {
+  conversation: { select: conversationSelect },
+  docsPage: { select: { url: true, title: true } },
+  plugin: { select: { name: true } },
+} satisfies Prisma.EmbeddingChunkInclude;
+
+type HydratedChunk = Prisma.EmbeddingChunkGetPayload<{
+  include: typeof chunkHydrateInclude;
+}>;
+
+/** SQL fragment applying source/plugin/brand filters (starts with AND). */
+function chunkFilterSql(filters?: RagSearchFilters): Prisma.Sql {
+  const conditions: Prisma.Sql[] = [];
+  if (filters?.source) {
+    conditions.push(Prisma.sql`"source" = ${filters.source}`);
+  }
+  if (filters?.pluginId) {
+    conditions.push(Prisma.sql`"pluginId" = ${filters.pluginId}`);
+  }
+  if (filters?.brandId) {
+    conditions.push(Prisma.sql`(
+      "conversationId" IN (SELECT id FROM "Conversation" WHERE "brandId" = ${filters.brandId})
+      OR "pluginId" IN (SELECT id FROM "Plugin" WHERE "brandId" = ${filters.brandId})
+    )`);
+  }
+  if (conditions.length === 0) return Prisma.empty;
+  return Prisma.sql`AND ${Prisma.join(conditions, " AND ")}`;
+}
+
+/** Prisma where clause applying the same source/plugin/brand filters. */
+function chunkFilterWhere(
+  filters?: RagSearchFilters
+): Prisma.EmbeddingChunkWhereInput {
+  const where: Prisma.EmbeddingChunkWhereInput = {};
+  if (filters?.source) where.source = filters.source;
+  if (filters?.pluginId) where.pluginId = filters.pluginId;
+  if (filters?.brandId) {
+    where.OR = [
+      { conversation: { brandId: filters.brandId } },
+      { plugin: { brandId: filters.brandId } },
+    ];
+  }
+  return where;
+}
 
 function toResult(
-  chunk: {
-    id: string;
-    chunkText: string;
-    product: string | null;
-    topic: string | null;
-    language: string | null;
-  },
-  conversation: ConversationSummary,
+  chunk: HydratedChunk,
   similarity: number | null
 ): RagSearchResult {
   return {
     chunkId: chunk.id,
     chunkText: chunk.chunkText,
+    source: (chunk.source as ChunkSource) ?? "crisp_chat",
     product: chunk.product,
     topic: chunk.topic,
     language: chunk.language,
+    pluginName: chunk.plugin?.name ?? null,
     similarity,
-    conversation: {
-      sessionId: conversation.sessionId,
-      state: conversation.state,
-      visitorNickname: conversation.visitorNickname,
-      tags: conversation.tags,
-      createdAtCrisp: conversation.createdAtCrisp?.toISOString() ?? null,
-    },
+    conversation: chunk.conversation
+      ? {
+          sessionId: chunk.conversation.sessionId,
+          state: chunk.conversation.state,
+          visitorNickname: chunk.conversation.visitorNickname,
+          tags: chunk.conversation.tags,
+          createdAtCrisp:
+            chunk.conversation.createdAtCrisp?.toISOString() ?? null,
+        }
+      : null,
+    docsPage: chunk.docsPage
+      ? { url: chunk.docsPage.url, title: chunk.docsPage.title }
+      : null,
   };
+}
+
+/** Fetch full rows for ranked chunk ids, preserving the given order. */
+async function hydrateResults(
+  ranked: Array<{ id: string; similarity: number | null }>
+): Promise<RagSearchResult[]> {
+  if (ranked.length === 0) return [];
+  const chunks = await prisma.embeddingChunk.findMany({
+    where: { id: { in: ranked.map((r) => r.id) } },
+    include: chunkHydrateInclude,
+  });
+  const byId = new Map(chunks.map((c) => [c.id, c]));
+  return ranked.flatMap(({ id, similarity }) => {
+    const chunk = byId.get(id);
+    return chunk ? [toResult(chunk, similarity)] : [];
+  });
 }
 
 async function vectorSearch(
   queryVector: number[],
-  limit: number
+  limit: number,
+  filters?: RagSearchFilters
 ): Promise<RagSearchResult[]> {
   const literal = toVectorLiteral(queryVector);
   const rows = await prisma.$queryRaw<
-    Array<{
-      id: string;
-      chunkText: string;
-      product: string | null;
-      topic: string | null;
-      language: string | null;
-      conversationId: string;
-      similarity: number;
-    }>
+    Array<{ id: string; similarity: number }>
   >`
-    SELECT id, "chunkText", product, topic, language, "conversationId",
-           1 - (embedding <=> ${literal}::vector) AS similarity
+    SELECT id, 1 - (embedding <=> ${literal}::vector) AS similarity
     FROM "EmbeddingChunk"
-    WHERE embedding IS NOT NULL
+    WHERE embedding IS NOT NULL ${chunkFilterSql(filters)}
     ORDER BY embedding <=> ${literal}::vector
     LIMIT ${limit}
   `;
-  if (rows.length === 0) return [];
-
-  const conversations = await prisma.conversation.findMany({
-    where: { id: { in: rows.map((r) => r.conversationId) } },
-    select: { id: true, ...conversationSelect },
-  });
-  const byId = new Map(conversations.map((c) => [c.id, c]));
-  return rows.flatMap((row) => {
-    const conversation = byId.get(row.conversationId);
-    return conversation ? [toResult(row, conversation, row.similarity)] : [];
-  });
+  return hydrateResults(rows);
 }
 
 async function runFullTextQuery(
   tsQuery: string,
-  limit: number
+  limit: number,
+  filters?: RagSearchFilters
 ): Promise<string[]> {
   const rows = await prisma.$queryRaw<Array<{ id: string }>>`
     SELECT id
     FROM "EmbeddingChunk"
     WHERE to_tsvector('simple', "chunkText")
           @@ websearch_to_tsquery('simple', ${tsQuery})
+      ${chunkFilterSql(filters)}
     ORDER BY ts_rank(
       to_tsvector('simple', "chunkText"),
       websearch_to_tsquery('simple', ${tsQuery})
@@ -202,10 +255,11 @@ async function runFullTextQuery(
  */
 async function keywordCandidateIds(
   query: string,
-  limit: number
+  limit: number,
+  filters?: RagSearchFilters
 ): Promise<string[]> {
   try {
-    const strict = await runFullTextQuery(query, limit);
+    const strict = await runFullTextQuery(query, limit, filters);
     if (strict.length > 0) return strict;
 
     const terms = query
@@ -213,7 +267,7 @@ async function keywordCandidateIds(
       .map((t) => t.replace(/["']/g, ""))
       .filter((t) => t.length > 1);
     if (terms.length < 2) return [];
-    return await runFullTextQuery(terms.join(" OR "), limit);
+    return await runFullTextQuery(terms.join(" OR "), limit, filters);
   } catch (error) {
     // Don't silently degrade to "no results" when the SQL itself is broken
     // (e.g. FTS migration not applied) — surface it in the logs.
@@ -224,54 +278,49 @@ async function keywordCandidateIds(
 
 async function keywordSearch(
   query: string,
-  limit: number
+  limit: number,
+  filters?: RagSearchFilters
 ): Promise<RagSearchResult[]> {
-  let ids = await keywordCandidateIds(query, limit);
+  let ids = await keywordCandidateIds(query, limit, filters);
 
   if (ids.length === 0) {
     // ILIKE fallback for partial words / stopword-only queries.
     const contains = await prisma.embeddingChunk.findMany({
-      where: { chunkText: { contains: query, mode: "insensitive" } },
+      where: {
+        ...chunkFilterWhere(filters),
+        chunkText: { contains: query, mode: "insensitive" },
+      },
       orderBy: { createdAt: "desc" },
       take: limit,
       select: { id: true },
     });
     ids = contains.map((c) => c.id);
   }
-  if (ids.length === 0) return [];
-
-  const chunks = await prisma.embeddingChunk.findMany({
-    where: { id: { in: ids } },
-    include: { conversation: { select: conversationSelect } },
-  });
-  const byId = new Map(chunks.map((c) => [c.id, c]));
-  // Preserve rank order from the FTS query.
-  return ids.flatMap((id) => {
-    const chunk = byId.get(id);
-    return chunk ? [toResult(chunk, chunk.conversation, null)] : [];
-  });
+  return hydrateResults(ids.map((id) => ({ id, similarity: null })));
 }
 
 /**
  * Cosine re-ranking over JSON-stored embeddings (no pgvector).
  * Candidates are fetched with a slim select (id + embedding only); the full
- * chunk rows and conversations are hydrated only for the top-k winners, so a
- * query never drags thousands of chunk texts across the wire. For large
- * archives, enable pgvector (prisma/sql/enable-pgvector.sql) instead.
+ * chunk rows are hydrated only for the top-k winners, so a query never drags
+ * thousands of chunk texts across the wire. For large archives, enable
+ * pgvector (prisma/sql/enable-pgvector.sql) instead.
  */
 async function hybridSearch(
   query: string,
   queryVector: number[],
-  limit: number
+  limit: number,
+  filters?: RagSearchFilters
 ): Promise<RagSearchResult[]> {
   // Keyword prefilter keeps the candidate set small; when it finds too few,
   // widen to the most recent chunks that have embeddings.
-  const prefilterIds = await keywordCandidateIds(query, 300);
+  const prefilterIds = await keywordCandidateIds(query, 300, filters);
   const candidates = await prisma.embeddingChunk.findMany({
-    where:
-      prefilterIds.length >= limit
-        ? { id: { in: prefilterIds }, embeddingJson: { not: Prisma.DbNull } }
-        : { embeddingJson: { not: Prisma.DbNull } },
+    where: {
+      ...chunkFilterWhere(filters),
+      ...(prefilterIds.length >= limit ? { id: { in: prefilterIds } } : {}),
+      embeddingJson: { not: Prisma.DbNull },
+    },
     orderBy: { createdAt: "desc" },
     take: 1000,
     select: { id: true, embeddingJson: true },
@@ -287,40 +336,36 @@ async function hybridSearch(
     }))
     .sort((a, b) => b.similarity - a.similarity)
     .slice(0, limit);
-  if (winners.length === 0) return [];
-
-  const chunks = await prisma.embeddingChunk.findMany({
-    where: { id: { in: winners.map((w) => w.id) } },
-    include: { conversation: { select: conversationSelect } },
-  });
-  const byId = new Map(chunks.map((c) => [c.id, c]));
-  return winners.flatMap(({ id, similarity }) => {
-    const chunk = byId.get(id);
-    return chunk ? [toResult(chunk, chunk.conversation, similarity)] : [];
-  });
+  return hydrateResults(winners);
 }
 
 export async function ragSearch(
   query: string,
-  limit = 8
+  options?: { limit?: number } & RagSearchFilters
 ): Promise<RagSearchResponse> {
+  const limit = options?.limit ?? 8;
+  const filters: RagSearchFilters = {
+    source: options?.source,
+    pluginId: options?.pluginId,
+    brandId: options?.brandId,
+  };
   const trimmed = query.trim();
   if (!trimmed) return { mode: "keyword", query, results: [] };
 
   if (embeddingsConfigured()) {
     const [queryVector] = await embedTexts([trimmed]);
     if (await hasPgvector()) {
-      const results = await vectorSearch(queryVector, limit);
+      const results = await vectorSearch(queryVector, limit, filters);
       // A pgvector DB with no embedded rows yet still deserves results.
       if (results.length > 0) return { mode: "vector", query: trimmed, results };
     }
-    const results = await hybridSearch(trimmed, queryVector, limit);
+    const results = await hybridSearch(trimmed, queryVector, limit, filters);
     if (results.length > 0) return { mode: "hybrid", query: trimmed, results };
   }
 
   return {
     mode: "keyword",
     query: trimmed,
-    results: await keywordSearch(trimmed, limit),
+    results: await keywordSearch(trimmed, limit, filters),
   };
 }

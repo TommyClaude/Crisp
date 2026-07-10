@@ -1,6 +1,10 @@
 import type { Conversation, Message } from "@prisma/client";
 import { redactText } from "./redact";
-import { detectPrimaryProduct } from "./products";
+import {
+  DEFAULT_PRODUCT_DEFS,
+  detectPrimaryProduct,
+  type ProductDef,
+} from "./products";
 
 /**
  * Converts a synced conversation into clean retrieval chunks for RAG.
@@ -131,7 +135,8 @@ function splitLongText(text: string, maxChars: number): string[] {
 
 export function buildChunksForConversation(
   conversation: Conversation,
-  messages: Message[]
+  messages: Message[],
+  productDefs: ProductDef[] = DEFAULT_PRODUCT_DEFS
 ): BuiltChunk[] {
   const ordered = [...messages].sort(
     (a, b) =>
@@ -141,7 +146,7 @@ export function buildChunksForConversation(
   if (exchanges.length === 0) return [];
 
   const fullText = exchanges.map(renderExchange).join("\n");
-  const product = detectPrimaryProduct(fullText, conversation.tags);
+  const product = detectPrimaryProduct(fullText, conversation.tags, productDefs);
   const language = detectLanguage(conversation);
   const date = (conversation.createdAtCrisp ?? conversation.createdAt)
     .toISOString()

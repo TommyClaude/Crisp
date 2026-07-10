@@ -39,6 +39,7 @@ export default async function ConversationsPage({
       state: first(sp.state),
       tag: first(sp.tag),
       product: first(sp.product),
+      brandId: first(sp.brandId),
       email: first(sp.email),
       operatorId: first(sp.operatorId),
       hasAttachment: first(sp.hasAttachment) === "true" ? true : undefined,
@@ -83,6 +84,8 @@ export default async function ConversationsPage({
             states={options.states}
             tags={options.tags}
             operators={options.operators}
+            brands={options.brands}
+            products={options.products}
           />
         </aside>
 

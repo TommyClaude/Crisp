@@ -6,7 +6,10 @@ import { z } from "zod";
  * so Crisp/OpenAI credentials can never leak into the browser bundle.
  */
 const envSchema = z.object({
-  CRISP_WEBSITE_ID: z.string().min(1, "CRISP_WEBSITE_ID is required"),
+  // Legacy single-website fallback — brands (each with its own Crisp
+  // website ID) are managed in the Brand table / /brands UI. Only used when
+  // that table is empty.
+  CRISP_WEBSITE_ID: z.string().optional(),
   CRISP_IDENTIFIER: z.string().min(1, "CRISP_IDENTIFIER is required"),
   CRISP_KEY: z.string().min(1, "CRISP_KEY is required"),
   DATABASE_URL: z.string().url("DATABASE_URL must be a valid connection URL"),

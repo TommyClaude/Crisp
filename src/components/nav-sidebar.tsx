@@ -2,7 +2,13 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { LayoutDashboard, MessagesSquare, Sparkles } from "lucide-react";
+import {
+  Building2,
+  LayoutDashboard,
+  MessagesSquare,
+  Package,
+  Sparkles,
+} from "lucide-react";
 
 import { ThemeToggle } from "@/components/theme-toggle";
 import { cn } from "@/lib/utils";
@@ -11,6 +17,8 @@ const NAV_LINKS = [
   { href: "/dashboard", label: "Dashboard", icon: LayoutDashboard },
   { href: "/conversations", label: "Conversations", icon: MessagesSquare },
   { href: "/rag", label: "RAG Search", icon: Sparkles },
+  { href: "/brands", label: "Brands", icon: Building2 },
+  { href: "/plugins", label: "Plugins & Docs", icon: Package },
 ] as const;
 
 export function NavSidebar() {

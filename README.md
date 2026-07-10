@@ -8,7 +8,9 @@ Sync, browse and RAG-search your [Crisp.chat](https://crisp.chat) history — an
 - **Crisp-like chat log UI** — paginated, filterable conversation list (state, tag, product, operator, email, attachments, date range, free-text search) and a message-by-message conversation view with attachments and visitor metadata.
 - **3-tier RAG search** — pgvector ANN search when available, in-app cosine ranking over JSON-stored embeddings when not, and Postgres full-text keyword search when no OpenAI key is configured. The best available tier is picked automatically at query time.
 - **PII redaction** — emails, phone numbers, card numbers (Luhn-validated), API keys/tokens, license keys/UUIDs and passwords are redacted from all embedding chunks before anything is vectorized. Raw data stays in the database only. PII shown in the UI is masked.
-- **Product detection** — conversations are tagged with the plugin/product they are about (FileBird, YayMail, YayCurrency, YaySMTP, Brandy, YayCommerce, WooCommerce, WordPress) using keyword heuristics where specific plugins beat platform-level matches.
+- **Product detection** — conversations are tagged with the plugin/product they are about using keyword heuristics where specific plugins beat platform-level matches. Detection definitions come from the plugins you manage in `/plugins` (name + keywords); a built-in list (FileBird, YayMail, YayCurrency, YaySMTP, Brandy, YayCommerce, WooCommerce, WordPress) is the fallback for a fresh install.
+- **Multi-brand sync** — one `Brand` per Crisp website (e.g. YayCommerce, Ninja Team, CatFolders...), managed in `/brands`. The sync iterates every brand with a single plugin token; conversations are linked to their brand and filterable by it.
+- **Docs ingestion** — each plugin can register documentation sources (a URL to crawl or a sitemap). Ingestion crawls the pages (same-origin, same path prefix, max 200 pages), extracts clean text, chunks + embeds it into the same RAG index with `source="plugin_docs"`, and re-crawls incrementally (unchanged pages keep their chunks; removed pages are pruned). RAG search can mix chat and docs results or filter by source.
 
 ## Tech stack
 
@@ -55,7 +57,7 @@ Copy `.env.example` to `.env`. Validated at startup by `src/env.ts` (Zod) — in
 
 | Variable | Required | Default | Purpose |
 | --- | --- | --- | --- |
-| `CRISP_WEBSITE_ID` | yes | — | UUID of the Crisp website to sync |
+| `CRISP_WEBSITE_ID` | no (legacy) | — | Single-website fallback, used only when no brands exist yet. Prefer adding brands (one per Crisp website) in `/brands` |
 | `CRISP_IDENTIFIER` | yes | — | Plugin token identifier (Basic auth username) |
 | `CRISP_KEY` | yes | — | Plugin token key (Basic auth password) |
 | `DATABASE_URL` | yes | — | Postgres connection URL |
@@ -181,10 +183,17 @@ All routes require Basic auth (see Security). All bodies/queries are Zod-validat
 | `GET` | `/api/sync/crisp/status` | Live sync progress + last completed run + 10 most recent logs |
 | `POST` | `/api/sync/crisp/stop` | Request graceful cancellation of the running sync (`409` if none) |
 | `POST` | `/api/sync/crisp/conversation/{sessionId}` | Re-fetch one conversation from Crisp, upsert it, rebuild its chunks |
-| `GET` | `/api/conversations` | Paginated list. Query: `page, pageSize, state, tag, product, email, operatorId, hasAttachment, dateFrom, dateTo, search` |
+| `GET` | `/api/conversations` | Paginated list. Query: `page, pageSize, state, tag, product, brandId, email, operatorId, hasAttachment, dateFrom, dateTo, search` |
 | `GET` | `/api/conversations/{sessionId}` | Full conversation detail: messages, files, operator, chunk summaries |
-| `GET` | `/api/rag/search` | RAG search. Query: `query` (required), `limit` (default 8, max 50) |
-| `POST` | `/api/rag/chunks/rebuild` | Rebuild chunks. Body `{sessionId?, onlyResolved?, withEmbeddings?}`. Single session is synchronous; full rebuild runs in the background (`202`, `409` if already running) |
+| `GET` | `/api/rag/search` | RAG search. Query: `query` (required), `limit` (default 8, max 50), `source` (`crisp_chat`\|`plugin_docs`), `pluginId`, `brandId` |
+| `POST` | `/api/rag/chunks/rebuild` | Rebuild chat chunks. Body `{sessionId?, onlyResolved?, withEmbeddings?}`. Single session is synchronous; full rebuild runs in the background (`202`, `409` if already running) |
+| `GET`/`POST` | `/api/brands` | List brands / create a brand `{name, crispWebsiteId, domain?}` (adopts already-synced conversations with that website ID) |
+| `PATCH`/`DELETE` | `/api/brands/{id}` | Update or delete a brand (conversations are kept; plugins/docs cascade) |
+| `GET`/`POST` | `/api/plugins` | List plugins (with docs sources) / create `{brandId, name, wpOrgSlug?, detectionKeywords?}` |
+| `PATCH`/`DELETE` | `/api/plugins/{id}` | Update or delete a plugin (docs pages + doc chunks cascade) |
+| `POST` | `/api/docs/sources` | Register a docs source `{pluginId, url, type: "url"\|"sitemap"}` |
+| `GET`/`DELETE` | `/api/docs/sources/{id}` | Source status (for polling) / remove the source and its pages/chunks |
+| `POST` | `/api/docs/sources/{id}/ingest` | Crawl + chunk + embed in the background (`202`, `409` while running) |
 
 ## Admin UI
 
@@ -193,7 +202,9 @@ All routes require Basic auth (see Security). All bodies/queries are Zod-validat
 | `/dashboard` | Totals (conversations, messages, chunks, resolved), sync controls with live progress, recent sync log table |
 | `/conversations` | Filterable, paginated conversation list (state, tag, product, operator, email, attachments, date range, search) |
 | `/conversations/{sessionId}` | Chat-style message log with attachments, visitor panel (masked PII), resync/rebuild actions, chunk summaries |
-| `/rag` | Search playground: query the chunk store, see mode + similarity scores + source conversations |
+| `/rag` | Search playground: query the chunk store (all sources / chats only / docs only), see mode + similarity scores + source conversation or docs-page links |
+| `/brands` | Manage brands — one per Crisp website; the sync covers every brand listed |
+| `/plugins` | Manage plugins per brand (detection keywords, wp.org slug) and their docs sources, with one-click ingest and live crawl status |
 
 `/` redirects to `/dashboard`.
 
