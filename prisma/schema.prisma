@@ -1,0 +1,154 @@
+// Prisma schema for the Crisp conversation archive.
+//
+// pgvector note: the optional `embedding vector(1536)` column on
+// EmbeddingChunk is NOT managed here so that migrations never require the
+// pgvector extension. Run `prisma/sql/enable-pgvector.sql` against your
+// database to add it (see README). The app detects it at runtime and falls
+// back to JSON-stored embeddings / keyword search when absent.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model Conversation {
+  id                 String    @id @default(cuid())
+  websiteId          String
+  sessionId          String    @unique
+  state              String? // pending | unresolved | resolved
+  inbox              String?
+  createdAtCrisp     DateTime?
+  updatedAtCrisp     DateTime?
+  lastMessageAt      DateTime?
+  lastMessagePreview String?
+  visitorEmail       String?
+  visitorNickname    String?
+  visitorAvatar      String?
+  visitorPhone       String?
+  visitorUserId      String?
+  country            String?
+  city               String?
+  ip                 String?
+  tags               String[]  @default([])
+  assignedOperatorId String? // Crisp user_id of the assigned operator
+  assignedOperator   Operator? @relation(fields: [assignedOperatorId], references: [crispUserId])
+  rawJson            Json
+  createdAt          DateTime  @default(now())
+  updatedAt          DateTime  @updatedAt
+
+  messages Message[]
+  files    ConversationFile[]
+  chunks   EmbeddingChunk[]
+
+  @@index([websiteId])
+  @@index([state])
+  @@index([visitorEmail])
+  @@index([updatedAtCrisp])
+  @@index([lastMessageAt])
+  @@index([assignedOperatorId])
+  @@index([tags], type: Gin)
+}
+
+model Message {
+  id             String       @id @default(cuid())
+  conversationId String
+  conversation   Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  // Crisp message fingerprint (stringified). When Crisp omits it we store a
+  // deterministic surrogate so upserts stay idempotent.
+  crispMessageId String?
+  sessionId      String
+  type           String // text | file | animation | audio | picker | field | carousel | note | event
+  from           String // user | operator
+  origin         String? // chat | email | urn:*
+  userId         String? // Crisp user_id of the sender when from=user
+  operatorId     String? // Crisp user_id of the sender when from=operator
+  content        String? // plain-text rendering of the message
+  contentJson    Json? // structured content for non-text messages
+  timestampCrisp DateTime?
+  rawJson        Json
+  createdAt      DateTime     @default(now())
+
+  files ConversationFile[]
+
+  // Fingerprints are only guaranteed unique within a session, so the upsert
+  // key is compound rather than a global unique on crispMessageId.
+  @@unique([sessionId, crispMessageId])
+  @@index([conversationId])
+  @@index([sessionId])
+  @@index([timestampCrisp])
+  @@index([from])
+}
+
+model Operator {
+  id          String   @id @default(cuid())
+  crispUserId String   @unique
+  name        String?
+  email       String?
+  avatar      String?
+  rawJson     Json?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  assignedConversations Conversation[]
+}
+
+model ConversationFile {
+  id             String       @id @default(cuid())
+  conversationId String
+  conversation   Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  messageId      String?
+  message        Message?     @relation(fields: [messageId], references: [id], onDelete: SetNull)
+  sessionId      String
+  url            String
+  filename       String?
+  mimeType       String?
+  size           Int?
+  rawJson        Json?
+  createdAt      DateTime     @default(now())
+
+  @@index([conversationId])
+  @@index([sessionId])
+}
+
+model EmbeddingChunk {
+  id             String       @id @default(cuid())
+  conversationId String
+  conversation   Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  chunkIndex     Int          @default(0)
+  messageIds     String[]     @default([])
+  chunkText      String
+  product        String?
+  topic          String?
+  language       String?
+  // JSON-array fallback storage for the embedding vector; the real
+  // `embedding vector(1536)` column is added by prisma/sql/enable-pgvector.sql
+  // when pgvector is available.
+  embeddingJson  Json?
+  rawJson        Json?
+  createdAt      DateTime     @default(now())
+
+  @@index([conversationId])
+  @@index([product])
+  @@index([language])
+}
+
+model SyncLog {
+  id                  String    @id @default(cuid())
+  kind                String    @default("full") // full | incremental | single
+  status              String // running | completed | failed | cancelled
+  startedAt           DateTime  @default(now())
+  finishedAt          DateTime?
+  pageFrom            Int?
+  pageTo              Int?
+  conversationsSynced Int       @default(0)
+  messagesSynced      Int       @default(0)
+  failedSessions      String[]  @default([])
+  error               String?
+
+  @@index([status])
+  @@index([startedAt])
+}
