@@ -1,0 +1,250 @@
+# Crisp Archive
+
+Sync, browse and RAG-search your [Crisp.chat](https://crisp.chat) history — an internal admin tool that pulls every support conversation from the Crisp REST API into your own Postgres database, renders them in a Crisp-like chat log UI, and makes them retrievable for AI workflows.
+
+## Features
+
+- **Sync engine** — full and incremental syncs of all conversations, messages, attachments and operators. Global rate limiting with exponential backoff, page-level resumability, graceful cancellation, per-run `SyncLog` history and failed-session tracking. Run from the CLI, cron, or dashboard buttons.
+- **Crisp-like chat log UI** — paginated, filterable conversation list (state, tag, product, operator, email, attachments, date range, free-text search) and a message-by-message conversation view with attachments and visitor metadata.
+- **3-tier RAG search** — pgvector ANN search when available, in-app cosine ranking over JSON-stored embeddings when not, and Postgres full-text keyword search when no OpenAI key is configured. The best available tier is picked automatically at query time.
+- **PII redaction** — emails, phone numbers, card numbers (Luhn-validated), API keys/tokens, license keys/UUIDs and passwords are redacted from all embedding chunks before anything is vectorized. Raw data stays in the database only. PII shown in the UI is masked.
+- **Product detection** — conversations are tagged with the plugin/product they are about (FileBird, YayMail, YayCurrency, YaySMTP, Brandy, YayCommerce, WooCommerce, WordPress) using keyword heuristics where specific plugins beat platform-level matches.
+
+## Tech stack
+
+| Layer | Choice |
+| --- | --- |
+| Framework | Next.js 15.5 (App Router), React 19, TypeScript (strict) |
+| Database | PostgreSQL + Prisma 6 (optional pgvector extension) |
+| Styling | Tailwind CSS v4 (CSS-first config), shadcn/ui-style components, lucide-react |
+| Validation | Zod (env + API inputs) |
+| Embeddings | OpenAI `text-embedding-3-small` (optional, 1536 dims) |
+| Scripts | tsx CLI scripts for sync / chunk rebuild / demo seed |
+
+## Quick start
+
+Prerequisites: **Node 20+** and **PostgreSQL 14+**.
+
+```bash
+npm install
+cp .env.example .env         # fill in Crisp credentials + DATABASE_URL
+npx prisma migrate deploy    # create the schema
+npm run dev                  # http://localhost:3000
+```
+
+Then either run a real sync (`npm run sync:crisp`, needs Crisp credentials) or load fake data with `npm run seed:demo` to explore the UI immediately.
+
+## Creating a Crisp API token
+
+The sync uses a **Crisp Marketplace plugin token** (not your personal login). The app sends it as HTTP Basic auth with the `X-Crisp-Tier: plugin` header automatically — you only supply the identifier/key pair.
+
+1. Go to [https://marketplace.crisp.chat](https://marketplace.crisp.chat) and sign in with your Crisp account.
+2. Create a new **plugin** (a private plugin is fine — it never has to be published).
+3. In the plugin's **Tokens** (API) section, generate a **production** token. Copy the **identifier** and **key** — these become `CRISP_IDENTIFIER` and `CRISP_KEY`.
+4. Request website access with the conversation **read** scopes:
+   - `website:conversation:sessions` (read)
+   - `website:conversation:messages` (read)
+
+   Operator-list access is optional — the sync treats a missing operators scope as non-fatal.
+5. Install/trust the plugin on the website you want to archive (from the plugin's settings, or via the Crisp app's Plugins section) so the token is authorized for that website.
+6. Find your **website ID** for `CRISP_WEBSITE_ID`: it is the UUID in your Crisp app URL (`https://app.crisp.chat/website/<website_id>/...`), also shown under Website Settings → Setup instructions.
+
+## Environment variables
+
+Copy `.env.example` to `.env`. Validated at startup by `src/env.ts` (Zod) — invalid config fails fast with a readable error.
+
+| Variable | Required | Default | Purpose |
+| --- | --- | --- | --- |
+| `CRISP_WEBSITE_ID` | yes | — | UUID of the Crisp website to sync |
+| `CRISP_IDENTIFIER` | yes | — | Plugin token identifier (Basic auth username) |
+| `CRISP_KEY` | yes | — | Plugin token key (Basic auth password) |
+| `DATABASE_URL` | yes | — | Postgres connection URL |
+| `OPENAI_API_KEY` | no | empty | Enables embedding generation for vector/hybrid RAG search. Unset → keyword search only |
+| `OPENAI_EMBEDDING_MODEL` | no | `text-embedding-3-small` | Embedding model (1536 dimensions) |
+| `BASIC_AUTH_USER` | prod: yes | — | Admin UI/API Basic auth username |
+| `BASIC_AUTH_PASSWORD` | prod: yes | — | Admin UI/API Basic auth password |
+| `CRISP_REQUEST_INTERVAL_MS` | no | `150` | Minimum delay between Crisp API requests (ms) |
+| `CRISP_MAX_RETRIES` | no | `5` | Max retries for retryable Crisp API failures |
+
+## Database & migrations
+
+```bash
+npx prisma migrate deploy   # apply committed migrations (CI / production / first setup)
+npx prisma migrate dev      # develop new migrations (local schema changes)
+```
+
+### Optional: pgvector
+
+Migrations deliberately never require pgvector — the `embedding vector(1536)` column lives outside the Prisma schema. If your Postgres has the extension available (e.g. `apt install postgresql-16-pgvector`, or managed Postgres like Neon/Supabase/RDS), enable it once:
+
+```bash
+psql "$DATABASE_URL" -f prisma/sql/enable-pgvector.sql
+```
+
+This creates the extension, adds the `embedding` column to `EmbeddingChunk`, and builds an IVFFlat cosine index. The app detects the column at runtime — no config needed.
+
+### Search fallback behavior
+
+| pgvector | `OPENAI_API_KEY` | RAG search mode |
+| --- | --- | --- |
+| yes | set | `vector` — ANN similarity search in SQL |
+| no | set | `hybrid` — keyword prefilter + cosine ranking in app code over JSON-stored embeddings |
+| any | unset | `keyword` — Postgres full-text search (`websearch_to_tsquery`, AND→OR retry, ILIKE fallback) |
+
+## Syncing data
+
+### Full sync
+
+```bash
+npm run sync:crisp                 # everything, from page 1
+npm run sync:crisp -- --page=42    # resume an interrupted run from page 42
+```
+
+Progress (last page reached, counts, failed sessions) is persisted to `SyncLog` after **every page**, so an interrupted run can be resumed with `--page=N` (check `pageTo` on the latest log, or the dashboard).
+
+### Incremental sync
+
+```bash
+npm run sync:crisp:incremental
+```
+
+Only syncs conversations updated since the last successful run, with a 1-hour overlap window to absorb clock skew. Falls back to a full sync when the database has never been synced. Designed for cron:
+
+```cron
+*/30 * * * *  cd /path/to/crisp-archive && npm run sync:crisp:incremental >> /var/log/crisp-sync.log 2>&1
+```
+
+### From the dashboard
+
+`/dashboard` has **Full sync**, **Incremental sync** and **Stop** buttons backed by `POST /api/sync/crisp/start` and `POST /api/sync/crisp/stop`, with live progress from `GET /api/sync/crisp/status`. Only one sync can run at a time (a second start returns `409`). Stop is graceful: the conversation in flight finishes, progress is persisted, and the log is marked `cancelled`.
+
+### Reliability details
+
+- **Rate limiting** — all Crisp requests are serialized through one process-wide queue with a minimum inter-request delay (`CRISP_REQUEST_INTERVAL_MS`, default 150 ms).
+- **Backoff** — retryable failures (429/5xx/network) retry with exponential backoff (2s, 4s, 8s, ... capped at 60s), honouring `Retry-After` when present, up to `CRISP_MAX_RETRIES`.
+- **Failed sessions** — a conversation that fails to sync is logged to `SyncLog.failedSessions` and the run continues; nothing aborts the whole sync.
+- **Single-conversation resync** — re-fetch one conversation (and rebuild its chunks) without a full run:
+
+  ```bash
+  curl -u admin:pass -X POST http://localhost:3000/api/sync/crisp/conversation/SESSION_ID
+  ```
+
+  Also available as a button on the conversation detail page.
+
+Resolved conversations get their RAG chunks rebuilt automatically during sync.
+
+## RAG
+
+### How chunks are built (`src/lib/rag/chunker.ts`)
+
+1. Messages are ordered chronologically; **notes and events are excluded** (private operator notes never reach chunks). Attachments become `[attachment: name]` placeholders.
+2. Messages are grouped into **customer → operator exchanges**; whole exchanges are packed into chunks of up to ~1600 characters (~350–400 tokens).
+3. Every chunk gets a **metadata header** — `[Session: ... | Date: ... | Product: ... | Tags: ... | Language: ...]` — so retrieved text is self-describing when pasted into an LLM prompt.
+4. The chunk body is passed through **redaction** (`src/lib/rag/redact.ts`), which replaces:
+   - email addresses → `[EMAIL]`
+   - phone numbers (7+ digits, date-aware) → `[PHONE]`
+   - card numbers (13–19 digits, Luhn-validated) → `[CARD_NUMBER]`
+   - API keys/tokens (OpenAI `sk-`, GitHub, Slack, AWS, JWTs, long hex) → `[API_KEY]`
+   - license keys and UUIDs → `[LICENSE_KEY]`
+   - `password: ...` values → `[PASSWORD]`
+5. **Product detection** (`src/lib/rag/products.ts`) tags each chunk with one of: FileBird, YayMail, YayCurrency, YaySMTP, Brandy, YayCommerce, WooCommerce, WordPress. Crisp tags win over text matches; specific plugins beat platform matches.
+
+### Rebuilding chunks
+
+```bash
+npm run rag:rebuild                 # resolved conversations only, with embeddings
+npm run rag:rebuild -- --all        # every conversation
+npm run rag:rebuild -- --no-embed   # skip embedding generation
+```
+
+Or via `POST /api/rag/chunks/rebuild` (dashboard button) — background rebuild of all (resolved) conversations, or synchronous for a single `sessionId`.
+
+### Testing search
+
+Use the `/rag` page, or hit the API directly:
+
+```bash
+curl -u admin:pass "http://localhost:3000/api/rag/search?query=refund+not+working"
+```
+
+The response includes the `mode` actually used (`vector` / `hybrid` / `keyword`), and each result links back to its source conversation.
+
+## API reference
+
+All routes require Basic auth (see Security). All bodies/queries are Zod-validated.
+
+| Method | Path | Description |
+| --- | --- | --- |
+| `POST` | `/api/sync/crisp/start` | Start a background sync. Body `{mode?: "full"\|"incremental", startPage?}`. `202` on start, `409` if one is running |
+| `GET` | `/api/sync/crisp/status` | Live sync progress + last completed run + 10 most recent logs |
+| `POST` | `/api/sync/crisp/stop` | Request graceful cancellation of the running sync (`409` if none) |
+| `POST` | `/api/sync/crisp/conversation/{sessionId}` | Re-fetch one conversation from Crisp, upsert it, rebuild its chunks |
+| `GET` | `/api/conversations` | Paginated list. Query: `page, pageSize, state, tag, product, email, operatorId, hasAttachment, dateFrom, dateTo, search` |
+| `GET` | `/api/conversations/{sessionId}` | Full conversation detail: messages, files, operator, chunk summaries |
+| `GET` | `/api/rag/search` | RAG search. Query: `query` (required), `limit` (default 8, max 50) |
+| `POST` | `/api/rag/chunks/rebuild` | Rebuild chunks. Body `{sessionId?, onlyResolved?, withEmbeddings?}`. Single session is synchronous; full rebuild runs in the background (`202`, `409` if already running) |
+
+## Admin UI
+
+| Page | What it shows |
+| --- | --- |
+| `/dashboard` | Totals (conversations, messages, chunks, resolved), sync controls with live progress, recent sync log table |
+| `/conversations` | Filterable, paginated conversation list (state, tag, product, operator, email, attachments, date range, search) |
+| `/conversations/{sessionId}` | Chat-style message log with attachments, visitor panel (masked PII), resync/rebuild actions, chunk summaries |
+| `/rag` | Search playground: query the chunk store, see mode + similarity scores + source conversations |
+
+`/` redirects to `/dashboard`.
+
+## Security notes
+
+- **Basic auth everywhere** — `src/middleware.ts` protects every page and API route. In production, the app **refuses to serve** (`503`) if `BASIC_AUTH_USER`/`BASIC_AUTH_PASSWORD` are unset; in development it runs open with a console warning. Credential comparison is timing-safe.
+- **Secrets stay server-side** — `src/env.ts` must only ever be imported from server code; Crisp/OpenAI credentials never reach the browser bundle. Client components use the API routes.
+- **PII is masked in the UI** (emails, phones, IPs) and **redacted from RAG chunks** before embedding. The unmodified originals exist only in the database (`rawJson` columns).
+- **Nothing is sent to third parties** except redacted chunk text to OpenAI for embeddings — and only when `OPENAI_API_KEY` is set.
+
+## Adjusting Crisp endpoints
+
+All Crisp REST API paths live in **one file**: `src/lib/crisp/endpoints.ts`. If a path differs from the [official docs](https://docs.crisp.chat/references/rest-api/v1/) or changes in the future, edit it there — nothing else in the codebase needs to move.
+
+## Demo data
+
+```bash
+npm run seed:demo
+```
+
+Seeds five realistic **fake** conversations (FileBird, YayMail, YayCurrency, YaySMTP, pre-sales) through the real sync pipeline — normalization, upserts, file extraction, chunk building and redaction all run exactly as they would for live data. Idempotent: re-running replaces the previous demo rows. No Crisp API access required.
+
+## Project structure
+
+```
+prisma/
+  schema.prisma              # Conversation, Message, Operator, ConversationFile,
+                             # EmbeddingChunk, SyncLog
+  sql/enable-pgvector.sql    # optional pgvector column + IVFFlat index
+scripts/
+  sync-full.ts               # npm run sync:crisp [-- --page=N]
+  sync-incremental.ts        # npm run sync:crisp:incremental (cron-friendly)
+  rebuild-chunks.ts          # npm run rag:rebuild [-- --all --no-embed]
+  seed-demo.ts               # npm run seed:demo
+src/
+  middleware.ts              # HTTP Basic auth for all pages + API
+  env.ts                     # Zod-validated server-only environment
+  app/
+    dashboard/               # stats + sync controls
+    conversations/           # list + [sessionId] detail
+    rag/                     # search playground
+    api/
+      sync/crisp/            # start | status | stop | conversation/[sessionId]
+      conversations/         # list | [sessionId] detail
+      rag/                   # search | chunks/rebuild
+  lib/
+    crisp/                   # endpoints.ts (single endpoint map), client.ts
+                             # (rate-limited, retrying API client), types.ts
+    sync/                    # sync-service.ts (page loop), normalize.ts,
+                             # sync-state.ts (in-process progress)
+    rag/                     # chunker.ts, redact.ts, products.ts,
+                             # embeddings.ts, rebuild.ts, search.ts
+    conversations.ts         # list/detail/filter/stats queries
+    db.ts                    # Prisma client singleton
+  components/                # UI (shadcn-style primitives + feature components)
+```
