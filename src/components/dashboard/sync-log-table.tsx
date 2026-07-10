@@ -37,6 +37,8 @@ const STATUS_STYLES: Record<string, string> = {
     "animate-pulse border-blue-200 bg-blue-50 text-blue-700 dark:border-blue-500/30 dark:bg-blue-500/10 dark:text-blue-400",
   cancelled:
     "border-zinc-200 bg-zinc-100 text-zinc-600 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-400",
+  paused:
+    "border-amber-200 bg-amber-50 text-amber-700 dark:border-amber-500/30 dark:bg-amber-500/10 dark:text-amber-400",
 };
 
 function StatusBadge({ status }: { status: string }) {

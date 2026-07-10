@@ -6,6 +6,8 @@ import { formatDistanceToNow } from "date-fns";
 import {
   History,
   LoaderCircle,
+  Pause,
+  Play,
   RefreshCw,
   Square,
   TriangleAlert,
@@ -41,6 +43,7 @@ interface SyncProgress {
   lastSessionId: string | null;
   statusMessage: string | null;
   cancelRequested: boolean;
+  cancelReason?: "cancelled" | "paused";
 }
 
 interface StatusResponse {
@@ -71,12 +74,22 @@ export function SyncPanel({ lastSync, recentLogs }: SyncPanelProps) {
   const [progress, setProgress] = React.useState<SyncProgress | null>(null);
   const [logs, setLogs] = React.useState<SerializedSyncLog[]>(recentLogs);
   const [last, setLast] = React.useState<LastSyncSummary | null>(lastSync);
-  const [starting, setStarting] = React.useState<"full" | "incremental" | null>(
-    null
-  );
-  const [stopping, setStopping] = React.useState(false);
+  const [starting, setStarting] = React.useState<
+    "full" | "incremental" | "resume" | null
+  >(null);
+  const [halting, setHalting] = React.useState<"pause" | "stop" | null>(null);
   const [running, setRunning] = React.useState(false);
   const runningRef = React.useRef(false);
+
+  // When the most recent run stopped short (paused/cancelled/failed) with a
+  // saved page, offer to continue the backfill from there instead of page 1.
+  const resumable = React.useMemo(() => {
+    const latest = logs.find((log) => log.status !== "running");
+    if (!latest || latest.status === "completed") return null;
+    const page = latest.pageTo ?? 0;
+    if (page < 1) return null;
+    return { page, kind: latest.kind, status: latest.status };
+  }, [logs]);
 
   const refreshStatus = React.useCallback(async () => {
     try {
@@ -121,13 +134,18 @@ export function SyncPanel({ lastSync, recentLogs }: SyncPanelProps) {
     return () => clearInterval(id);
   }, [running, refreshStatus]);
 
-  const startSync = async (mode: "full" | "incremental") => {
-    setStarting(mode);
+  const startSync = async (opts: {
+    key: "full" | "incremental" | "resume";
+    mode: "full" | "incremental";
+    startPage?: number;
+    label: string;
+  }) => {
+    setStarting(opts.key);
     try {
       const res = await fetch("/api/sync/crisp/start", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ mode }),
+        body: JSON.stringify({ mode: opts.mode, startPage: opts.startPage }),
       });
       if (res.status === 409) {
         toast.error("A sync is already running");
@@ -142,9 +160,7 @@ export function SyncPanel({ lastSync, recentLogs }: SyncPanelProps) {
       if (data.progress) setProgress(data.progress);
       runningRef.current = true;
       setRunning(true);
-      toast.success(
-        mode === "full" ? "Full sync started" : "Incremental sync started"
-      );
+      toast.success(`${opts.label} started`);
     } catch {
       toast.error("Failed to start sync");
     } finally {
@@ -152,26 +168,34 @@ export function SyncPanel({ lastSync, recentLogs }: SyncPanelProps) {
     }
   };
 
-  const stopSync = async () => {
-    setStopping(true);
+  const haltSync = async (action: "pause" | "stop") => {
+    setHalting(action);
     try {
-      const res = await fetch("/api/sync/crisp/stop", { method: "POST" });
+      const res = await fetch("/api/sync/crisp/stop", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ pause: action === "pause" }),
+      });
       if (!res.ok) {
-        toast.error("Failed to request stop");
+        toast.error(`Failed to request ${action}`);
         return;
       }
-      toast.success("Stop requested", {
-        description: "The sync will halt after the current page.",
+      toast.success(action === "pause" ? "Pause requested" : "Stop requested", {
+        description:
+          action === "pause"
+            ? "The sync will halt after the current page — resume it any time."
+            : "The sync will halt after the current page.",
       });
       await refreshStatus();
     } catch {
-      toast.error("Failed to request stop");
+      toast.error(`Failed to request ${action}`);
     } finally {
-      setStopping(false);
+      setHalting(null);
     }
   };
 
   const busy = running || starting !== null;
+  const halted = Boolean(progress?.cancelRequested);
 
   return (
     <div className="space-y-6">
@@ -202,43 +226,126 @@ export function SyncPanel({ lastSync, recentLogs }: SyncPanelProps) {
             ) : (
               <span>No completed sync yet.</span>
             )}
+            {resumable && !running && (
+              <span className="text-amber-600 dark:text-amber-400">
+                Interrupted at page {resumable.page} — continue where it left
+                off.
+              </span>
+            )}
           </CardDescription>
           <CardAction className="flex flex-wrap items-center gap-2">
-            {running && (
-              <Button
-                variant="outline"
-                size="sm"
-                onClick={stopSync}
-                disabled={stopping || Boolean(progress?.cancelRequested)}
-                className="border-red-200 text-red-600 hover:bg-red-50 hover:text-red-700 dark:border-red-500/30 dark:text-red-400 dark:hover:bg-red-500/10"
-              >
-                <Square className="size-3.5" />
-                {progress?.cancelRequested ? "Stopping…" : "Stop"}
-              </Button>
+            {running ? (
+              <>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={() => haltSync("pause")}
+                  disabled={halted || halting !== null}
+                  className="border-amber-200 text-amber-600 hover:bg-amber-50 hover:text-amber-700 dark:border-amber-500/30 dark:text-amber-400 dark:hover:bg-amber-500/10"
+                >
+                  {halting === "pause" ? (
+                    <LoaderCircle className="size-3.5 animate-spin" />
+                  ) : (
+                    <Pause className="size-3.5" />
+                  )}
+                  {halted && progress?.cancelReason === "paused"
+                    ? "Pausing…"
+                    : "Pause"}
+                </Button>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={() => haltSync("stop")}
+                  disabled={halted || halting !== null}
+                  className="border-red-200 text-red-600 hover:bg-red-50 hover:text-red-700 dark:border-red-500/30 dark:text-red-400 dark:hover:bg-red-500/10"
+                >
+                  {halting === "stop" ? (
+                    <LoaderCircle className="size-3.5 animate-spin" />
+                  ) : (
+                    <Square className="size-3.5" />
+                  )}
+                  {halted && progress?.cancelReason !== "paused"
+                    ? "Stopping…"
+                    : "Stop"}
+                </Button>
+              </>
+            ) : resumable ? (
+              <>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  disabled={busy}
+                  onClick={() =>
+                    startSync({ key: "full", mode: "full", label: "Full sync" })
+                  }
+                >
+                  {starting === "full" ? (
+                    <LoaderCircle className="size-3.5 animate-spin" />
+                  ) : (
+                    <RefreshCw className="size-3.5" />
+                  )}
+                  Sync from start
+                </Button>
+                <Button
+                  size="sm"
+                  disabled={busy}
+                  onClick={() =>
+                    startSync({
+                      key: "resume",
+                      mode:
+                        resumable.kind === "incremental"
+                          ? "incremental"
+                          : "full",
+                      startPage: resumable.page,
+                      label: `Continue from page ${resumable.page}`,
+                    })
+                  }
+                >
+                  {starting === "resume" ? (
+                    <LoaderCircle className="size-3.5 animate-spin" />
+                  ) : (
+                    <Play className="size-3.5" />
+                  )}
+                  Continue from page {resumable.page}
+                </Button>
+              </>
+            ) : (
+              <>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  disabled={busy}
+                  onClick={() =>
+                    startSync({
+                      key: "incremental",
+                      mode: "incremental",
+                      label: "Incremental sync",
+                    })
+                  }
+                >
+                  {starting === "incremental" ? (
+                    <LoaderCircle className="size-3.5 animate-spin" />
+                  ) : (
+                    <Zap className="size-3.5" />
+                  )}
+                  Incremental sync
+                </Button>
+                <Button
+                  size="sm"
+                  disabled={busy}
+                  onClick={() =>
+                    startSync({ key: "full", mode: "full", label: "Full sync" })
+                  }
+                >
+                  {starting === "full" ? (
+                    <LoaderCircle className="size-3.5 animate-spin" />
+                  ) : (
+                    <RefreshCw className="size-3.5" />
+                  )}
+                  Sync now
+                </Button>
+              </>
             )}
-            <Button
-              variant="outline"
-              size="sm"
-              onClick={() => startSync("incremental")}
-              disabled={busy}
-            >
-              {starting === "incremental" ? (
-                <LoaderCircle className="size-3.5 animate-spin" />
-              ) : (
-                <Zap className="size-3.5" />
-              )}
-              Incremental sync
-            </Button>
-            <Button size="sm" onClick={() => startSync("full")} disabled={busy}>
-              {starting === "full" ? (
-                <LoaderCircle className="size-3.5 animate-spin" />
-              ) : (
-                <RefreshCw
-                  className={cn("size-3.5", running && "animate-spin")}
-                />
-              )}
-              Sync now
-            </Button>
           </CardAction>
         </CardHeader>
         {running && progress && (

@@ -25,7 +25,7 @@ const INCREMENTAL_OVERLAP_MS = 60 * 60 * 1000;
 
 export interface SyncRunResult {
   syncLogId: string;
-  status: "completed" | "failed" | "cancelled";
+  status: "completed" | "failed" | "cancelled" | "paused";
   conversationsSynced: number;
   messagesSynced: number;
   failedSessions: string[];
@@ -397,7 +397,7 @@ async function runSync(options: RunSyncOptions): Promise<SyncRunResult> {
     for (let t = 0; t < targets.length; t++) {
       const target = targets[t];
       if (state.cancelRequested) {
-        status = "cancelled";
+        status = state.cancelReason;
         break;
       }
 
@@ -428,7 +428,7 @@ async function runSync(options: RunSyncOptions): Promise<SyncRunResult> {
 
       while (page < MAX_PAGES && !reachedCheckpoint) {
         if (state.cancelRequested) {
-          status = "cancelled";
+          status = state.cancelReason;
           break;
         }
 
@@ -448,7 +448,7 @@ async function runSync(options: RunSyncOptions): Promise<SyncRunResult> {
 
         for (const conversation of conversations) {
           if (state.cancelRequested) {
-            status = "cancelled";
+            status = state.cancelReason;
             break;
           }
           const sessionId = conversation.session_id;

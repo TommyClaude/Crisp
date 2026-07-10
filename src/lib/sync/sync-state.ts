@@ -6,6 +6,9 @@
 
 export type SyncKind = "full" | "incremental" | "single";
 
+/** Terminal status recorded when a run is halted on request. */
+export type CancelReason = "cancelled" | "paused";
+
 export interface SyncProgress {
   running: boolean;
   kind: SyncKind | null;
@@ -18,6 +21,8 @@ export interface SyncProgress {
   lastSessionId: string | null;
   statusMessage: string | null;
   cancelRequested: boolean;
+  /** Whether an in-flight halt should record the run as paused vs cancelled. */
+  cancelReason: CancelReason;
 }
 
 function freshProgress(): SyncProgress {
@@ -33,6 +38,7 @@ function freshProgress(): SyncProgress {
     lastSessionId: null,
     statusMessage: null,
     cancelRequested: false,
+    cancelReason: "cancelled",
   };
 }
 
@@ -62,11 +68,18 @@ export function endSyncProgress(statusMessage: string): void {
   state.running = false;
   state.statusMessage = statusMessage;
   state.cancelRequested = false;
+  state.cancelReason = "cancelled";
 }
 
-export function requestSyncCancel(): boolean {
+/**
+ * Request a graceful halt of the running sync. `reason` decides the terminal
+ * status the run records: "cancelled" (Stop) or "paused" (Pause) — a paused
+ * run surfaces a "Continue from page N" affordance in the UI.
+ */
+export function requestSyncCancel(reason: CancelReason = "cancelled"): boolean {
   const state = getSyncProgress();
   if (!state.running) return false;
   state.cancelRequested = true;
+  state.cancelReason = reason;
   return true;
 }
