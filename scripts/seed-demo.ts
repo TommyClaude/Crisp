@@ -398,6 +398,44 @@ async function main() {
       ),
     },
   });
+  // Demo wp.org forum threads for the /suggestions page.
+  const demoThreads = [
+    {
+      plugin: "FileBird",
+      guid: "https://wordpress.org/support/topic/demo-folders-gone-after-update/",
+      title: "Folders gone after updating to latest version",
+      author: "wpuser2024",
+      excerpt:
+        "Hi, I updated FileBird this morning and all my media folders are gone from the sidebar. I have thousands of files organized. Please help, is my folder structure lost?",
+      daysAgo: 0,
+    },
+    {
+      plugin: "YayMail",
+      guid: "https://wordpress.org/support/topic/demo-logo-stretched-outlook/",
+      title: "Email logo looks stretched in Outlook desktop",
+      author: "shopowner_lena",
+      excerpt:
+        "The logo in my WooCommerce order emails customized with YayMail displays fine in Gmail but appears stretched in Outlook desktop. Any idea how to fix the image sizing?",
+      daysAgo: 1,
+    },
+  ];
+  for (const spec of demoThreads) {
+    const pluginId = pluginIdByName.get(spec.plugin);
+    if (!pluginId) continue;
+    await prisma.supportThread.create({
+      data: {
+        pluginId,
+        guid: spec.guid,
+        url: spec.guid,
+        title: spec.title,
+        author: spec.author,
+        excerpt: spec.excerpt,
+        publishedAt: new Date(NOW - spec.daysAgo * DAY),
+      },
+    });
+    console.log(`  \u2713 forum thread for ${spec.plugin}`);
+  }
+
   console.log("Demo seed complete.");
   await prisma.$disconnect();
 }

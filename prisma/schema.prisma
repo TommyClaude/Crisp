@@ -45,10 +45,39 @@ model Plugin {
   createdAt         DateTime @default(now())
   updatedAt         DateTime @updatedAt
 
-  docsSources DocsSource[]
-  chunks      EmbeddingChunk[]
+  docsSources    DocsSource[]
+  chunks         EmbeddingChunk[]
+  supportThreads SupportThread[]
 
   @@index([brandId])
+}
+
+// A topic from a plugin's WordPress.org support forum (via the RSS feed),
+// plus the LLM-drafted reply suggestion for human review. Drafts are never
+// auto-posted to wp.org.
+model SupportThread {
+  id           String    @id @default(cuid())
+  pluginId     String
+  plugin       Plugin    @relation(fields: [pluginId], references: [id], onDelete: Cascade)
+  guid         String // feed item guid (topic URL)
+  url          String
+  title        String
+  author       String?
+  excerpt      String // topic body text from the feed
+  publishedAt  DateTime?
+  status       String    @default("new") // new | drafted | failed | reviewed | dismissed
+  draftAnswer  String?
+  draftModel   String?
+  // Retrieved chat/docs chunks the draft was grounded on:
+  // [{source, similarity, title, link, excerpt, product}]
+  contextJson  Json?
+  suggestError String?
+  fetchedAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
+
+  @@unique([pluginId, guid])
+  @@index([status])
+  @@index([publishedAt])
 }
 
 // A crawlable documentation source for a plugin (site URL or sitemap.xml).

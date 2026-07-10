@@ -15,6 +15,19 @@ const envSchema = z.object({
   DATABASE_URL: z.string().url("DATABASE_URL must be a valid connection URL"),
   OPENAI_API_KEY: z.string().optional().or(z.literal("")),
   OPENAI_EMBEDDING_MODEL: z.string().default("text-embedding-3-small"),
+  // ── Answer suggester (Phase 3) — all optional ──────────────────────────
+  // Provider for drafting forum replies: "anthropic" | "openai" | "auto".
+  // "auto" picks Anthropic when ANTHROPIC_API_KEY is set, else OpenAI when
+  // OPENAI_API_KEY is set, else runs context-only (no draft generation).
+  SUGGESTER_PROVIDER: z.enum(["auto", "anthropic", "openai"]).default("auto"),
+  ANTHROPIC_API_KEY: z.string().optional().or(z.literal("")),
+  ANTHROPIC_MODEL: z.string().default("claude-opus-4-8"),
+  OPENAI_CHAT_MODEL: z.string().default("gpt-4o-mini"),
+  // Base URL for wp.org support-forum feeds ({base}/{slug}/feed/). Only
+  // overridden in tests.
+  WPORG_FEED_BASE: z
+    .string()
+    .default("https://wordpress.org/support/plugin"),
   BASIC_AUTH_USER: z.string().optional(),
   BASIC_AUTH_PASSWORD: z.string().optional(),
   CRISP_REQUEST_INTERVAL_MS: z.coerce.number().int().positive().default(150),

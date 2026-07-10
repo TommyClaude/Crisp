@@ -18,7 +18,8 @@
     "sync:crisp": "tsx scripts/sync-full.ts",
     "sync:crisp:incremental": "tsx scripts/sync-incremental.ts",
     "rag:rebuild": "tsx scripts/rebuild-chunks.ts",
-    "seed:demo": "tsx scripts/seed-demo.ts"
+    "seed:demo": "tsx scripts/seed-demo.ts",
+    "wporg:check": "tsx scripts/check-wporg.ts"
   },
   "dependencies": {
     "@prisma/client": "6.19.3",

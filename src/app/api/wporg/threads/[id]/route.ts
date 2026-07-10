@@ -1,0 +1,67 @@
+import { NextRequest, NextResponse } from "next/server";
+import { z } from "zod";
+import { Prisma } from "@prisma/client";
+import { prisma } from "@/lib/db";
+
+export const dynamic = "force-dynamic";
+
+const patchSchema = z.object({
+  status: z.enum(["new", "drafted", "reviewed", "dismissed"]),
+});
+
+/** PATCH /api/wporg/threads/:id — update review status. */
+export async function PATCH(
+  request: NextRequest,
+  { params }: { params: Promise<{ id: string }> }
+) {
+  const { id } = await params;
+  let json: unknown;
+  try {
+    json = await request.json();
+  } catch {
+    return NextResponse.json({ error: "Invalid JSON body" }, { status: 400 });
+  }
+  const parsed = patchSchema.safeParse(json);
+  if (!parsed.success) {
+    return NextResponse.json(
+      { error: "Invalid request", issues: parsed.error.issues },
+      { status: 400 }
+    );
+  }
+
+  try {
+    const thread = await prisma.supportThread.update({
+      where: { id },
+      data: { status: parsed.data.status },
+    });
+    return NextResponse.json({ thread });
+  } catch (error) {
+    if (
+      error instanceof Prisma.PrismaClientKnownRequestError &&
+      error.code === "P2025"
+    ) {
+      return NextResponse.json({ error: "Thread not found" }, { status: 404 });
+    }
+    throw error;
+  }
+}
+
+/** DELETE /api/wporg/threads/:id — remove a thread entirely. */
+export async function DELETE(
+  _request: NextRequest,
+  { params }: { params: Promise<{ id: string }> }
+) {
+  const { id } = await params;
+  try {
+    await prisma.supportThread.delete({ where: { id } });
+    return NextResponse.json({ deleted: true });
+  } catch (error) {
+    if (
+      error instanceof Prisma.PrismaClientKnownRequestError &&
+      error.code === "P2025"
+    ) {
+      return NextResponse.json({ error: "Thread not found" }, { status: 404 });
+    }
+    throw error;
+  }
+}

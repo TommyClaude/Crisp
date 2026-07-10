@@ -10,6 +10,7 @@ Sync, browse and RAG-search your [Crisp.chat](https://crisp.chat) history — an
 - **PII redaction** — emails, phone numbers, card numbers (Luhn-validated), API keys/tokens, license keys/UUIDs and passwords are redacted from all embedding chunks before anything is vectorized. Raw data stays in the database only. PII shown in the UI is masked.
 - **Product detection** — conversations are tagged with the plugin/product they are about using keyword heuristics where specific plugins beat platform-level matches. Detection definitions come from the plugins you manage in `/plugins` (name + keywords); a built-in list (FileBird, YayMail, YayCurrency, YaySMTP, Brandy, YayCommerce, WooCommerce, WordPress) is the fallback for a fresh install.
 - **Multi-brand sync** — one `Brand` per Crisp website (e.g. YayCommerce, Ninja Team, CatFolders...), managed in `/brands`. The sync iterates every brand with a single plugin token; conversations are linked to their brand and filterable by it.
+- **wp.org forum watcher + answer suggester** — polls each plugin's WordPress.org support-forum feed (`wpOrgSlug`), stores new topics, retrieves the most relevant past conversations + docs via RAG, and (when an LLM provider is configured) drafts a reply for human review in `/suggestions`. Drafts are **never** posted automatically. Provider-agnostic: Anthropic (`claude-opus-4-8` by default) or OpenAI via `SUGGESTER_PROVIDER`; with no key configured the page still shows the retrieved grounding context.
 - **Docs ingestion** — each plugin can register documentation sources (a URL to crawl or a sitemap). Ingestion crawls the pages (same-origin, same path prefix, max 200 pages), extracts clean text, chunks + embeds it into the same RAG index with `source="plugin_docs"`, and re-crawls incrementally (unchanged pages keep their chunks; removed pages are pruned). RAG search can mix chat and docs results or filter by source.
 
 ## Tech stack
@@ -63,6 +64,11 @@ Copy `.env.example` to `.env`. Validated at startup by `src/env.ts` (Zod) — in
 | `DATABASE_URL` | yes | — | Postgres connection URL |
 | `OPENAI_API_KEY` | no | empty | Enables embedding generation for vector/hybrid RAG search. Unset → keyword search only |
 | `OPENAI_EMBEDDING_MODEL` | no | `text-embedding-3-small` | Embedding model (1536 dimensions) |
+| `SUGGESTER_PROVIDER` | no | `auto` | LLM for forum-reply drafts: `auto` \| `anthropic` \| `openai` |
+| `ANTHROPIC_API_KEY` | no | — | Enables Anthropic drafts (`auto` prefers it when set) |
+| `ANTHROPIC_MODEL` | no | `claude-opus-4-8` | Anthropic model for drafts |
+| `OPENAI_CHAT_MODEL` | no | `gpt-4o-mini` | OpenAI model for drafts (uses `OPENAI_API_KEY`) |
+| `WPORG_FEED_BASE` | no | `https://wordpress.org/support/plugin` | Forum feed base URL (tests only) |
 | `BASIC_AUTH_USER` | prod: yes | — | Admin UI/API Basic auth username |
 | `BASIC_AUTH_PASSWORD` | prod: yes | — | Admin UI/API Basic auth password |
 | `CRISP_REQUEST_INTERVAL_MS` | no | `150` | Minimum delay between Crisp API requests (ms) |
@@ -103,6 +109,15 @@ npm run sync:crisp -- --page=42    # resume an interrupted run from page 42
 ```
 
 Progress (last page reached, counts, failed sessions) is persisted to `SyncLog` after **every page**, so an interrupted run can be resumed with `--page=N` (check `pageTo` on the latest log, or the dashboard).
+
+### wp.org forum watcher
+
+```bash
+npm run wporg:check                  # fetch new forum topics + draft suggestions
+npm run wporg:check -- --no-suggest  # only fetch topics
+```
+
+Cron example (hourly): `0 * * * *  cd /path/to/app && npm run wporg:check`. Replies stay drafts for a human to copy and post — the tool never writes to wordpress.org.
 
 ### Incremental sync
 
@@ -194,6 +209,10 @@ All routes require Basic auth (see Security). All bodies/queries are Zod-validat
 | `POST` | `/api/docs/sources` | Register a docs source `{pluginId, url, type: "url"\|"sitemap"}` |
 | `GET`/`DELETE` | `/api/docs/sources/{id}` | Source status (for polling) / remove the source and its pages/chunks |
 | `POST` | `/api/docs/sources/{id}/ingest` | Crawl + chunk + embed in the background (`202`, `409` while running) |
+| `POST` | `/api/wporg/check` | Poll wp.org forum feeds of all plugins with a `wpOrgSlug`; store new topics and draft suggestions. Body `{withSuggestions?, pluginId?}` |
+| `GET` | `/api/wporg/threads` | Support threads + suggestions. Query: `status, pluginId, page, pageSize` |
+| `PATCH`/`DELETE` | `/api/wporg/threads/{id}` | Update review status (`reviewed`/`dismissed`/...) or delete |
+| `POST` | `/api/wporg/threads/{id}/suggest` | (Re)generate the RAG-grounded reply draft for a thread |
 
 ## Admin UI
 
@@ -205,6 +224,7 @@ All routes require Basic auth (see Security). All bodies/queries are Zod-validat
 | `/rag` | Search playground: query the chunk store (all sources / chats only / docs only), see mode + similarity scores + source conversation or docs-page links |
 | `/brands` | Manage brands — one per Crisp website; the sync covers every brand listed |
 | `/plugins` | Manage plugins per brand (detection keywords, wp.org slug) and their docs sources, with one-click ingest and live crawl status |
+| `/suggestions` | wp.org forum threads with RAG-grounded reply drafts: filter by status/plugin, check forums on demand, regenerate/copy drafts, mark reviewed or dismissed |
 
 `/` redirects to `/dashboard`.
 
