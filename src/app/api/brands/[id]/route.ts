@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { z } from "zod";
 import { Prisma } from "@prisma/client";
 import { prisma } from "@/lib/db";
+import { encryptSecret } from "@/lib/crypto";
 
 export const dynamic = "force-dynamic";
 
@@ -9,9 +10,12 @@ const patchSchema = z.object({
   name: z.string().min(1).max(100).optional(),
   crispWebsiteId: z.string().min(8).max(100).optional(),
   domain: z.string().max(200).nullable().optional(),
+  // Token update: send both to set, or crispKey:"" (with identifier:"") to clear.
+  crispIdentifier: z.string().max(200).nullable().optional(),
+  crispKey: z.string().max(500).nullable().optional(),
 });
 
-/** PATCH /api/brands/:id — update name/websiteId/domain. */
+/** PATCH /api/brands/:id — update name/websiteId/domain/token. */
 export async function PATCH(
   request: NextRequest,
   { params }: { params: Promise<{ id: string }> }
@@ -31,6 +35,24 @@ export async function PATCH(
     );
   }
 
+  // Token fields move together: set both, or clear both.
+  const tokenData: Prisma.BrandUpdateInput = {};
+  if (
+    parsed.data.crispIdentifier !== undefined ||
+    parsed.data.crispKey !== undefined
+  ) {
+    const identifier = parsed.data.crispIdentifier?.trim() || null;
+    const key = parsed.data.crispKey?.trim() || null;
+    if ((identifier && !key) || (!identifier && key)) {
+      return NextResponse.json(
+        { error: "Provide both the Crisp identifier and key, or clear both" },
+        { status: 400 }
+      );
+    }
+    tokenData.crispIdentifier = identifier;
+    tokenData.crispKeyEnc = key ? encryptSecret(key) : null;
+  }
+
   try {
     const brand = await prisma.brand.update({
       where: { id },
@@ -42,9 +64,13 @@ export async function PATCH(
         ...(parsed.data.domain !== undefined
           ? { domain: parsed.data.domain?.trim() || null }
           : {}),
+        ...tokenData,
       },
     });
-    return NextResponse.json({ brand });
+    const { crispKeyEnc, ...safe } = brand;
+    return NextResponse.json({
+      brand: { ...safe, hasCrispKey: Boolean(crispKeyEnc) },
+    });
   } catch (error) {
     if (error instanceof Prisma.PrismaClientKnownRequestError) {
       if (error.code === "P2025") {

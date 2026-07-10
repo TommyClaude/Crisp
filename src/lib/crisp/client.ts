@@ -52,8 +52,14 @@ export class CrispClient {
     maxRetries?: number;
   }) {
     const env = getEnv();
-    const identifier = options?.identifier ?? env.CRISP_IDENTIFIER;
-    const key = options?.key ?? env.CRISP_KEY;
+    const identifier = options?.identifier || env.CRISP_IDENTIFIER;
+    const key = options?.key || env.CRISP_KEY;
+    if (!identifier || !key) {
+      throw new Error(
+        "No Crisp token available — set the brand's token in /brands, or " +
+          "CRISP_IDENTIFIER/CRISP_KEY in .env."
+      );
+    }
     this.minIntervalMs =
       options?.minIntervalMs ?? env.CRISP_REQUEST_INTERVAL_MS;
     this.maxRetries = options?.maxRetries ?? env.CRISP_MAX_RETRIES;
@@ -270,12 +276,4 @@ export class CrispClient {
       return [];
     }
   }
-}
-
-let sharedClient: CrispClient | null = null;
-
-/** Shared client so rate limiting is enforced process-wide. */
-export function getCrispClient(): CrispClient {
-  if (!sharedClient) sharedClient = new CrispClient();
-  return sharedClient;
 }

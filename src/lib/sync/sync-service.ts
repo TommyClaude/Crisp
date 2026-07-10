@@ -1,6 +1,7 @@
 import { prisma } from "@/lib/db";
 import { getEnv } from "@/env";
-import { CrispApiError, getCrispClient } from "@/lib/crisp/client";
+import { CrispApiError, CrispClient } from "@/lib/crisp/client";
+import { decryptSecret } from "@/lib/crypto";
 import type { CrispConversation, CrispMessage } from "@/lib/crisp/types";
 import { rebuildChunksForConversation } from "@/lib/rag/rebuild";
 import {
@@ -36,20 +37,55 @@ export interface SyncTarget {
   brandId: string | null;
   websiteId: string;
   name: string;
+  /** Per-brand token; when null the env CRISP_IDENTIFIER/CRISP_KEY is used. */
+  identifier: string | null;
+  key: string | null;
+}
+
+/** Resolve a brand's Crisp token, decrypting the stored key. */
+export function brandCredentials(brand: {
+  crispIdentifier: string | null;
+  crispKeyEnc: string | null;
+}): { identifier: string | null; key: string | null } {
+  if (!brand.crispIdentifier || !brand.crispKeyEnc) {
+    return { identifier: null, key: null };
+  }
+  try {
+    return {
+      identifier: brand.crispIdentifier,
+      key: decryptSecret(brand.crispKeyEnc),
+    };
+  } catch (error) {
+    console.error("Failed to decrypt a brand's Crisp key:", error);
+    return { identifier: null, key: null };
+  }
+}
+
+/** A Crisp client for a target, using its token or the env fallback. */
+export function crispClientForTarget(target: SyncTarget): CrispClient {
+  return new CrispClient({
+    identifier: target.identifier ?? undefined,
+    key: target.key ?? undefined,
+  });
 }
 
 /**
- * Websites to sync: every Brand in the database, or — when none are
- * configured yet — the legacy CRISP_WEBSITE_ID from .env.
+ * Websites to sync: every Brand in the database (each with its own token),
+ * or — when none are configured yet — the legacy CRISP_WEBSITE_ID from .env.
  */
 export async function getSyncTargets(): Promise<SyncTarget[]> {
   const brands = await prisma.brand.findMany({ orderBy: { createdAt: "asc" } });
   if (brands.length > 0) {
-    return brands.map((brand) => ({
-      brandId: brand.id,
-      websiteId: brand.crispWebsiteId,
-      name: brand.name,
-    }));
+    return brands.map((brand) => {
+      const creds = brandCredentials(brand);
+      return {
+        brandId: brand.id,
+        websiteId: brand.crispWebsiteId,
+        name: brand.name,
+        identifier: creds.identifier,
+        key: creds.key,
+      };
+    });
   }
   const env = getEnv();
   if (env.CRISP_WEBSITE_ID) {
@@ -58,7 +94,13 @@ export async function getSyncTargets(): Promise<SyncTarget[]> {
         "Add your brands (one per Crisp website) in /brands."
     );
     return [
-      { brandId: null, websiteId: env.CRISP_WEBSITE_ID, name: "default" },
+      {
+        brandId: null,
+        websiteId: env.CRISP_WEBSITE_ID,
+        name: "default",
+        identifier: null,
+        key: null,
+      },
     ];
   }
   throw new Error(
@@ -92,8 +134,10 @@ async function ensureOperator(
 }
 
 /** Best-effort import of the operator roster (non-fatal when unavailable). */
-async function syncOperatorRoster(websiteId: string): Promise<void> {
-  const client = getCrispClient();
+async function syncOperatorRoster(
+  client: CrispClient,
+  websiteId: string
+): Promise<void> {
   const operators = await client.listOperators(websiteId);
   for (const entry of operators) {
     const details = entry.details ?? entry;
@@ -232,42 +276,48 @@ export async function resyncConversation(sessionId: string): Promise<{
   messageCount: number;
   chunksCreated: number;
 }> {
-  const client = getCrispClient();
+  const targets = await getSyncTargets();
 
   // Resolve which website the session belongs to: a previously synced
-  // conversation knows its websiteId; otherwise probe the configured targets.
+  // conversation knows its brand; otherwise probe every configured target
+  // (each with its own token).
   const existing = await prisma.conversation.findUnique({
     where: { sessionId },
-    select: { websiteId: true, brandId: true },
+    select: { brandId: true },
   });
-  let target: Pick<SyncTarget, "brandId" | "websiteId"> | null = existing
-    ? { websiteId: existing.websiteId, brandId: existing.brandId }
-    : null;
+
+  let target: SyncTarget | null = null;
+  let client: CrispClient | null = null;
   let conversation: CrispConversation | null = null;
 
-  if (target) {
-    conversation = await client.getConversation(target.websiteId, sessionId);
-  } else {
-    for (const candidate of await getSyncTargets()) {
-      try {
-        conversation = await client.getConversation(
-          candidate.websiteId,
-          sessionId
-        );
-        target = candidate;
-        break;
-      } catch (error) {
-        if (error instanceof CrispApiError && error.status === 404) continue;
-        throw error;
-      }
-    }
-    if (!conversation || !target) {
-      throw new CrispApiError(
-        `Conversation ${sessionId} not found on any configured Crisp website`,
-        404,
-        "resync"
+  const knownFirst = existing?.brandId
+    ? [
+        ...targets.filter((t) => t.brandId === existing.brandId),
+        ...targets.filter((t) => t.brandId !== existing.brandId),
+      ]
+    : targets;
+
+  for (const candidate of knownFirst) {
+    const candidateClient = crispClientForTarget(candidate);
+    try {
+      conversation = await candidateClient.getConversation(
+        candidate.websiteId,
+        sessionId
       );
+      target = candidate;
+      client = candidateClient;
+      break;
+    } catch (error) {
+      if (error instanceof CrispApiError && error.status === 404) continue;
+      throw error;
     }
+  }
+  if (!conversation || !target || !client) {
+    throw new CrispApiError(
+      `Conversation ${sessionId} not found on any configured Crisp website`,
+      404,
+      "resync"
+    );
   }
 
   const messages = await client.getAllMessages(target.websiteId, sessionId);
@@ -324,15 +374,25 @@ async function runSync(options: RunSyncOptions): Promise<SyncRunResult> {
   });
   const state = beginSyncProgress(options.kind, syncLog.id);
 
-  const client = getCrispClient();
   const updatedSinceMs = options.updatedSince?.getTime() ?? null;
   let status: SyncRunResult["status"] = "completed";
   let errorMessage: string | undefined;
 
   try {
     const targets = await getSyncTargets();
-    // Remember which website a failed session belongs to for the retry pass.
+    // Remember which website a failed session belongs to for the retry pass,
+    // and reuse one client per brand so rate limiting stays per-token.
     const failedTargets = new Map<string, SyncTarget>();
+    const clientsByTarget = new Map<string, CrispClient>();
+    const clientFor = (target: SyncTarget): CrispClient => {
+      const cacheKey = target.brandId ?? "__env__";
+      let c = clientsByTarget.get(cacheKey);
+      if (!c) {
+        c = crispClientForTarget(target);
+        clientsByTarget.set(cacheKey, c);
+      }
+      return c;
+    };
 
     for (let t = 0; t < targets.length; t++) {
       const target = targets[t];
@@ -341,8 +401,19 @@ async function runSync(options: RunSyncOptions): Promise<SyncRunResult> {
         break;
       }
 
+      let client: CrispClient;
       try {
-        await syncOperatorRoster(target.websiteId);
+        client = clientFor(target);
+      } catch (error) {
+        // Missing/invalid token for this brand — skip it, don't abort others.
+        const message = `${target.name}: ${error instanceof Error ? error.message : String(error)}`;
+        console.error("Skipping brand without a usable Crisp token:", message);
+        state.failedSessions.push(`brand:${target.name}`);
+        continue;
+      }
+
+      try {
+        await syncOperatorRoster(client, target.websiteId);
       } catch (error) {
         console.warn(
           `Operator roster sync failed for ${target.name} (non-fatal):`,
@@ -457,6 +528,7 @@ async function runSync(options: RunSyncOptions): Promise<SyncRunResult> {
         }
         state.statusMessage = `retrying failed conversation ${sessionId}`;
         try {
+          const client = clientFor(target);
           const conversation = await client.getConversation(
             target.websiteId,
             sessionId

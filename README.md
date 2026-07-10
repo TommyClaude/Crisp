@@ -39,20 +39,19 @@ npm run dev                  # http://localhost:3000
 
 Then either run a real sync (`npm run sync:crisp`, needs Crisp credentials) or load fake data with `npm run seed:demo` to explore the UI immediately.
 
-## Creating a Crisp API token
+## Crisp API tokens (per brand)
 
-The sync uses a **Crisp Marketplace plugin token** (not your personal login). The app sends it as HTTP Basic auth with the `X-Crisp-Tier: plugin` header automatically — you only supply the identifier/key pair.
+Each brand is a separate Crisp **website**, and a Crisp REST API token only reaches its own website. So every brand gets its own token, entered in the `/brands` UI (the key is stored AES-256-GCM encrypted; `CREDENTIALS_SECRET` is the encryption secret).
 
-1. Go to [https://marketplace.crisp.chat](https://marketplace.crisp.chat) and sign in with your Crisp account.
-2. Create a new **plugin** (a private plugin is fine — it never has to be published).
-3. In the plugin's **Tokens** (API) section, generate a **production** token. Copy the **identifier** and **key** — these become `CRISP_IDENTIFIER` and `CRISP_KEY`.
-4. Request website access with the conversation **read** scopes:
-   - `website:conversation:sessions` (read)
-   - `website:conversation:messages` (read)
+To create a token for one website:
 
-   Operator-list access is optional — the sync treats a missing operators scope as non-fatal.
-5. Install/trust the plugin on the website you want to archive (from the plugin's settings, or via the Crisp app's Plugins section) so the token is authorized for that website.
-6. Find your **website ID** for `CRISP_WEBSITE_ID`: it is the UUID in your Crisp app URL (`https://app.crisp.chat/website/<website_id>/...`), also shown under Website Settings → Setup instructions.
+1. In the Crisp app, open that website, then **Website Settings → Advanced configuration**.
+2. Under **REST API + MCP Server Tokens**, click **Create Token**. When prompted for scopes, grant read access to conversations (`website:conversation:sessions`, `website:conversation:messages`).
+3. Copy the **Identifier** and **Key**.
+4. In YayAssist, go to `/brands`, add the brand (or click **Set token** on an existing one), paste the two values, and click **Test** to confirm the token reaches the website.
+5. Find the **website ID** in the Crisp app URL (`app.crisp.chat/website/<website_id>/...`) — enter it as the brand's Crisp website ID.
+
+> A single token that spans multiple websites requires a **public** Marketplace plugin (Crisp review). For an internal tool, per-website tokens are simpler. The global `CRISP_IDENTIFIER`/`CRISP_KEY` in `.env` remain as an optional fallback for brands without their own token.
 
 ## Environment variables
 
@@ -61,8 +60,9 @@ Copy `.env.example` to `.env`. Validated at startup by `src/env.ts` (Zod) — in
 | Variable | Required | Default | Purpose |
 | --- | --- | --- | --- |
 | `CRISP_WEBSITE_ID` | no (legacy) | — | Single-website fallback, used only when no brands exist yet. Prefer adding brands (one per Crisp website) in `/brands` |
-| `CRISP_IDENTIFIER` | yes | — | Plugin token identifier (Basic auth username) |
-| `CRISP_KEY` | yes | — | Plugin token key (Basic auth password) |
+| `CREDENTIALS_SECRET` | no | `BASIC_AUTH_PASSWORD` | Secret to encrypt per-brand Crisp keys at rest (AES-256-GCM). Set a dedicated random value in production |
+| `CRISP_IDENTIFIER` | no | — | Global fallback token identifier. Brands normally carry their own token (see below); used only for brands without one |
+| `CRISP_KEY` | no | — | Global fallback token key. Per-brand tokens (managed in `/brands`) take precedence |
 | `DATABASE_URL` | yes | — | Postgres connection URL |
 | `OPENAI_API_KEY` | no | empty | Enables embedding generation for vector/hybrid RAG search. Unset → keyword search only |
 | `OPENAI_EMBEDDING_MODEL` | no | `text-embedding-3-small` | Embedding model (1536 dimensions) |
@@ -205,7 +205,8 @@ All routes require Basic auth (see Security). All bodies/queries are Zod-validat
 | `GET` | `/api/rag/search` | RAG search. Query: `query` (required), `limit` (default 8, max 50), `source` (`crisp_chat`\|`plugin_docs`), `pluginId`, `brandId` |
 | `POST` | `/api/rag/chunks/rebuild` | Rebuild chat chunks. Body `{sessionId?, onlyResolved?, withEmbeddings?}`. Single session is synchronous; full rebuild runs in the background (`202`, `409` if already running) |
 | `GET`/`POST` | `/api/brands` | List brands / create a brand `{name, crispWebsiteId, domain?}` (adopts already-synced conversations with that website ID) |
-| `PATCH`/`DELETE` | `/api/brands/{id}` | Update or delete a brand (conversations are kept; plugins/docs cascade) |
+| `PATCH`/`DELETE` | `/api/brands/{id}` | Update or delete a brand — including its Crisp token (conversations are kept; plugins/docs cascade) |
+| `POST` | `/api/brands/{id}/test` | Verify the brand's Crisp token can reach its website (page-1 probe) |
 | `GET`/`POST` | `/api/plugins` | List plugins (with docs sources) / create `{brandId, name, wpOrgSlug?, detectionKeywords?}` |
 | `PATCH`/`DELETE` | `/api/plugins/{id}` | Update or delete a plugin (docs pages + doc chunks cascade) |
 | `POST` | `/api/docs/sources` | Register a docs source `{pluginId, url, type: "url"\|"sitemap"}` |

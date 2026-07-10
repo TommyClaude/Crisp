@@ -24,6 +24,12 @@ model Brand {
   slug           String   @unique
   domain         String?
   crispWebsiteId String   @unique
+  // Per-brand Crisp REST API token. Each Crisp website needs its own token
+  // (a private/development token only reaches its trusted workspace). The
+  // key is stored AES-256-GCM encrypted; when unset, sync falls back to the
+  // CRISP_IDENTIFIER/CRISP_KEY in .env.
+  crispIdentifier String?
+  crispKeyEnc     String?
   createdAt      DateTime @default(now())
   updatedAt      DateTime @updatedAt
 

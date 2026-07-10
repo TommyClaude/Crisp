@@ -24,6 +24,8 @@ export default async function BrandsPage() {
           name: brand.name,
           domain: brand.domain,
           crispWebsiteId: brand.crispWebsiteId,
+          crispIdentifier: brand.crispIdentifier,
+          hasCrispKey: Boolean(brand.crispKeyEnc),
           pluginCount: brand._count.plugins,
           conversationCount: brand._count.conversations,
         }))}
