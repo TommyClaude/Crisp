@@ -21,7 +21,7 @@ function timingSafeEqual(a: string, b: string): boolean {
 function unauthorized(message = "Authentication required"): NextResponse {
   return new NextResponse(message, {
     status: 401,
-    headers: { "WWW-Authenticate": 'Basic realm="Crisp Archive", charset="UTF-8"' },
+    headers: { "WWW-Authenticate": 'Basic realm="YayAssist", charset="UTF-8"' },
   });
 }
 

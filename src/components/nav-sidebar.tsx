@@ -33,7 +33,7 @@ export function NavSidebar() {
           <MessagesSquare className="size-4" />
         </span>
         <span className="truncate text-sm font-semibold tracking-tight max-sm:hidden">
-          Crisp Archive
+          YayAssist
         </span>
       </div>
 

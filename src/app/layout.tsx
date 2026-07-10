@@ -7,11 +7,11 @@ import "./globals.css";
 
 export const metadata: Metadata = {
   title: {
-    default: "Crisp Archive",
-    template: "%s · Crisp Archive",
+    default: "YayAssist",
+    template: "%s · YayAssist",
   },
   description:
-    "Internal archive of Crisp.chat support conversations with RAG search.",
+    "AI answer suggestions for support teams, grounded in Crisp.chat history and product docs.",
 };
 
 /**

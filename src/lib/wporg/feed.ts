@@ -119,7 +119,7 @@ export async function fetchForumTopics(wpOrgSlug: string): Promise<ForumTopic[]>
       signal: controller.signal,
       redirect: "follow",
       headers: {
-        "User-Agent": "CrispArchiveForumWatcher/1.0 (internal support tool)",
+        "User-Agent": "YayAssistForumWatcher/1.0 (internal support tool)",
         Accept: "application/rss+xml, application/xml, text/xml",
       },
       cache: "no-store",

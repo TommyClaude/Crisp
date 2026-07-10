@@ -147,7 +147,7 @@ async function fetchHtml(
       signal: controller.signal,
       redirect: "follow",
       headers: {
-        "User-Agent": "CrispArchiveDocsBot/1.0 (internal support tool)",
+        "User-Agent": "YayAssistDocsBot/1.0 (internal support tool)",
         Accept: "text/html,application/xhtml+xml,application/xml",
       },
     });

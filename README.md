@@ -1,6 +1,8 @@
-# Crisp Archive
+# YayAssist
 
-Sync, browse and RAG-search your [Crisp.chat](https://crisp.chat) history — an internal admin tool that pulls every support conversation from the Crisp REST API into your own Postgres database, renders them in a Crisp-like chat log UI, and makes them retrievable for AI workflows.
+**AI answer suggestions for support teams.** YayAssist watches the wordpress.org support forums of your plugins and drafts replies for your supporters to review — grounded in what the AI has learned from your historical [Crisp.chat](https://crisp.chat) conversations and product documentation (RAG, no fine-tuning).
+
+Crisp is a *data source* here, not the product: the tool syncs every support conversation from the Crisp REST API into your own Postgres database (browsable in a chat-log UI), crawls your docs sites into the same knowledge index, and uses both to suggest answers. Nothing is ever posted automatically — supporters review, copy, and post.
 
 ## Features
 
@@ -129,7 +131,7 @@ npm run sync:crisp:incremental -- --page=N  # resume an interrupted run
 Only syncs conversations updated since the last successful run, with a 1-hour overlap window to absorb clock skew. Falls back to a full sync when the database has never been synced. Designed for cron:
 
 ```cron
-*/30 * * * *  cd /path/to/crisp-archive && npm run sync:crisp:incremental >> /var/log/crisp-sync.log 2>&1
+*/30 * * * *  cd /path/to/yayassist && npm run sync:crisp:incremental >> /var/log/yayassist-sync.log 2>&1
 ```
 
 ### From the dashboard
