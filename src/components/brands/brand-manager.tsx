@@ -16,6 +16,7 @@ import {
 } from "lucide-react";
 import { toast } from "sonner";
 
+import { HelpTip } from "@/components/help-tip";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
@@ -117,7 +118,17 @@ export function BrandManager({ brands }: { brands: BrandItem[] }) {
                 />
               </div>
               <div className="space-y-1.5">
-                <Label htmlFor="brand-wp-profile">wp.org profile (optional)</Label>
+                <div className="flex items-center gap-1">
+                  <Label htmlFor="brand-wp-profile">
+                    wp.org profile (optional)
+                  </Label>
+                  <HelpTip example="wordpress.org/plugins/author/ninjateam → profile is ninjateam">
+                    The author username from
+                    wordpress.org/plugins/author/&lt;slug&gt;. Setting it
+                    enables &ldquo;Import plugins&rdquo;, which bulk-adds all
+                    of this brand&rsquo;s plugins from that wp.org profile.
+                  </HelpTip>
+                </div>
                 <Input
                   id="brand-wp-profile"
                   placeholder="ninjateam"
@@ -367,11 +378,16 @@ function BrandRow({ brand }: { brand: BrandItem }) {
             size="sm"
             onClick={() => setEditingStyle((v) => !v)}
             disabled={busy !== null}
-            title="House-style notes fed into the AI reply drafts"
           >
             <MessageSquareText className="size-3.5" />
             {brand.replyStyle ? "Edit style" : "Reply style"}
           </Button>
+          <HelpTip>
+            House-style notes that shape this brand&rsquo;s AI reply drafts —
+            sign-off, tone, and emoji policy. Added to the drafting prompt for
+            all of this brand&rsquo;s plugins; it never overrides grounding
+            or correctness rules.
+          </HelpTip>
           {brand.wpProfileSlug ? (
             <Button
               variant="outline"

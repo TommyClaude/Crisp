@@ -14,6 +14,7 @@ import {
 } from "lucide-react";
 import { toast } from "sonner";
 
+import { HelpTip } from "@/components/help-tip";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
@@ -164,7 +165,14 @@ function AddPluginCard({ brands }: { brands: Array<{ id: string; name: string }>
           onSubmit={createPlugin}
           className="grid gap-3 sm:grid-cols-[1fr_1fr_1.4fr_1fr_auto]"
         >
-          <div className="space-y-1.5">
+          {/* flex/gap (not space-y) here — Radix's hidden native <select>
+              (used for form fallback) sits after the trigger, and space-y's
+              sibling-margin rule would apply to it too, inflating this
+              cell's height a few px past the trigger's visible bottom and
+              throwing off the grid row's height (and the Add button's
+              items-end alignment) even though it's invisible. gap skips
+              out-of-flow children, so it doesn't have this problem. */}
+          <div className="flex flex-col gap-1.5">
             <Label>Brand</Label>
             <Select value={brandId} onValueChange={setBrandId}>
               <SelectTrigger>
@@ -190,7 +198,24 @@ function AddPluginCard({ brands }: { brands: Array<{ id: string; name: string }>
             />
           </div>
           <div className="space-y-1.5">
-            <Label htmlFor="plugin-keywords">Keywords</Label>
+            <div className="flex items-center gap-1">
+              <Label htmlFor="plugin-keywords">Keywords</Label>
+              <HelpTip
+                subject="Keywords"
+                example={
+                  <>
+                    Example: for FileBird, add: file bird, njt-filebird —
+                    chats mentioning any of these get tagged as FileBird, so
+                    the AI can tell which product a past conversation was
+                    about.
+                  </>
+                }
+              >
+                Extra names that identify this product in chat conversations,
+                comma-separated. The plugin name always counts on its own.
+                Matching is case-insensitive and tolerates spaces.
+              </HelpTip>
+            </div>
             <Input
               id="plugin-keywords"
               placeholder="file bird, njt-filebird"
@@ -199,7 +224,14 @@ function AddPluginCard({ brands }: { brands: Array<{ id: string; name: string }>
             />
           </div>
           <div className="space-y-1.5">
-            <Label htmlFor="plugin-wporg">wp.org slug</Label>
+            <div className="flex items-center gap-1">
+              <Label htmlFor="plugin-wporg">wp.org slug</Label>
+              <HelpTip example="wordpress.org/plugins/filebird → slug is filebird">
+                The plugin&rsquo;s slug on wordpress.org/plugins/&lt;slug&gt;.
+                Setting it unlocks watching the plugin&rsquo;s wp.org support
+                forum and adding it as a Forum Q&amp;A docs source.
+              </HelpTip>
+            </div>
             <Input
               id="plugin-wporg"
               placeholder="filebird"
@@ -480,6 +512,12 @@ function PluginCard({ plugin }: { plugin: PluginItem }) {
               <SelectItem value="wporg_forum">wp.org forum</SelectItem>
             </SelectContent>
           </Select>
+          <HelpTip>
+            Crawl URL/Sitemap fetch documentation pages. wp.org forum instead
+            watches the plugin&rsquo;s support forum — its Ingest button
+            crawls the newest <em>answered</em> topics for the AI to learn
+            from, rather than crawling docs pages.
+          </HelpTip>
           <Button
             type="submit"
             variant="outline"

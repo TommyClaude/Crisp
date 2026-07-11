@@ -19,6 +19,7 @@ import {
 } from "lucide-react";
 import { toast } from "sonner";
 
+import { HelpTip } from "@/components/help-tip";
 import { StateBadge } from "@/components/state-badge";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -412,6 +413,13 @@ export function RagSearch({
                   ? `Rebuilding… ${rebuild.done}/${rebuild.total}`
                   : "Rebuild all chunks"}
               </Button>
+              <HelpTip>
+                Re-chunks and re-embeds every resolved Crisp conversation
+                under the current product/keyword rules, replacing the
+                existing chat chunks. Run it after changing plugin keywords
+                or detection rules, or if the dashboard flags the index as
+                stale — it doesn&rsquo;t touch docs or forum Q&amp;A chunks.
+              </HelpTip>
               {rebuild.running && (
                 <Button
                   type="button"

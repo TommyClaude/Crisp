@@ -23,6 +23,7 @@ import {
 } from "lucide-react";
 import { toast } from "sonner";
 
+import { HelpTip } from "@/components/help-tip";
 import { NewReplyBadge, ThreadStatusBadge } from "@/components/state-badge";
 import {
   ContextChunkList,
@@ -467,7 +468,7 @@ export function SuggestionsManager({
               value={activePlugin}
               onValueChange={(v) => setParam("pluginId", v)}
             >
-              <SelectTrigger size="sm" className="w-40">
+              <SelectTrigger size="sm" className="w-auto min-w-40 max-w-56">
                 <SelectValue placeholder="All plugins" />
               </SelectTrigger>
               <SelectContent>
@@ -611,6 +612,11 @@ export function SuggestionsManager({
                 title={`Continue from plugin # (alphabetical order, 1–${pluginCount || "?"})`}
                 className="h-8 w-16 tabular-nums"
               />
+              <HelpTip subject="the continue index">
+                The alphabetical plugin index to resume from — plugin 1 is the
+                first alphabetically, not the first ever checked. Used to
+                pick up a paused, cancelled, or failed check partway through.
+              </HelpTip>
               <Button
                 size="sm"
                 disabled={checkBusy}
@@ -631,20 +637,28 @@ export function SuggestionsManager({
               </Button>
             </>
           ) : (
-            <Button
-              size="sm"
-              disabled={checkBusy}
-              onClick={() =>
-                void startCheck({ key: "start", label: "Forum check" })
-              }
-            >
-              {checkStarting ? (
-                <LoaderCircle className="size-3.5 animate-spin" />
-              ) : (
-                <RefreshCw className="size-3.5" />
-              )}
-              Check forums now
-            </Button>
+            <>
+              <Button
+                size="sm"
+                disabled={checkBusy}
+                onClick={() =>
+                  void startCheck({ key: "start", label: "Forum check" })
+                }
+              >
+                {checkStarting ? (
+                  <LoaderCircle className="size-3.5 animate-spin" />
+                ) : (
+                  <RefreshCw className="size-3.5" />
+                )}
+                Check forums now
+              </Button>
+              <HelpTip subject="Check forums now">
+                Reads each plugin&rsquo;s wp.org support-forum feed, saves any
+                topics posted in the last 30 days (configurable) that
+                aren&rsquo;t already tracked, and drafts AI reply suggestions
+                for the new ones.
+              </HelpTip>
+            </>
           )}
         </div>
       </div>

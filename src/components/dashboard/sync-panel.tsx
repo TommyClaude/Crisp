@@ -19,6 +19,7 @@ import {
   SyncLogTable,
   type SerializedSyncLog,
 } from "@/components/dashboard/sync-log-table";
+import { HelpTip } from "@/components/help-tip";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
@@ -335,6 +336,11 @@ export function SyncPanel({
                   aria-label="Resume from page"
                   className="h-8 w-20 tabular-nums"
                 />
+                <HelpTip>
+                  Resumes the conversation-list backfill from this Crisp API
+                  page instead of starting over. Defaults to the furthest
+                  page any past sync run has reached.
+                </HelpTip>
                 <Button
                   size="sm"
                   disabled={busy}
@@ -379,6 +385,12 @@ export function SyncPanel({
                   )}
                   Incremental sync
                 </Button>
+                <HelpTip>
+                  Incremental sync only fetches conversations updated since
+                  the last completed sync — fast, good for daily catch-up.
+                  Full sync re-fetches everything from page 1; use it for the
+                  first run or if you suspect conversations were missed.
+                </HelpTip>
                 <Button
                   size="sm"
                   disabled={busy}

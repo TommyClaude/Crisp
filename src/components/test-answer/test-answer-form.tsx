@@ -106,7 +106,12 @@ export function TestAnswerForm({ plugins }: { plugins: TestAnswerPlugin[] }) {
             <div className="grid gap-2">
               <Label htmlFor="ta-plugin">Plugin</Label>
               <Select value={pluginId} onValueChange={setPluginId}>
-                <SelectTrigger id="ta-plugin" className="w-full sm:w-72">
+                <SelectTrigger
+                  id="ta-plugin"
+                  className="w-full sm:max-w-lg"
+                  // Hover fallback for names that still overflow the trigger.
+                  title={plugins.find((p) => p.id === pluginId)?.name}
+                >
                   <SelectValue placeholder="Select a plugin" />
                 </SelectTrigger>
                 <SelectContent>
