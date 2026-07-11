@@ -124,6 +124,10 @@ npm run wporg:check -- --no-suggest  # only fetch topics
 
 Cron example (hourly): `0 * * * *  cd /path/to/app && npm run wporg:check`. Replies stay drafts for a human to copy and post — the tool never writes to wordpress.org.
 
+**Age cutoff** — quiet forums keep years-old topics in their RSS feed, so each check skips any feed topic whose publish date is older than `WPORG_TOPIC_MAX_AGE_DAYS` (default 30) — those are never stored and never drafted (topics with no publish date are kept, since their age is unknown). The count of skipped-old topics is reported in the result and logs. A one-time migration (`…_delete_stale_support_threads`) also removes any pre-existing `SupportThread` rows older than 30 days (all statuses; NULL publish dates kept) when you `prisma migrate deploy`.
+
+**Background checks + logs** — "Check forums now" on `/suggestions` runs in the background (like Crisp sync): `POST /api/wporg/check` returns `202` immediately and the run drives its own progress, so navigating away or opening another tab never loses visibility. The button shows live progress (`Checking 8/14 — FileBird…`, then `Drafting 2/5…`) for any in-flight check, and a one-line last-check summary (`Last check 4m ago — 3 new topics, 2 drafted, 1 skipped (old)`, with feed errors expandable) sits under the toolbar. Each run is recorded in the `ForumCheckLog` table (status, counts, errors); poll `GET /api/wporg/check/status` for live progress plus the 5 most recent runs.
+
 ### Incremental sync
 
 ```bash
@@ -218,7 +222,8 @@ All routes require Basic auth (see Security). All bodies/queries are Zod-validat
 | `POST` | `/api/docs/sources` | Register a docs source `{pluginId, url, type: "url"\|"sitemap"\|"wporg_forum"}` — wp.org forum URLs are auto-detected whatever type is sent |
 | `GET`/`DELETE` | `/api/docs/sources/{id}` | Source status (for polling) / remove the source and its pages/chunks |
 | `POST` | `/api/docs/sources/{id}/ingest` | Crawl + chunk + embed in the background (`202`, `409` while running). For `wporg_forum` sources this imports answered forum topics as Q&A transcripts |
-| `POST` | `/api/wporg/check` | Poll wp.org forum feeds of all plugins with a `wpOrgSlug`; store new topics and draft suggestions. Body `{withSuggestions?, pluginId?}` |
+| `POST` | `/api/wporg/check` | Start a background check of the wp.org forum feeds of all plugins with a `wpOrgSlug`; stores new topics (skipping ones older than `WPORG_TOPIC_MAX_AGE_DAYS`) and drafts suggestions. Body `{withSuggestions?, pluginId?}`. `202` with initial progress, `409` if one is running |
+| `GET` | `/api/wporg/check/status` | Live forum-check progress + the 5 most recent `ForumCheckLog` runs (with errors) |
 | `GET` | `/api/wporg/threads` | Support topics + suggestions. Query: `status, pluginId, page, pageSize` |
 | `PATCH`/`DELETE` | `/api/wporg/threads/{id}` | Update review status (`reviewed`/`dismissed`/...) or delete |
 | `POST` | `/api/wporg/threads/{id}/suggest` | (Re)generate the RAG-grounded reply draft for a topic |

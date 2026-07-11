@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { z } from "zod";
-import { checkPluginForums, isWatcherRunning } from "@/lib/wporg/watcher";
+import { getCheckProgress, isCheckRunning } from "@/lib/wporg/check-state";
+import { checkPluginForums } from "@/lib/wporg/watcher";
 
 export const dynamic = "force-dynamic";
 // Feed checks + LLM drafts can take a while with many plugins.
@@ -10,14 +11,20 @@ const bodySchema = z
   .object({
     withSuggestions: z.boolean().default(true),
     pluginId: z.string().optional(),
+    // Resume: 1-based (alphabetical) plugin index to continue from.
+    startIndex: z.coerce.number().int().min(1).optional(),
   })
   .default({ withSuggestions: true });
 
 /**
  * POST /api/wporg/check
  * Body: { withSuggestions?: boolean, pluginId?: string }
- * Polls the wp.org support-forum feeds of all plugins with a wpOrgSlug,
- * stores new threads, and drafts reply suggestions. Returns the counts.
+ *
+ * Kicks off a background forum check in this server process and returns
+ * immediately with the initial progress. The run polls its own feeds, stores
+ * new topics, drafts suggestions, and records a ForumCheckLog — the UI tracks
+ * it via GET /api/wporg/check/status. `202` on start, `409` if one is running.
+ * For scheduled checks, prefer the CLI (`npm run wporg:check`).
  */
 export async function POST(request: NextRequest) {
   let json: unknown = {};
@@ -35,21 +42,22 @@ export async function POST(request: NextRequest) {
     );
   }
 
-  if (isWatcherRunning()) {
+  if (isCheckRunning()) {
     return NextResponse.json(
-      { error: "A forum check is already running" },
+      { error: "A forum check is already running", progress: getCheckProgress() },
       { status: 409 }
     );
   }
 
-  try {
-    const result = await checkPluginForums(parsed.data);
-    return NextResponse.json(result);
-  } catch (error) {
-    console.error("Forum check failed:", error);
-    return NextResponse.json(
-      { error: "Forum check failed", detail: String(error) },
-      { status: 500 }
-    );
-  }
+  // Fire-and-forget: checkPluginForums claims the guard synchronously (before
+  // its first await) and drives ForumCheckLog + in-memory progress itself.
+  // The response carries whatever state exists right now; the client's next
+  // poll picks up the populated counters.
+  const run = checkPluginForums(parsed.data);
+  run.catch((error) => console.error("Background forum check failed:", error));
+
+  return NextResponse.json(
+    { started: true, progress: getCheckProgress() },
+    { status: 202 }
+  );
 }

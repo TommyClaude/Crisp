@@ -283,6 +283,28 @@ model SyncLog {
   @@index([startedAt])
 }
 
+// A run of the wp.org forum watcher (the "Check forums now" flow, or cron
+// `npm run wporg:check`). Mirrors SyncLog: a durable, per-run history, while
+// live progress lives in the check-state globalThis singleton
+// (src/lib/wporg/check-state.ts).
+model ForumCheckLog {
+  id             String    @id @default(cuid())
+  startedAt      DateTime  @default(now())
+  finishedAt     DateTime?
+  status         String    @default("running") // running | completed | failed | paused | cancelled
+  pluginsChecked Int       @default(0)
+  newThreads     Int       @default(0)
+  drafted        Int       @default(0)
+  skippedOld     Int       @default(0)
+  // Highest 1-based plugin index (alphabetical order) fully processed — the
+  // resume point after a graceful Pause/Stop between plugins.
+  lastIndex      Int?
+  errors         String[]  @default([])
+
+  @@index([status])
+  @@index([startedAt])
+}
+
 // Small key-value store for app bookkeeping — rebuild timestamps, rule
 // versions, and similar single-row flags that don't warrant their own table.
 // Powers the "rebuild recommended" staleness notice (see rag/rebuild-advice.ts).

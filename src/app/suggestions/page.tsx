@@ -3,11 +3,13 @@ import {
   SuggestionsManager,
   type DraftItemView,
   type FollowupView,
+  type ForumCheckLogView,
   type SuggestionThreadItem,
 } from "@/components/suggestions/suggestions-manager";
 import type { FollowupResult } from "@/lib/suggest/followup";
 import { suggesterConfigured } from "@/lib/suggest/llm";
 import type { ContextChunkSummary, DraftItem } from "@/lib/suggest/suggester";
+import { computeResumeIndex, getCheckProgress } from "@/lib/wporg/check-state";
 
 export const dynamic = "force-dynamic";
 
@@ -22,7 +24,7 @@ export default async function SuggestionsPage({
   const status = first(sp.status);
   const pluginId = first(sp.pluginId);
 
-  const [threads, plugins] = await Promise.all([
+  const [threads, plugins, lastCheckLog, resumeRuns] = await Promise.all([
     prisma.supportThread.findMany({
       where: {
         ...(status ? { status } : {}),
@@ -40,7 +42,38 @@ export default async function SuggestionsPage({
       select: { id: true, name: true },
       orderBy: { name: "asc" },
     }),
+    // Most recent finished check, for the last-check summary line.
+    prisma.forumCheckLog.findFirst({
+      where: { status: { not: "running" } },
+      orderBy: { startedAt: "desc" },
+    }),
+    // Non-running history, for the default Continue index.
+    prisma.forumCheckLog.findMany({
+      where: { status: { not: "running" } },
+      select: { lastIndex: true, status: true },
+    }),
   ]);
+
+  // The live progress singleton is shared with the API route in this process,
+  // so a check already running (this tab, another tab, or before navigation)
+  // renders without a flash.
+  const initialCheckProgress = getCheckProgress();
+  const initialLastCheck: ForumCheckLogView | null = lastCheckLog
+    ? {
+        id: lastCheckLog.id,
+        startedAt: lastCheckLog.startedAt.toISOString(),
+        finishedAt: lastCheckLog.finishedAt?.toISOString() ?? null,
+        status: lastCheckLog.status,
+        pluginsChecked: lastCheckLog.pluginsChecked,
+        newThreads: lastCheckLog.newThreads,
+        drafted: lastCheckLog.drafted,
+        skippedOld: lastCheckLog.skippedOld,
+        lastIndex: lastCheckLog.lastIndex,
+        errors: lastCheckLog.errors,
+      }
+    : null;
+  const pluginCount = plugins.length;
+  const initialResumeIndex = computeResumeIndex(resumeRuns, pluginCount);
 
   const items: SuggestionThreadItem[] = threads.map((thread) => {
     // New rows carry per-provider drafts in draftsJson; older rows only have
@@ -117,6 +150,10 @@ export default async function SuggestionsPage({
         threads={items}
         plugins={plugins}
         llmConfigured={suggesterConfigured()}
+        initialCheckProgress={initialCheckProgress}
+        initialLastCheck={initialLastCheck}
+        initialResumeIndex={initialResumeIndex}
+        pluginCount={pluginCount}
       />
     </div>
   );

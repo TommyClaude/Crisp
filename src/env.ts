@@ -34,6 +34,11 @@ const envSchema = z.object({
   WPORG_FEED_BASE: z
     .string()
     .default("https://wordpress.org/support/plugin"),
+  // Forum topics whose feed publish date is older than this many days at
+  // check time are skipped — never stored, never drafted. Quiet forums keep
+  // ancient items in their RSS feed; this stops years-old topics from wasting
+  // requests, DB rows, and LLM calls. Topics with no publish date are kept.
+  WPORG_TOPIC_MAX_AGE_DAYS: z.coerce.number().int().positive().default(30),
   BASIC_AUTH_USER: z.string().optional(),
   BASIC_AUTH_PASSWORD: z.string().optional(),
   CRISP_REQUEST_INTERVAL_MS: z.coerce.number().int().positive().default(150),

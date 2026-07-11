@@ -9,8 +9,12 @@ import {
   ExternalLink,
   Lightbulb,
   LoaderCircle,
+  Pause,
+  Play,
   RefreshCw,
   Sparkles,
+  Square,
+  TriangleAlert,
   X,
 } from "lucide-react";
 import { toast } from "sonner";
@@ -39,6 +43,7 @@ import {
   DropdownMenuItem,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
+import { Input } from "@/components/ui/input";
 import {
   Select,
   SelectContent,
@@ -89,25 +94,118 @@ const BULK_IDLE: BulkDraftProgress = {
   failed: 0,
 };
 
+/** Live progress payload from GET /api/wporg/check/status → progress. */
+interface CheckProgress {
+  running: boolean;
+  phase: "feeds" | "drafting";
+  pluginsTotal: number;
+  pluginsDone: number;
+  currentIndex: number | null;
+  currentPlugin: string | null;
+  currentFeedTopics: number | null;
+  newThreads: number;
+  drafted: number;
+  draftsDone: number;
+  skippedOld: number;
+  startedAt: string | null;
+  cancelRequested: boolean;
+  cancelReason: "cancelled" | "paused";
+}
+
+/** A ForumCheckLog row serialized for the client (powers the last-check line). */
+export interface ForumCheckLogView {
+  id: string;
+  startedAt: string;
+  finishedAt: string | null;
+  status: string;
+  pluginsChecked: number;
+  newThreads: number;
+  drafted: number;
+  skippedOld: number;
+  lastIndex: number | null;
+  errors: string[];
+}
+
+interface CheckStatusResponse {
+  progress: CheckProgress;
+  recentLogs: ForumCheckLogView[];
+  resumeIndex: number;
+  pluginCount: number;
+}
+
+const CHECK_POLL_INTERVAL_MS = 2500;
+
 /** Statuses the bulk generator considers (matches the API's eligibility). */
 const BULK_ELIGIBLE_STATUSES = ["new", "drafted", "failed"];
+
+/** Terminal check statuses that offer a "Continue" affordance. */
+const HALTED_STATUSES = ["paused", "cancelled", "failed"];
+
+function pluralTopics(n: number): string {
+  return `${n} new ${n === 1 ? "topic" : "topics"}`;
+}
+
+/** Parse the "continue from" input into a valid 1-based index. */
+function clampIndex(raw: string, max: number): number {
+  const parsed = Math.trunc(Number(raw));
+  if (!Number.isFinite(parsed) || parsed < 1) return 1;
+  return max > 0 ? Math.min(parsed, max) : parsed;
+}
 
 export function SuggestionsManager({
   threads,
   plugins,
   llmConfigured,
+  initialCheckProgress,
+  initialLastCheck,
+  initialResumeIndex,
+  pluginCount: initialPluginCount,
 }: {
   threads: SuggestionThreadItem[];
   plugins: Array<{ id: string; name: string }>;
   llmConfigured: boolean;
+  initialCheckProgress: CheckProgress;
+  initialLastCheck: ForumCheckLogView | null;
+  initialResumeIndex: number;
+  pluginCount: number;
 }) {
   const router = useRouter();
   const pathname = usePathname();
   const searchParams = useSearchParams();
-  const [checking, setChecking] = React.useState(false);
   const [bulk, setBulk] = React.useState<BulkDraftProgress>(BULK_IDLE);
   const [bulkStarting, setBulkStarting] = React.useState(false);
   const bulkWasRunning = React.useRef(false);
+
+  // Forum-check progress: seeded from the server so an in-flight check (this
+  // tab, another tab, or one started before navigation) shows with no flash,
+  // then kept live by polling GET /api/wporg/check/status.
+  const [checkProgress, setCheckProgress] =
+    React.useState<CheckProgress>(initialCheckProgress);
+  const [lastCheck, setLastCheck] = React.useState<ForumCheckLogView | null>(
+    initialLastCheck
+  );
+  const [checkStarting, setCheckStarting] = React.useState<
+    "start" | "continue" | null
+  >(null);
+  const [halting, setHalting] = React.useState<"pause" | "stop" | null>(null);
+  const [showCheckErrors, setShowCheckErrors] = React.useState(false);
+  const [pluginCount, setPluginCount] = React.useState(initialPluginCount);
+  // Furthest index reached across history — the default "Continue from" point.
+  const [resumeIndex, setResumeIndex] = React.useState(initialResumeIndex);
+  // Kept as a string so the field edits freely; clamped on blur and on start.
+  const [resumeFrom, setResumeFrom] = React.useState(String(initialResumeIndex));
+  const checkWasRunning = React.useRef(initialCheckProgress.running);
+  const checkRunning = checkProgress.running;
+
+  // Track the computed resume index until the user edits the field.
+  React.useEffect(() => {
+    setResumeFrom(String(resumeIndex));
+  }, [resumeIndex]);
+
+  // Whether the most recent finished run halted (paused/cancelled/failed) and
+  // can be continued.
+  const halted =
+    !checkRunning && lastCheck !== null && HALTED_STATUSES.includes(lastCheck.status);
 
   const activeStatus = searchParams.get("status") ?? "all";
   const activePlugin = searchParams.get("pluginId") ?? ALL;
@@ -202,33 +300,119 @@ export function SuggestionsManager({
     router.push(qs ? `${pathname}?${qs}` : pathname);
   };
 
-  const checkForums = async () => {
-    setChecking(true);
+  const refreshCheckStatus = React.useCallback(async () => {
+    try {
+      const res = await fetch("/api/wporg/check/status", { cache: "no-store" });
+      if (!res.ok) return;
+      const data = (await res.json()) as CheckStatusResponse;
+      setCheckProgress(data.progress);
+      if (typeof data.pluginCount === "number") setPluginCount(data.pluginCount);
+      if (typeof data.resumeIndex === "number") setResumeIndex(data.resumeIndex);
+      const lastFinished =
+        data.recentLogs.find((log) => log.status !== "running") ?? null;
+      if (lastFinished) setLastCheck(lastFinished);
+      const nowRunning = Boolean(data.progress.running);
+      if (checkWasRunning.current && !nowRunning) {
+        // A check we were watching just finished — summarize and reload.
+        const verb =
+          lastFinished && lastFinished.status !== "completed"
+            ? lastFinished.status
+            : "finished";
+        toast.success(
+          lastFinished
+            ? `Forum check ${verb} — ${lastFinished.newThreads} new, ${lastFinished.drafted} drafted, ${lastFinished.skippedOld} skipped`
+            : "Forum check finished"
+        );
+        router.refresh();
+      }
+      checkWasRunning.current = nowRunning;
+    } catch {
+      // Best-effort polling; the next tick may succeed.
+    }
+  }, [router]);
+
+  // Pick up an already-running check on mount (started elsewhere or before nav).
+  React.useEffect(() => {
+    void refreshCheckStatus();
+  }, [refreshCheckStatus]);
+
+  // Poll while a check is running.
+  React.useEffect(() => {
+    if (!checkRunning) return;
+    const id = setInterval(() => void refreshCheckStatus(), CHECK_POLL_INTERVAL_MS);
+    return () => clearInterval(id);
+  }, [checkRunning, refreshCheckStatus]);
+
+  const startCheck = async (opts: {
+    key: "start" | "continue";
+    startIndex?: number;
+    label: string;
+  }) => {
+    setCheckStarting(opts.key);
     try {
       const res = await fetch("/api/wporg/check", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ withSuggestions: true }),
+        body: JSON.stringify({
+          withSuggestions: true,
+          ...(opts.startIndex ? { startIndex: opts.startIndex } : {}),
+        }),
       });
       const body = await res.json().catch(() => ({}));
+      if (res.status === 409) {
+        toast.error("A forum check is already running");
+        if (body.progress) setCheckProgress(body.progress);
+        checkWasRunning.current = true;
+        return;
+      }
       if (!res.ok) {
         toast.error(body.error ?? "Forum check failed");
         return;
       }
-      toast.success(
-        `Checked ${body.pluginsChecked} forums — ${body.newThreads} new topics, ${body.drafted} drafts`,
-        {
-          description:
-            body.errors?.length > 0 ? `${body.errors.length} feed error(s) — see server logs` : undefined,
-        }
-      );
-      router.refresh();
+      if (body.progress) setCheckProgress(body.progress);
+      checkWasRunning.current = true;
+      toast.success(`${opts.label} started`);
     } catch {
       toast.error("Forum check failed");
     } finally {
-      setChecking(false);
+      setCheckStarting(null);
     }
   };
+
+  const haltCheck = async (action: "pause" | "stop") => {
+    setHalting(action);
+    try {
+      const res = await fetch("/api/wporg/check/stop", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ pause: action === "pause" }),
+      });
+      if (!res.ok) {
+        toast.error(`Failed to request ${action}`);
+        return;
+      }
+      toast.success(action === "pause" ? "Pause requested" : "Stop requested", {
+        description: "The check will halt after the current plugin.",
+      });
+      await refreshCheckStatus();
+    } catch {
+      toast.error(`Failed to request ${action}`);
+    } finally {
+      setHalting(null);
+    }
+  };
+
+  const checkBusy = checkRunning || checkStarting !== null;
+  const haltRequested = checkProgress.cancelRequested;
+
+  // Button label reflects the current phase: "Checking 8/14 — FileBird…" while
+  // reading feeds, "Drafting 2/5…" while drafting replies.
+  const checkLabel =
+    checkProgress.phase === "drafting"
+      ? `Drafting ${checkProgress.draftsDone}/${checkProgress.newThreads}…`
+      : `Checking ${checkProgress.currentIndex ?? checkProgress.pluginsDone}/${
+          checkProgress.pluginsTotal
+        }${checkProgress.currentPlugin ? ` — ${checkProgress.currentPlugin}` : ""}…`;
 
   return (
     <div className="space-y-4">
@@ -310,16 +494,204 @@ export function SuggestionsManager({
               </DropdownMenuContent>
             </DropdownMenu>
           )}
-          <Button size="sm" onClick={checkForums} disabled={checking}>
-            {checking ? (
-              <LoaderCircle className="size-3.5 animate-spin" />
-            ) : (
-              <RefreshCw className="size-3.5" />
-            )}
-            Check forums now
-          </Button>
+          {checkRunning ? (
+            <>
+              <span className="text-muted-foreground inline-flex max-w-[18rem] items-center gap-1.5 text-xs">
+                <LoaderCircle className="size-3.5 shrink-0 animate-spin" />
+                <span className="truncate">{checkLabel}</span>
+              </span>
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => haltCheck("pause")}
+                disabled={haltRequested || halting !== null}
+                className="border-amber-200 text-amber-600 hover:bg-amber-50 hover:text-amber-700 dark:border-amber-500/30 dark:text-amber-400 dark:hover:bg-amber-500/10"
+              >
+                {halting === "pause" ? (
+                  <LoaderCircle className="size-3.5 animate-spin" />
+                ) : (
+                  <Pause className="size-3.5" />
+                )}
+                {haltRequested && checkProgress.cancelReason === "paused"
+                  ? "Pausing…"
+                  : "Pause"}
+              </Button>
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => haltCheck("stop")}
+                disabled={haltRequested || halting !== null}
+                className="border-red-200 text-red-600 hover:bg-red-50 hover:text-red-700 dark:border-red-500/30 dark:text-red-400 dark:hover:bg-red-500/10"
+              >
+                {halting === "stop" ? (
+                  <LoaderCircle className="size-3.5 animate-spin" />
+                ) : (
+                  <Square className="size-3.5" />
+                )}
+                {haltRequested && checkProgress.cancelReason !== "paused"
+                  ? "Stopping…"
+                  : "Stop"}
+              </Button>
+            </>
+          ) : halted ? (
+            <>
+              <Button
+                variant="outline"
+                size="sm"
+                disabled={checkBusy}
+                onClick={() =>
+                  void startCheck({ key: "start", label: "Forum check" })
+                }
+              >
+                {checkStarting === "start" ? (
+                  <LoaderCircle className="size-3.5 animate-spin" />
+                ) : (
+                  <RefreshCw className="size-3.5" />
+                )}
+                Check from start
+              </Button>
+              <Input
+                type="number"
+                min={1}
+                max={pluginCount || undefined}
+                step={1}
+                value={resumeFrom}
+                disabled={checkBusy}
+                onChange={(e) => setResumeFrom(e.target.value)}
+                onBlur={() =>
+                  setResumeFrom(String(clampIndex(resumeFrom, pluginCount)))
+                }
+                aria-label="Continue from plugin number (alphabetical order)"
+                title={`Continue from plugin # (alphabetical order, 1–${pluginCount || "?"})`}
+                className="h-8 w-16 tabular-nums"
+              />
+              <Button
+                size="sm"
+                disabled={checkBusy}
+                onClick={() =>
+                  void startCheck({
+                    key: "continue",
+                    startIndex: clampIndex(resumeFrom, pluginCount),
+                    label: "Continue",
+                  })
+                }
+              >
+                {checkStarting === "continue" ? (
+                  <LoaderCircle className="size-3.5 animate-spin" />
+                ) : (
+                  <Play className="size-3.5" />
+                )}
+                Continue
+              </Button>
+            </>
+          ) : (
+            <Button
+              size="sm"
+              disabled={checkBusy}
+              onClick={() =>
+                void startCheck({ key: "start", label: "Forum check" })
+              }
+            >
+              {checkStarting ? (
+                <LoaderCircle className="size-3.5 animate-spin" />
+              ) : (
+                <RefreshCw className="size-3.5" />
+              )}
+              Check forums now
+            </Button>
+          )}
         </div>
       </div>
+
+      {checkRunning ? (
+        <div className="text-muted-foreground -mt-2 flex flex-wrap items-center gap-x-1.5 gap-y-0.5 text-xs">
+          {checkProgress.phase === "drafting" ? (
+            <span>
+              Drafting replies {checkProgress.draftsDone}/
+              {checkProgress.newThreads}
+            </span>
+          ) : (
+            <span>
+              Checking plugin {checkProgress.currentIndex ?? checkProgress.pluginsDone}{" "}
+              of {checkProgress.pluginsTotal}
+              {checkProgress.currentPlugin
+                ? ` — ${checkProgress.currentPlugin}`
+                : ""}
+              {checkProgress.currentFeedTopics != null
+                ? ` (${checkProgress.currentFeedTopics} in feed)`
+                : ""}
+            </span>
+          )}
+          <span aria-hidden>·</span>
+          <span>{checkProgress.newThreads} new</span>
+          <span aria-hidden>·</span>
+          <span>{checkProgress.drafted} drafted</span>
+          <span aria-hidden>·</span>
+          <span>{checkProgress.skippedOld} skipped (old)</span>
+        </div>
+      ) : null}
+
+      {lastCheck ? (
+        <div className="-mt-2 space-y-1">
+          <div className="text-muted-foreground flex flex-wrap items-center gap-x-1.5 gap-y-0.5 text-xs">
+            <span suppressHydrationWarning>
+              Last check{" "}
+              {formatDistanceToNow(
+                new Date(lastCheck.finishedAt ?? lastCheck.startedAt),
+                { addSuffix: true }
+              )}
+            </span>
+            <span aria-hidden>—</span>
+            <span>{pluralTopics(lastCheck.newThreads)}</span>
+            <span aria-hidden>·</span>
+            <span>{lastCheck.drafted} drafted</span>
+            <span aria-hidden>·</span>
+            <span>{lastCheck.skippedOld} skipped (old)</span>
+            {lastCheck.status === "failed" ? (
+              <>
+                <span aria-hidden>·</span>
+                <span className="text-destructive">check failed</span>
+              </>
+            ) : lastCheck.status === "paused" || lastCheck.status === "cancelled" ? (
+              <>
+                <span aria-hidden>·</span>
+                <span className="text-amber-600 dark:text-amber-400">
+                  {lastCheck.status}
+                  {lastCheck.lastIndex != null
+                    ? ` at plugin ${lastCheck.lastIndex}/${pluginCount || "?"}`
+                    : ""}{" "}
+                  — continue below (numbering is alphabetical)
+                </span>
+              </>
+            ) : null}
+            {lastCheck.errors.length > 0 ? (
+              <>
+                <span aria-hidden>·</span>
+                <button
+                  type="button"
+                  onClick={() => setShowCheckErrors((v) => !v)}
+                  title={lastCheck.errors.join("\n")}
+                  aria-expanded={showCheckErrors}
+                  className="inline-flex items-center gap-0.5 text-amber-600 underline-offset-2 hover:underline dark:text-amber-400"
+                >
+                  <TriangleAlert className="size-3" />
+                  {lastCheck.errors.length} error
+                  {lastCheck.errors.length === 1 ? "" : "s"}
+                </button>
+              </>
+            ) : null}
+          </div>
+          {showCheckErrors && lastCheck.errors.length > 0 ? (
+            <ul className="text-muted-foreground space-y-0.5 border-l-2 border-amber-300 pl-3 text-xs dark:border-amber-500/40">
+              {lastCheck.errors.map((err, i) => (
+                <li key={i} className="break-words">
+                  {err}
+                </li>
+              ))}
+            </ul>
+          ) : null}
+        </div>
+      ) : null}
 
       {threads.length === 0 ? (
         <div className="text-muted-foreground rounded-lg border border-dashed p-10 text-center text-sm">

@@ -19,7 +19,8 @@ async function main() {
   try {
     const result = await checkPluginForums({ withSuggestions });
     console.log(
-      `Done: ${result.pluginsChecked} plugins checked, ${result.newThreads} new threads, ${result.drafted} drafts generated.`
+      `Done: ${result.pluginsChecked} plugins checked, ${result.newThreads} new threads, ` +
+        `${result.drafted} drafts generated, ${result.skippedOld} skipped (too old).`
     );
     if (result.errors.length > 0) {
       console.warn(`Errors (${result.errors.length}):`);
