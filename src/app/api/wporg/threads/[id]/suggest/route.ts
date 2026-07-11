@@ -1,14 +1,24 @@
 import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/db";
+import { generateFollowupForThread } from "@/lib/suggest/followup";
 import { generateSuggestionForThread } from "@/lib/suggest/suggester";
 
 export const dynamic = "force-dynamic";
-export const maxDuration = 120;
+// Two sequential passes (first-reply + follow-up), each with up to two LLM
+// calls plus a multi-page wp.org fetch — mirror the heavier crawl routes.
+export const maxDuration = 300;
 
 /**
  * POST /api/wporg/threads/:id/suggest
  * (Re)generates the reply suggestion for a thread: retrieves RAG context and,
  * when an LLM provider is configured, drafts the reply.
+ *
+ * The manual Regenerate button ALSO drafts a follow-up reply grounded on the
+ * whole live wp.org thread (the next reply the support team should post). This
+ * extra pass is exclusive to this route — the watcher and bulk generators keep
+ * the cheaper first-reply-only behavior for cost control. A follow-up failure
+ * (e.g. wp.org unreachable) never fails the request: the first-reply drafts
+ * are already persisted, and the follow-up records a skipped state instead.
  */
 export async function POST(
   _request: NextRequest,
@@ -25,7 +35,17 @@ export async function POST(
 
   try {
     const result = await generateSuggestionForThread(id);
-    return NextResponse.json(result);
+
+    // Follow-up drafts are best-effort: fetching the live thread or the extra
+    // LLM calls can fail without invalidating the first-reply drafts above.
+    let followup = null;
+    try {
+      followup = await generateFollowupForThread(id);
+    } catch (error) {
+      console.error(`Follow-up draft failed for thread ${id}:`, error);
+    }
+
+    return NextResponse.json({ ...result, followup });
   } catch (error) {
     console.error(`Suggestion failed for thread ${id}:`, error);
     return NextResponse.json(

@@ -339,6 +339,70 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+/** A single fetched topic: its lead post plus every reply, deduped. */
+export interface FetchedTopicThread {
+  title: string | null;
+  resolved: boolean;
+  /** Lead post first, then replies in order; deduped by bbPress post id. */
+  posts: ForumPost[];
+}
+
+/**
+ * Fetch ONE wp.org topic by its URL (following reply pagination) and return
+ * its posts. Reuses the same parsing + de-dup + polite-delay machinery as
+ * {@link crawlForum}, but for a single known topic rather than a listing walk.
+ *
+ * Returns null when the topic page itself can't be fetched (network error,
+ * rate limit, unreachable) — the caller distinguishes that "fetch failed" case
+ * from a successfully fetched topic that simply has no replies (posts.length
+ * < 2). Reply pages are capped at DEFAULTS.maxReplyPagesPerThread.
+ */
+export async function fetchTopicThread(
+  topicUrl: string,
+  options?: Pick<
+    ForumCrawlOptions,
+    "maxReplyPagesPerThread" | "delayMs" | "timeoutMs"
+  >
+): Promise<FetchedTopicThread | null> {
+  const config = { ...DEFAULTS, ...options };
+  // Canonicalize so the page URLs and hasTopicPage() anchor-matching line up
+  // regardless of how the URL was stored (http/www/query/no trailing slash).
+  const base = canonicalForumUrl(topicUrl);
+
+  let currentHtml = await fetchHtml(base, config.timeoutMs);
+  if (!currentHtml) return null;
+
+  // De-dup posts by bbPress post id: wp.org repeats the lead topic at the top
+  // of EVERY reply page, so without this the question is counted once per page.
+  const posts: ForumPost[] = [];
+  const seenPostIds = new Set<string>();
+  const addPosts = (incoming: ForumPost[]) => {
+    for (const post of incoming) {
+      if (seenPostIds.has(post.id)) continue;
+      seenPostIds.add(post.id);
+      posts.push(post);
+    }
+  };
+
+  const firstPage = parseTopicPage(currentHtml);
+  addPosts(firstPage.posts);
+
+  let replyPage = 2;
+  while (
+    replyPage <= config.maxReplyPagesPerThread &&
+    hasTopicPage(currentHtml, base, replyPage)
+  ) {
+    await sleep(config.delayMs);
+    const moreHtml = await fetchHtml(`${base}page/${replyPage}/`, config.timeoutMs);
+    if (!moreHtml) break;
+    addPosts(parseTopicPage(moreHtml).posts);
+    currentHtml = moreHtml;
+    replyPage += 1;
+  }
+
+  return { title: firstPage.title, resolved: firstPage.resolved, posts };
+}
+
 /**
  * Crawl a plugin's wp.org support forum into CrawledPage transcripts.
  * One CrawledPage per answered thread; `title` carries a "[Resolved]" prefix

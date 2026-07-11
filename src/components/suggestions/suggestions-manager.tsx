@@ -19,8 +19,10 @@ import {
   ContextChunkList,
   DraftCards,
   DraftErrorLines,
+  FollowupSection,
   type ContextChunkItem,
   type DraftItemView,
+  type FollowupView,
 } from "@/components/suggestions/draft-parts";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -40,7 +42,7 @@ import {
 
 // Re-exported so existing importers (e.g. app/suggestions/page.tsx) keep their
 // current import paths after the shared extraction.
-export type { ContextChunkItem, DraftItemView };
+export type { ContextChunkItem, DraftItemView, FollowupView };
 
 export interface SuggestionThreadItem {
   id: string;
@@ -52,6 +54,9 @@ export interface SuggestionThreadItem {
   drafts: DraftItemView[];
   suggestError: string | null;
   contextChunks: ContextChunkItem[];
+  // Present once the manual Regenerate action has drafted a follow-up reply
+  // (or recorded why it was skipped); null until then.
+  followup: FollowupView | null;
   publishedAt: string | null;
   fetchedAt: string;
   plugin: { id: string; name: string };
@@ -399,6 +404,12 @@ function ThreadCard({
             per-provider failures below the drafts that did land. */}
         {draftsWithText.length > 0 ? (
           <DraftErrorLines drafts={thread.drafts} />
+        ) : null}
+
+        {/* Follow-up reply (the next reply for the whole thread) — only
+            populated by the manual Regenerate action. */}
+        {thread.followup ? (
+          <FollowupSection followup={thread.followup} />
         ) : null}
 
         <ContextChunkList chunks={thread.contextChunks} />

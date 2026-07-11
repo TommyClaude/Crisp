@@ -7,6 +7,7 @@ import {
   BookOpen,
   Check,
   Copy,
+  CornerDownRight,
   LifeBuoy,
   MessagesSquare,
   Sparkles,
@@ -45,12 +46,40 @@ export interface ContextChunkItem {
   product: string | null;
 }
 
-/** Violet per-provider draft cards with a per-card Copy button. */
-export function DraftCards({ drafts }: { drafts: DraftItemView[] }) {
+/** Accent palette for a draft-card family — lets follow-up drafts read as a
+ *  distinct kind from the first-reply drafts. Both themes styled. */
+type DraftAccent = "violet" | "amber";
+
+const ACCENT_STYLES: Record<
+  DraftAccent,
+  { card: string; icon: string; label: string }
+> = {
+  violet: {
+    card: "border-violet-200 bg-violet-50/50 dark:border-violet-500/25 dark:bg-violet-500/5",
+    icon: "text-violet-600 dark:text-violet-400",
+    label: "text-violet-700 dark:text-violet-400",
+  },
+  amber: {
+    card: "border-amber-300 bg-amber-50/70 dark:border-amber-500/30 dark:bg-amber-500/10",
+    icon: "text-amber-600 dark:text-amber-400",
+    label: "text-amber-700 dark:text-amber-500",
+  },
+};
+
+/** Per-provider draft cards with a per-card Copy button (violet by default;
+ *  pass accent="amber" for the follow-up family). */
+export function DraftCards({
+  drafts,
+  accent = "violet",
+}: {
+  drafts: DraftItemView[];
+  accent?: DraftAccent;
+}) {
   const [copiedKey, setCopiedKey] = React.useState<string | null>(null);
   const draftsWithText = drafts.filter((draft) => draft.text);
   if (draftsWithText.length === 0) return null;
 
+  const styles = ACCENT_STYLES[accent];
   const copyDraft = async (key: string, text: string) => {
     await navigator.clipboard.writeText(text);
     setCopiedKey(key);
@@ -74,11 +103,11 @@ export function DraftCards({ drafts }: { drafts: DraftItemView[] }) {
         return (
           <div
             key={key}
-            className="flex flex-col rounded-md border border-violet-200 bg-violet-50/50 p-3 dark:border-violet-500/25 dark:bg-violet-500/5"
+            className={cn("flex flex-col rounded-md border p-3", styles.card)}
           >
             <div className="mb-1.5 flex items-center gap-2">
-              <Sparkles className="size-3.5 shrink-0 text-violet-600 dark:text-violet-400" />
-              <span className="text-xs font-medium text-violet-700 dark:text-violet-400">
+              <Sparkles className={cn("size-3.5 shrink-0", styles.icon)} />
+              <span className={cn("text-xs font-medium", styles.label)}>
                 {label}
               </span>
               {draft.model ? (
@@ -125,6 +154,55 @@ export function DraftErrorLines({ drafts }: { drafts: DraftItemView[] }) {
           failed: {draft.error}
         </p>
       ))}
+    </div>
+  );
+}
+
+/** Follow-up drafts for the UI (mirrors the persisted followupJson shape). */
+export interface FollowupView {
+  postCount: number;
+  drafts: DraftItemView[];
+  skipped: "no_replies" | "fetch_failed" | null;
+}
+
+/**
+ * The follow-up reply section: the NEXT-reply drafts grounded on the whole
+ * live thread, rendered below the first-reply drafts in a distinct amber box
+ * so the two kinds are easy to tell apart. Falls back to a muted one-line note
+ * for the skipped cases.
+ */
+export function FollowupSection({ followup }: { followup: FollowupView }) {
+  const hasDrafts = followup.drafts.some((draft) => draft.text);
+  return (
+    <div className="space-y-2 rounded-md border border-amber-300/70 bg-amber-50/30 p-3 dark:border-amber-500/25 dark:bg-amber-500/[0.04]">
+      <div className="flex items-center gap-2">
+        <CornerDownRight className="size-3.5 shrink-0 text-amber-600 dark:text-amber-400" />
+        <span className="text-xs font-semibold tracking-wide text-amber-700 dark:text-amber-500">
+          Follow-up reply — based on the current thread ({followup.postCount}{" "}
+          {followup.postCount === 1 ? "post" : "posts"})
+        </span>
+      </div>
+      {followup.skipped === "no_replies" ? (
+        <p className="text-muted-foreground text-xs">
+          No replies yet — follow-up drafts apply once the thread has replies.
+        </p>
+      ) : followup.skipped === "fetch_failed" ? (
+        <p className="text-muted-foreground text-xs">
+          Couldn&apos;t fetch the live thread from wp.org — try again.
+        </p>
+      ) : hasDrafts ? (
+        <>
+          <DraftCards drafts={followup.drafts} accent="amber" />
+          <DraftErrorLines drafts={followup.drafts} />
+        </>
+      ) : followup.drafts.length > 0 ? (
+        <DraftErrorLines drafts={followup.drafts} />
+      ) : (
+        <p className="text-muted-foreground text-xs">
+          No LLM provider configured — set ANTHROPIC_API_KEY or OPENAI_API_KEY
+          to enable follow-up drafts.
+        </p>
+      )}
     </div>
   );
 }

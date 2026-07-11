@@ -2,8 +2,10 @@ import { prisma } from "@/lib/db";
 import {
   SuggestionsManager,
   type DraftItemView,
+  type FollowupView,
   type SuggestionThreadItem,
 } from "@/components/suggestions/suggestions-manager";
+import type { FollowupResult } from "@/lib/suggest/followup";
 import { suggesterConfigured } from "@/lib/suggest/llm";
 import type { ContextChunkSummary, DraftItem } from "@/lib/suggest/suggester";
 
@@ -64,6 +66,23 @@ export default async function SuggestionsPage({
             ]
           : [];
 
+    // Follow-up drafts exist only after a manual Regenerate; surface either
+    // its drafts or the reason it was skipped.
+    const storedFollowup =
+      (thread.followupJson as unknown as FollowupResult | null) ?? null;
+    const followup: FollowupView | null = storedFollowup
+      ? {
+          postCount: storedFollowup.postCount,
+          skipped: storedFollowup.skipped ?? null,
+          drafts: (storedFollowup.drafts ?? []).map((draft) => ({
+            provider: draft.provider,
+            model: draft.model,
+            text: draft.text,
+            error: draft.error,
+          })),
+        }
+      : null;
+
     return {
       id: thread.id,
       title: thread.title,
@@ -75,6 +94,7 @@ export default async function SuggestionsPage({
       suggestError: thread.suggestError,
       contextChunks:
         (thread.contextJson as unknown as ContextChunkSummary[]) ?? [],
+      followup,
       publishedAt: thread.publishedAt?.toISOString() ?? null,
       fetchedAt: thread.fetchedAt.toISOString(),
       plugin: { id: thread.plugin.id, name: thread.plugin.name },

@@ -84,6 +84,12 @@ model SupportThread {
   // Retrieved chat/docs chunks the draft was grounded on:
   // [{source, similarity, title, link, excerpt, product}]
   contextJson  Json?
+  // Follow-up reply drafts, generated only by the manual "Regenerate" action
+  // (not the watcher/bulk paths, for cost control). These answer the LATEST
+  // customer message in the whole live wp.org thread rather than the opening
+  // post: {generatedAt, postCount, drafts:[{provider,model,text,error}],
+  // context:[...], skipped?: "no_replies" | "fetch_failed"}.
+  followupJson Json?
   suggestError String?
   fetchedAt    DateTime  @default(now())
   updatedAt    DateTime  @updatedAt

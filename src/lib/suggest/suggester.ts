@@ -43,7 +43,7 @@ const CONTEXT_LIMIT = 6;
 /** Max characters of each chunk fed into the prompt. */
 const PROMPT_CHUNK_CHARS = 1200;
 
-function toContextSummary(result: RagSearchResult): ContextChunkSummary {
+export function toContextSummary(result: RagSearchResult): ContextChunkSummary {
   if (
     (result.source === "plugin_docs" || result.source === "wporg_forum") &&
     result.docsPage
@@ -72,7 +72,7 @@ function toContextSummary(result: RagSearchResult): ContextChunkSummary {
 }
 
 /** Retrieve context for a thread: plugin-scoped first, widen if too thin. */
-async function retrieveContext(
+export async function retrieveContext(
   query: string,
   pluginId: string
 ): Promise<RagSearchResult[]> {
@@ -85,6 +85,25 @@ async function retrieveContext(
     ...scoped.results,
     ...wide.results.filter((r) => !seen.has(r.chunkId)),
   ].slice(0, CONTEXT_LIMIT);
+}
+
+/**
+ * Render retrieved RAG chunks as the labelled context block shared by the
+ * first-reply prompt ({@link buildPrompt}) and the follow-up prompt, so both
+ * ground on identically-formatted context.
+ */
+export function formatContextBlock(context: RagSearchResult[]): string {
+  return context
+    .map((result, index) => {
+      const label =
+        result.source === "plugin_docs"
+          ? `DOCS (${result.docsPage?.url ?? "unknown"})`
+          : result.source === "wporg_forum"
+            ? `ANSWERED FORUM TOPIC (${result.docsPage?.url ?? "unknown"})`
+            : "PAST SUPPORT CONVERSATION";
+      return `--- Context ${index + 1} [${label}] ---\n${result.chunkText.slice(0, PROMPT_CHUNK_CHARS)}`;
+    })
+    .join("\n\n");
 }
 
 function buildPrompt(
@@ -101,17 +120,7 @@ function buildPrompt(
     "and reference documentation links from the context when they support the answer. " +
     "Write plain text suitable for a forum reply (no markdown headings). Do not mention the context, Crisp, or that you are an AI.";
 
-  const contextText = context
-    .map((result, index) => {
-      const label =
-        result.source === "plugin_docs"
-          ? `DOCS (${result.docsPage?.url ?? "unknown"})`
-          : result.source === "wporg_forum"
-            ? `ANSWERED FORUM TOPIC (${result.docsPage?.url ?? "unknown"})`
-            : "PAST SUPPORT CONVERSATION";
-      return `--- Context ${index + 1} [${label}] ---\n${result.chunkText.slice(0, PROMPT_CHUNK_CHARS)}`;
-    })
-    .join("\n\n");
+  const contextText = formatContextBlock(context);
 
   const user =
     `New forum thread on wordpress.org/support/plugin:\n\n` +
@@ -140,6 +149,31 @@ export interface DraftSuggestionResult {
 }
 
 /**
+ * Draft one reply per configured provider in parallel — one DraftItem per
+ * provider, with the same refusal/empty handling for every caller. Returns []
+ * when no provider is configured. Shared by the first-reply suggester and the
+ * follow-up drafter so the two never drift in how they call the providers.
+ */
+export async function draftFromProviders(
+  prompt: { system: string; user: string },
+  logLabel: string
+): Promise<DraftItem[]> {
+  const providers = availableProviders();
+  return Promise.all(
+    providers.map(async (provider): Promise<DraftItem> => {
+      try {
+        const draft = await generateDraftFor(provider, prompt.system, prompt.user);
+        return { provider, model: draft.model, text: draft.text, error: null };
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        console.error(`Draft (${provider}) failed for ${logLabel}:`, error);
+        return { provider, model: null, text: null, error: message };
+      }
+    })
+  );
+}
+
+/**
  * Pure drafting core: build the query, retrieve RAG context, draft a reply
  * from every configured provider in parallel, and derive the status. Touches
  * no database rows — used both by the real forum flow
@@ -157,39 +191,21 @@ export async function draftSuggestion(
 
   // Draft from every configured provider in parallel — one card per provider.
   const providers = availableProviders();
-  const prompt =
+  const drafts: DraftItem[] =
     providers.length > 0
-      ? buildPrompt(
-          {
-            title: input.title,
-            excerpt: input.excerpt,
-            author: input.author ?? null,
-          },
-          input.plugin.name,
-          context
+      ? await draftFromProviders(
+          buildPrompt(
+            {
+              title: input.title,
+              excerpt: input.excerpt,
+              author: input.author ?? null,
+            },
+            input.plugin.name,
+            context
+          ),
+          `"${input.title}"`
         )
-      : null;
-  const drafts: DraftItem[] = prompt
-    ? await Promise.all(
-        providers.map(async (provider): Promise<DraftItem> => {
-          try {
-            const draft = await generateDraftFor(
-              provider,
-              prompt.system,
-              prompt.user
-            );
-            return { provider, model: draft.model, text: draft.text, error: null };
-          } catch (error) {
-            const message = error instanceof Error ? error.message : String(error);
-            console.error(
-              `Draft (${provider}) failed for "${input.title}":`,
-              error
-            );
-            return { provider, model: null, text: null, error: message };
-          }
-        })
-      )
-    : [];
+      : [];
 
   // All providers failing => status "failed". No LLM configured => status
   // stays "drafted" with context only; the UI shows the retrieved chunks so a
