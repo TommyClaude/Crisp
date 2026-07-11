@@ -24,6 +24,7 @@ export default async function BrandsPage() {
           name: brand.name,
           crispWebsiteId: brand.crispWebsiteId,
           wpProfileSlug: brand.wpProfileSlug,
+          replyStyle: brand.replyStyle,
           pluginCount: brand._count.plugins,
           conversationCount: brand._count.conversations,
         }))}

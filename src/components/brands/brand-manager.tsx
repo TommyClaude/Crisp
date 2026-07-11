@@ -7,6 +7,7 @@ import {
   CheckCircle2,
   Globe,
   LoaderCircle,
+  MessageSquareText,
   PackagePlus,
   Plug,
   Plus,
@@ -26,12 +27,15 @@ import {
 } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { Textarea } from "@/components/ui/textarea";
 
 export interface BrandItem {
   id: string;
   name: string;
   crispWebsiteId: string;
   wpProfileSlug: string | null;
+  /** Free-text house-style notes fed into the AI reply-drafting prompts. */
+  replyStyle: string | null;
   pluginCount: number;
   conversationCount: number;
 }
@@ -163,6 +167,8 @@ function BrandRow({ brand }: { brand: BrandItem }) {
   const [busy, setBusy] = React.useState<string | null>(null);
   const [editingProfile, setEditingProfile] = React.useState(false);
   const [profile, setProfile] = React.useState(brand.wpProfileSlug ?? "");
+  const [editingStyle, setEditingStyle] = React.useState(false);
+  const [style, setStyle] = React.useState(brand.replyStyle ?? "");
   const [testResult, setTestResult] = React.useState<{
     ok: boolean;
     message: string;
@@ -242,6 +248,29 @@ function BrandRow({ brand }: { brand: BrandItem }) {
     }
   };
 
+  const saveStyle = async (clear = false) => {
+    setBusy("style");
+    try {
+      const res = await fetch(`/api/brands/${brand.id}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ replyStyle: clear ? "" : style.trim() }),
+      });
+      const body = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        toast.error(body.error ?? "Failed to save reply style");
+        return;
+      }
+      toast.success(clear ? "Reply style cleared" : "Reply style saved");
+      setEditingStyle(false);
+      router.refresh();
+    } catch {
+      toast.error("Failed to save reply style");
+    } finally {
+      setBusy(null);
+    }
+  };
+
   const importPlugins = async () => {
     setBusy("import");
     try {
@@ -289,6 +318,16 @@ function BrandRow({ brand }: { brand: BrandItem }) {
                 wp.org/author/{brand.wpProfileSlug}
               </Badge>
             ) : null}
+            {brand.replyStyle ? (
+              <Badge
+                variant="outline"
+                className="text-muted-foreground gap-1 text-[11px] font-normal"
+                title={brand.replyStyle}
+              >
+                <MessageSquareText className="size-3" />
+                Style set
+              </Badge>
+            ) : null}
           </div>
           <p className="text-muted-foreground mt-0.5 truncate font-mono text-xs">
             {brand.crispWebsiteId}
@@ -322,6 +361,16 @@ function BrandRow({ brand }: { brand: BrandItem }) {
           >
             <Globe className="size-3.5" />
             {brand.wpProfileSlug ? "Update wp.org" : "Set wp.org"}
+          </Button>
+          <Button
+            variant="ghost"
+            size="sm"
+            onClick={() => setEditingStyle((v) => !v)}
+            disabled={busy !== null}
+            title="House-style notes fed into the AI reply drafts"
+          >
+            <MessageSquareText className="size-3.5" />
+            {brand.replyStyle ? "Edit style" : "Reply style"}
           </Button>
           {brand.wpProfileSlug ? (
             <Button
@@ -417,6 +466,64 @@ function BrandRow({ brand }: { brand: BrandItem }) {
               size="sm"
               onClick={() => setEditingProfile(false)}
               disabled={busy === "profile"}
+            >
+              Cancel
+            </Button>
+          </div>
+        </div>
+      ) : null}
+
+      {editingStyle ? (
+        <div className="space-y-3 border-t px-4 py-3">
+          <div className="space-y-1.5">
+            <Label className="text-xs">Reply style</Label>
+            <Textarea
+              value={style}
+              onChange={(e) => setStyle(e.target.value)}
+              placeholder={
+                "House-style notes for AI reply drafts, e.g.:\n" +
+                "- Sign off as “The FileBird team”\n" +
+                "- Warm and concise; a single emoji is fine\n" +
+                "- Prefer “Kind regards” over “Cheers”"
+              }
+              rows={5}
+              maxLength={2000}
+              className="text-xs sm:max-w-lg"
+            />
+            <p className="text-muted-foreground text-xs">
+              Free-text tone, sign-off, emoji policy and phrasing preferences.
+              Added to the first-reply and follow-up drafting prompts for this
+              brand&rsquo;s plugins. Style guides wording only; it never
+              overrides the grounding and correctness rules.
+            </p>
+          </div>
+          <div className="flex items-center gap-2">
+            <Button
+              size="sm"
+              onClick={() => saveStyle(false)}
+              disabled={busy === "style" || !style.trim()}
+            >
+              {busy === "style" ? (
+                <LoaderCircle className="size-3.5 animate-spin" />
+              ) : null}
+              Save style
+            </Button>
+            {brand.replyStyle ? (
+              <Button
+                variant="ghost"
+                size="sm"
+                className="text-muted-foreground"
+                onClick={() => saveStyle(true)}
+                disabled={busy === "style"}
+              >
+                Clear style
+              </Button>
+            ) : null}
+            <Button
+              variant="ghost"
+              size="sm"
+              onClick={() => setEditingStyle(false)}
+              disabled={busy === "style"}
             >
               Cancel
             </Button>

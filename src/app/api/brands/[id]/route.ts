@@ -10,6 +10,9 @@ const patchSchema = z.object({
   crispWebsiteId: z.string().min(8).max(100).optional(),
   // wordpress.org author username: send to set, "" or null to clear.
   wpProfileSlug: z.string().max(100).nullable().optional(),
+  // Free-text house-style notes fed into the AI reply-drafting prompts: send
+  // to set, "" or null to clear.
+  replyStyle: z.string().max(2000).nullable().optional(),
 });
 
 /** PATCH /api/brands/:id — update name/websiteId/wpProfileSlug. */
@@ -42,6 +45,9 @@ export async function PATCH(
           : {}),
         ...(parsed.data.wpProfileSlug !== undefined
           ? { wpProfileSlug: parsed.data.wpProfileSlug?.trim() || null }
+          : {}),
+        ...(parsed.data.replyStyle !== undefined
+          ? { replyStyle: parsed.data.replyStyle?.trim() || null }
           : {}),
       },
     });

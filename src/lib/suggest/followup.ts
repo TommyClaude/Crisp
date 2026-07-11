@@ -5,10 +5,13 @@ import {
 } from "@/lib/wporg/forum-crawler";
 import { availableProviders } from "./llm";
 import {
+  appendReplyStyle,
   draftFromProviders,
   formatContextBlock,
+  HUMAN_VOICE_RULE,
   retrieveContext,
   toContextSummary,
+  voiceMimicryRule,
   type ContextChunkSummary,
   type DraftItem,
 } from "./suggester";
@@ -39,6 +42,8 @@ export interface DraftFollowupInput {
   url: string;
   title: string;
   plugin: { id: string; name: string };
+  /** The owning brand's house-style instructions, when set. */
+  replyStyle?: string | null;
 }
 
 /** A post counts as the support side when wp.org tagged it with a role. */
@@ -79,30 +84,41 @@ export function buildFollowupPrompt(
   title: string,
   posts: ForumPost[],
   pluginName: string,
-  contextText: string
+  contextText: string,
+  replyStyle?: string | null
 ): { system: string; user: string } {
-  const system =
+  const system = appendReplyStyle(
     `You are a senior support engineer for the WordPress plugin "${pluginName}". ` +
-    "You are drafting the NEXT reply your support team should post in an ongoing wordpress.org forum thread, for a human teammate to review and post. " +
-    // State assessment first: a thread that is already resolved must get a
-    // short goodbye, not another round of troubleshooting — the retrieved
-    // context is full of solutions and would otherwise drag the reply there.
-    "FIRST assess the state of the conversation. If the customer's most recent message says the problem is solved, only thanks the team, or mentions having left a review — with no open question — reply with a SHORT, warm closing (1-3 sentences: thank them, say you're glad it's resolved, invite them to open a new topic if anything else comes up). In that case do NOT repeat earlier solutions, do NOT add troubleshooting steps, do NOT share download links, and ignore the provided context entirely. " +
-    "Only when the customer's most recent message still contains an open problem or question: ground your answer ONLY in the provided context (past resolved support conversations, answered forum threads, and official documentation). " +
-    "If the context does not contain a clear answer, say so and draft clarifying questions to ask the user instead of guessing. " +
-    "Never invent features, settings, or file paths. Be friendly, concise and concrete: give numbered steps when applicable, " +
-    "and reference documentation links from the context when they support the answer. " +
-    "Continue the conversation naturally: stay consistent with what the support team has already said, do NOT repeat greetings or answers given earlier in the thread, and directly address the customer's most recent message. " +
-    "Write plain text suitable for a forum reply (no markdown headings). Do not mention the context, Crisp, or that you are an AI. " +
-    "Your state assessment is INTERNAL: never state it in the output. Output ONLY the reply text itself — no analysis, no preamble, no explanation of your decision. " +
-    "When it reads naturally, open by addressing the person you are replying to by their @username.";
+      "You are drafting the NEXT reply your support team should post in an ongoing wordpress.org forum thread, for a human teammate to review and post. " +
+      // State assessment first: a thread that is already resolved must get a
+      // short goodbye, not another round of troubleshooting — the retrieved
+      // context is full of solutions and would otherwise drag the reply there.
+      "FIRST assess the state of the conversation. If the customer's most recent message says the problem is solved, only thanks the team, or mentions having left a review, with no open question, reply with a SHORT, warm closing (1-3 sentences: thank them, say you're glad it's resolved, invite them to open a new topic if anything else comes up). In that case do NOT repeat earlier solutions, do NOT add troubleshooting steps, do NOT share download links, and ignore the provided context entirely. " +
+      // Mixed state: a message that closes the old issue AND opens a new one
+      // must not be swallowed as a pure goodbye, nor drag the solved issue
+      // back up — thank briefly, then answer the new question from context.
+      "If the customer's most recent message does BOTH (it closes the old issue with thanks, a resolved note, or a review, AND asks a new question or reports a new problem), then briefly acknowledge and thank them in ONE sentence, and then answer the new question grounded in the provided context. Do not treat this as a pure closing, and do not re-explain or re-litigate the already-solved issue. " +
+      "Only when the customer's most recent message still contains an open problem or question: ground your answer ONLY in the provided context (past resolved support conversations, answered forum threads, and official documentation). " +
+      "If the context does not contain a clear answer, say so and draft clarifying questions to ask the user instead of guessing. " +
+      "Never invent features, settings, or file paths. Be friendly, concise and concrete: give numbered steps when applicable, " +
+      "and reference documentation links from the context when they support the answer. " +
+      "Continue the conversation naturally: stay consistent with what the support team has already said, do NOT repeat greetings or answers given earlier in the thread, and directly address the customer's most recent message. " +
+      voiceMimicryRule(true) +
+      " " +
+      HUMAN_VOICE_RULE +
+      " " +
+      "Write plain text suitable for a forum reply (no markdown headings). Do not mention the context, Crisp, or that you are an AI. " +
+      "Your state assessment is INTERNAL: never state it in the output. Output ONLY the reply text itself, with no analysis, no preamble, and no explanation of your decision. " +
+      "When it reads naturally, open by addressing the person you are replying to by their @username.",
+    replyStyle
+  );
 
   const user =
     `Ongoing forum thread on wordpress.org/support/plugin:\n\n` +
     `Title: ${title}\n\n` +
     `Conversation so far (oldest first):\n\n${buildTranscript(posts)}\n\n` +
     `Context from past support conversations and documentation:\n\n${contextText || "(no relevant context found)"}\n\n` +
-    "First decide (internally — do not write this out) whether the customer's most recent message is closing the conversation (resolved / thanks / review left) or still needs help, then output ONLY the support team's next reply.";
+    "First decide silently (do not write this out) whether the customer's most recent message is closing the conversation (resolved / thanks / review left), still needs help, or does both at once (a thank-you plus a brand-new question), then output ONLY the support team's next reply.";
 
   return { system, user };
 }
@@ -147,7 +163,8 @@ export async function draftFollowup(
             title,
             fetched.posts,
             input.plugin.name,
-            formatContextBlock(context)
+            formatContextBlock(context),
+            input.replyStyle
           ),
           `follow-up "${title}"`
         )
@@ -166,13 +183,22 @@ export async function generateFollowupForThread(
 ): Promise<FollowupResult> {
   const thread = await prisma.supportThread.findUniqueOrThrow({
     where: { id: threadId },
-    include: { plugin: { select: { id: true, name: true } } },
+    include: {
+      plugin: {
+        select: {
+          id: true,
+          name: true,
+          brand: { select: { replyStyle: true } },
+        },
+      },
+    },
   });
 
   const result = await draftFollowup({
     url: thread.url,
     title: thread.title,
     plugin: { id: thread.plugin.id, name: thread.plugin.name },
+    replyStyle: thread.plugin.brand?.replyStyle ?? null,
   });
 
   await prisma.supportThread.update({

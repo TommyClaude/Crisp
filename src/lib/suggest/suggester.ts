@@ -106,19 +106,83 @@ export function formatContextBlock(context: RagSearchResult[]): string {
     .join("\n\n");
 }
 
-function buildPrompt(
+/**
+ * Instruction shared by the first-reply and follow-up prompts: match the
+ * support team's OWN voice as it appears in the retrieved examples (and, for
+ * follow-ups, the replies already visible in the thread). Tone and format
+ * only — never lift customer-specific details from those examples.
+ */
+export function voiceMimicryRule(includeThread: boolean): string {
+  return (
+    "Mimic the support team's own voice as it appears in the provided materials: the support-team turns inside the PAST SUPPORT CONVERSATION and ANSWERED FORUM TOPIC context" +
+    (includeThread
+      ? ", and the support replies already visible earlier in this thread"
+      : "") +
+    ". Match their greeting style, sign-off, emoji usage and phrasing conventions. Imitate only tone and format; never copy customer-specific details, names, order numbers or site specifics from those examples."
+  );
+}
+
+/**
+ * "Don't sound like an AI" ruleset shared by both drafting prompts. The
+ * em-dash ban is the load-bearing tell; the rest steer the draft toward how a
+ * real forum support engineer writes. A brand's explicit house-style
+ * instructions (see {@link appendReplyStyle}) win if they ever conflict.
+ */
+export const HUMAN_VOICE_RULE =
+  "Write like a busy human support engineer on a forum, not like an AI. " +
+  "NEVER use em dashes (—) or en dashes (–) as punctuation; use commas, periods, or parentheses instead, the way a normal forum poster would. " +
+  'Avoid phrasing that makes readers suspect a bot wrote it: reflex openers like "Great question!", "Certainly!" or "Thank you for reaching out", closers like "I hope this helps!", transition words like "delve", "furthermore", "moreover" or "additionally", formulaic three-item parallel lists, and relentlessly uniform sentence lengths. ' +
+  "Use plain wording, vary your sentence length, and let a little informality through. The support team's real replies in the context and thread are your best guide.";
+
+/**
+ * Append the brand's free-text house-style instructions as a clearly delimited
+ * section of the system prompt. The guard text makes the style shape wording,
+ * tone and format only: it takes precedence over inferred voice and the
+ * anti-AI style rules, but NEVER over the grounding/correctness rules. Returns
+ * the prompt unchanged when the brand has no style set.
+ */
+export function appendReplyStyle(
+  system: string,
+  replyStyle?: string | null
+): string {
+  const style = replyStyle?.trim();
+  if (!style) return system;
+  return (
+    system +
+    "\n\n===== BRAND HOUSE-STYLE INSTRUCTIONS =====\n" +
+    "Follow these house-style notes from the support team for the wording, tone, sign-off, emoji policy and phrasing of your reply. " +
+    "They reflect the team's own voice, so they take precedence over any voice you infer from the examples and over the no-em-dash / no-AI-tell style rules above if they ever conflict. " +
+    "They must NEVER override the grounding and correctness rules: do not invent facts, features, settings, steps or links to satisfy the style.\n\n" +
+    style +
+    "\n===== END BRAND HOUSE-STYLE INSTRUCTIONS ====="
+  );
+}
+
+/**
+ * Build the first-reply prompt. Exported for unit testing the prompt
+ * construction (grounding rules, voice/anti-AI rules, and the optional brand
+ * house-style section) without hitting the LLM.
+ */
+export function buildPrompt(
   thread: { title: string; excerpt: string; author: string | null },
   pluginName: string,
-  context: RagSearchResult[]
+  context: RagSearchResult[],
+  replyStyle?: string | null
 ): { system: string; user: string } {
-  const system =
+  const system = appendReplyStyle(
     `You are a senior support engineer for the WordPress plugin "${pluginName}". ` +
-    "You draft replies to forum threads on wordpress.org for a human teammate to review and post. " +
-    "Ground your answer ONLY in the provided context (past resolved support conversations, answered forum threads, and official documentation). " +
-    "If the context does not contain a clear answer, say so and draft clarifying questions to ask the user instead of guessing. " +
-    "Never invent features, settings, or file paths. Be friendly, concise and concrete: greet the user briefly, give numbered steps when applicable, " +
-    "and reference documentation links from the context when they support the answer. " +
-    "Write plain text suitable for a forum reply (no markdown headings). Do not mention the context, Crisp, or that you are an AI.";
+      "You draft replies to forum threads on wordpress.org for a human teammate to review and post. " +
+      "Ground your answer ONLY in the provided context (past resolved support conversations, answered forum threads, and official documentation). " +
+      "If the context does not contain a clear answer, say so and draft clarifying questions to ask the user instead of guessing. " +
+      "Never invent features, settings, or file paths. Be friendly, concise and concrete: greet the user briefly, give numbered steps when applicable, " +
+      "and reference documentation links from the context when they support the answer. " +
+      voiceMimicryRule(false) +
+      " " +
+      HUMAN_VOICE_RULE +
+      " " +
+      "Write plain text suitable for a forum reply (no markdown headings). Do not mention the context, Crisp, or that you are an AI.",
+    replyStyle
+  );
 
   const contextText = formatContextBlock(context);
 
@@ -139,6 +203,8 @@ export interface DraftSuggestionInput {
   excerpt: string;
   author?: string | null;
   plugin: { id: string; name: string };
+  /** The owning brand's house-style instructions, when set. */
+  replyStyle?: string | null;
 }
 
 export interface DraftSuggestionResult {
@@ -198,7 +264,8 @@ export async function draftSuggestion(
               author: input.author ?? null,
             },
             input.plugin.name,
-            context
+            context,
+            input.replyStyle
           ),
           `"${input.title}"`
         )
@@ -232,7 +299,15 @@ export async function generateSuggestionForThread(
 ): Promise<SuggestionResult> {
   const thread = await prisma.supportThread.findUniqueOrThrow({
     where: { id: threadId },
-    include: { plugin: { select: { id: true, name: true } } },
+    include: {
+      plugin: {
+        select: {
+          id: true,
+          name: true,
+          brand: { select: { replyStyle: true } },
+        },
+      },
+    },
   });
 
   const { drafts, contextChunks, status, suggestError } = await draftSuggestion({
@@ -240,6 +315,7 @@ export async function generateSuggestionForThread(
     excerpt: thread.excerpt,
     author: thread.author,
     plugin: { id: thread.plugin.id, name: thread.plugin.name },
+    replyStyle: thread.plugin.brand?.replyStyle ?? null,
   });
 
   // Primary draft = the first provider that produced text (back-compat + the

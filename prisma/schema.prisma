@@ -28,6 +28,12 @@ model Brand {
   // wordpress.org author username used to bulk-import the brand's plugins
   // (from wordpress.org/plugins/author/<slug>/) with one click on /brands.
   wpProfileSlug  String?
+  // Free-text house-style instructions for this brand's AI reply drafts —
+  // sign-off, tone, emoji policy, favorite phrasings. Appended as a clearly
+  // delimited section to the drafting system prompts (first-reply and
+  // follow-up) so drafts match the team's voice; it is guidance layered on
+  // top of, and never overriding, the grounding/correctness rules.
+  replyStyle     String?
   createdAt      DateTime @default(now())
   updatedAt      DateTime @updatedAt
 

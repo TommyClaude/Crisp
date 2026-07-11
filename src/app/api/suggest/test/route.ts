@@ -45,7 +45,15 @@ export async function POST(request: NextRequest) {
   const { pluginId, title, content } = parsed.data;
   const plugin = await prisma.plugin.findUnique({
     where: { id: pluginId },
-    select: { id: true, name: true },
+    select: {
+      id: true,
+      name: true,
+      // Apply the owning brand's house-style to playground drafts too, so the
+      // Test Answer page previews the exact prompt the forum flow would use. A
+      // plugin always has a brand (plugin.brandId is required); the optional
+      // chain just skips silently if that ever isn't the case.
+      brand: { select: { replyStyle: true } },
+    },
   });
   if (!plugin) {
     return NextResponse.json({ error: "Plugin not found" }, { status: 404 });
@@ -61,7 +69,8 @@ export async function POST(request: NextRequest) {
         title: effectiveTitle,
         excerpt: content,
         author: null,
-        plugin,
+        plugin: { id: plugin.id, name: plugin.name },
+        replyStyle: plugin.brand?.replyStyle ?? null,
       });
     return NextResponse.json({
       drafts,
