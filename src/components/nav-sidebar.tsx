@@ -4,6 +4,7 @@ import Link from "next/link";
 import { usePathname } from "next/navigation";
 import {
   Building2,
+  FlaskConical,
   LayoutDashboard,
   Lightbulb,
   MessagesSquare,
@@ -17,6 +18,7 @@ import { cn } from "@/lib/utils";
 const NAV_LINKS = [
   { href: "/dashboard", label: "Dashboard", icon: LayoutDashboard },
   { href: "/suggestions", label: "Suggestions", icon: Lightbulb },
+  { href: "/test-answer", label: "Test Answer", icon: FlaskConical },
   { href: "/crisp", label: "Crisp", icon: MessagesSquare },
   { href: "/rag", label: "RAG Search", icon: Sparkles },
   { href: "/brands", label: "Brands", icon: Building2 },

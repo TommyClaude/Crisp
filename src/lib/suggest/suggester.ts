@@ -124,26 +124,50 @@ function buildPrompt(
   return { system, user };
 }
 
-export async function generateSuggestionForThread(
-  threadId: string
-): Promise<SuggestionResult> {
-  const thread = await prisma.supportThread.findUniqueOrThrow({
-    where: { id: threadId },
-    include: { plugin: { select: { id: true, name: true } } },
-  });
+/** Input to {@link draftSuggestion} — a thread-shaped question, no DB row. */
+export interface DraftSuggestionInput {
+  title: string;
+  excerpt: string;
+  author?: string | null;
+  plugin: { id: string; name: string };
+}
 
-  const query = `${thread.title}\n${thread.excerpt.slice(0, 400)}`.trim();
-  const context = await retrieveContext(query, thread.plugin.id);
+export interface DraftSuggestionResult {
+  drafts: DraftItem[];
+  contextChunks: ContextChunkSummary[];
+  status: "drafted" | "failed";
+  suggestError: string | null;
+}
+
+/**
+ * Pure drafting core: build the query, retrieve RAG context, draft a reply
+ * from every configured provider in parallel, and derive the status. Touches
+ * no database rows — used both by the real forum flow
+ * ({@link generateSuggestionForThread}) and the /test-answer playground.
+ */
+export async function draftSuggestion(
+  input: DraftSuggestionInput
+): Promise<DraftSuggestionResult> {
+  const query = `${input.title}\n${input.excerpt.slice(0, 400)}`.trim();
+  const context = await retrieveContext(query, input.plugin.id);
   const contextChunks = context.map(toContextSummary);
 
-  let status = "drafted";
+  let status: "drafted" | "failed" = "drafted";
   let suggestError: string | null = null;
 
   // Draft from every configured provider in parallel — one card per provider.
   const providers = availableProviders();
   const prompt =
     providers.length > 0
-      ? buildPrompt(thread, thread.plugin.name, context)
+      ? buildPrompt(
+          {
+            title: input.title,
+            excerpt: input.excerpt,
+            author: input.author ?? null,
+          },
+          input.plugin.name,
+          context
+        )
       : null;
   const drafts: DraftItem[] = prompt
     ? await Promise.all(
@@ -158,7 +182,7 @@ export async function generateSuggestionForThread(
           } catch (error) {
             const message = error instanceof Error ? error.message : String(error);
             console.error(
-              `Draft (${provider}) failed for thread ${threadId}:`,
+              `Draft (${provider}) failed for "${input.title}":`,
               error
             );
             return { provider, model: null, text: null, error: message };
@@ -167,19 +191,40 @@ export async function generateSuggestionForThread(
       )
     : [];
 
-  // Primary draft = the first provider that produced text (back-compat + the
-  // forum watcher's drafted counter). All providers failing => status "failed".
+  // All providers failing => status "failed". No LLM configured => status
+  // stays "drafted" with context only; the UI shows the retrieved chunks so a
+  // human can compose the reply.
   const firstOk = drafts.find((draft) => draft.text);
-  const draftAnswer = firstOk?.text ?? null;
-  const draftModel = firstOk?.model ?? null;
   if (providers.length > 0 && !firstOk) {
     status = "failed";
     suggestError = drafts
       .map((draft) => `${draft.provider}: ${draft.error ?? "empty"}`)
       .join("; ");
   }
-  // No LLM configured → status stays "drafted" with context only; the UI
-  // shows the retrieved chunks so a human can compose the reply.
+
+  return { drafts, contextChunks, status, suggestError };
+}
+
+export async function generateSuggestionForThread(
+  threadId: string
+): Promise<SuggestionResult> {
+  const thread = await prisma.supportThread.findUniqueOrThrow({
+    where: { id: threadId },
+    include: { plugin: { select: { id: true, name: true } } },
+  });
+
+  const { drafts, contextChunks, status, suggestError } = await draftSuggestion({
+    title: thread.title,
+    excerpt: thread.excerpt,
+    author: thread.author,
+    plugin: { id: thread.plugin.id, name: thread.plugin.name },
+  });
+
+  // Primary draft = the first provider that produced text (back-compat + the
+  // forum watcher's drafted counter).
+  const firstOk = drafts.find((draft) => draft.text);
+  const draftAnswer = firstOk?.text ?? null;
+  const draftModel = firstOk?.model ?? null;
 
   await prisma.supportThread.update({
     where: { id: threadId },

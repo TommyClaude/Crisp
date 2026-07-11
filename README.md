@@ -13,6 +13,7 @@ Crisp is a *data source* here, not the product: the tool syncs every support con
 - **Product detection** — conversations are tagged with the plugin/product they are about using keyword heuristics where specific plugins beat platform-level matches. Detection definitions come from the plugins you manage in `/plugins` (name + keywords); a built-in list (FileBird, YayMail, YayCurrency, YaySMTP, Brandy, YayCommerce, WooCommerce, WordPress) is the fallback for a fresh install.
 - **Multi-brand sync** — one `Brand` per Crisp website (e.g. YayCommerce, Ninja Team, CatFolders...), managed in `/brands`. The sync iterates every brand with a single plugin token; conversations are linked to their brand and filterable by it.
 - **wp.org forum watcher + answer suggester** — polls each plugin's WordPress.org support-forum feed (`wpOrgSlug`), stores new topics, retrieves the most relevant past conversations + docs via RAG, and (when an LLM provider is configured) drafts a reply for human review in `/suggestions`. Drafts are **never** posted automatically. Provider-agnostic: with `SUGGESTER_PROVIDER=auto` (default) it drafts from **every** configured provider — set both `ANTHROPIC_API_KEY` and `OPENAI_API_KEY` and each "Regenerate drafts" produces an Anthropic *and* an OpenAI draft side by side to compare and pick from. Pin a single provider with `SUGGESTER_PROVIDER=anthropic|openai`. With no key configured the page still shows the retrieved grounding context.
+- **Answer-quality playground** — the `/test-answer` page runs a hypothetical support question (title + body, like a wp.org topic) through the exact RAG retrieval + multi-provider drafting pipeline the forum watcher uses, without creating a `SupportThread` — nothing is persisted, so you can test answer quality against the current knowledge base at any time.
 - **Docs ingestion** — each plugin can register documentation sources (a URL to crawl or a sitemap). Ingestion crawls the pages (same-origin, same path prefix, max 200 pages), extracts clean text, chunks + embeds it into the same RAG index with `source="plugin_docs"`, and re-crawls incrementally (unchanged pages keep their chunks; removed pages are pruned). RAG search can mix chat and docs results or filter by source.
 - **wp.org forum Q&A ingestion** — the assistant also learns from the plugin's own support forum. A source of type `wporg_forum` (auto-created when a plugin has a `wpOrgSlug`, and auto-detected when you paste a `wordpress.org/support/plugin/…` URL) walks the forum listing, fetches every **answered** topic (up to 200 newest per run, following reply pagination), and stores each one as a Q&A transcript — question + replies with wp.org roles (`Plugin Author`, `Plugin Support`) and a `[Resolved]` marker preserved. Topics with no replies and sticky announcements are skipped. Transcripts are PII-redacted, chunked and embedded with `source="wporg_forum"`, and forum history **accumulates**: topics that scroll past the crawl window on later runs are kept. Re-running Ingest only processes new/changed topics.
 
@@ -217,6 +218,7 @@ All routes require Basic auth (see Security). All bodies/queries are Zod-validat
 | `GET` | `/api/wporg/threads` | Support topics + suggestions. Query: `status, pluginId, page, pageSize` |
 | `PATCH`/`DELETE` | `/api/wporg/threads/{id}` | Update review status (`reviewed`/`dismissed`/...) or delete |
 | `POST` | `/api/wporg/threads/{id}/suggest` | (Re)generate the RAG-grounded reply draft for a topic |
+| `POST` | `/api/suggest/test` | Draft reply suggestions for a hypothetical question **without** persisting a thread. Body `{pluginId, title?, content}` (content 10–5000 chars). `404` unknown plugin, `400` invalid body |
 | `POST`/`GET` | `/api/wporg/suggest-missing` | Start a background bulk run drafting suggestions for every topic with no draft yet (`202`, `409` while running; body `{pluginId?}`) / poll its progress |
 
 ## Admin UI
@@ -231,6 +233,7 @@ All routes require Basic auth (see Security). All bodies/queries are Zod-validat
 | `/brands` | Manage brands — one per Crisp website; the sync covers every brand listed |
 | `/plugins` | Manage plugins per brand (detection keywords, wp.org slug), their docs sources and wp.org forum Q&A sources, with one-click ingest and live crawl status |
 | `/suggestions` | wp.org forum topics with RAG-grounded reply drafts: filter by status/plugin, check forums on demand, bulk-generate missing drafts, regenerate/copy drafts, mark reviewed or dismissed |
+| `/test-answer` | Answer-quality playground: paste a hypothetical support question and get the same RAG-grounded reply drafts the forum flow produces — no `SupportThread` is created, nothing is saved |
 
 `/` redirects to `/dashboard`.
 
