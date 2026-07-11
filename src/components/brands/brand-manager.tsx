@@ -8,6 +8,7 @@ import {
   Globe,
   KeyRound,
   LoaderCircle,
+  PackagePlus,
   Plug,
   Plus,
   Trash2,
@@ -33,6 +34,7 @@ export interface BrandItem {
   domain: string | null;
   crispWebsiteId: string;
   crispIdentifier: string | null;
+  wpProfileSlug: string | null;
   hasCrispKey: boolean;
   pluginCount: number;
   conversationCount: number;
@@ -43,6 +45,7 @@ export function BrandManager({ brands }: { brands: BrandItem[] }) {
   const [name, setName] = React.useState("");
   const [websiteId, setWebsiteId] = React.useState("");
   const [domain, setDomain] = React.useState("");
+  const [wpProfile, setWpProfile] = React.useState("");
   const [identifier, setIdentifier] = React.useState("");
   const [key, setKey] = React.useState("");
   const [saving, setSaving] = React.useState(false);
@@ -58,6 +61,7 @@ export function BrandManager({ brands }: { brands: BrandItem[] }) {
           name: name.trim(),
           crispWebsiteId: websiteId.trim(),
           domain: domain.trim() || undefined,
+          wpProfileSlug: wpProfile.trim() || undefined,
           crispIdentifier: identifier.trim() || undefined,
           crispKey: key.trim() || undefined,
         }),
@@ -76,6 +80,7 @@ export function BrandManager({ brands }: { brands: BrandItem[] }) {
       setName("");
       setWebsiteId("");
       setDomain("");
+      setWpProfile("");
       setIdentifier("");
       setKey("");
       router.refresh();
@@ -100,7 +105,7 @@ export function BrandManager({ brands }: { brands: BrandItem[] }) {
         </CardHeader>
         <CardContent>
           <form onSubmit={createBrand} className="space-y-3">
-            <div className="grid gap-3 sm:grid-cols-[1fr_1.4fr_1fr]">
+            <div className="grid gap-3 sm:grid-cols-[1fr_1.4fr_1fr_1fr]">
               <div className="space-y-1.5">
                 <Label htmlFor="brand-name">Name</Label>
                 <Input
@@ -129,6 +134,16 @@ export function BrandManager({ brands }: { brands: BrandItem[] }) {
                   placeholder="yaycommerce.com"
                   value={domain}
                   onChange={(e) => setDomain(e.target.value)}
+                />
+              </div>
+              <div className="space-y-1.5">
+                <Label htmlFor="brand-wp-profile">wp.org profile (optional)</Label>
+                <Input
+                  id="brand-wp-profile"
+                  placeholder="ninjateam"
+                  value={wpProfile}
+                  onChange={(e) => setWpProfile(e.target.value)}
+                  className="font-mono text-xs"
                 />
               </div>
             </div>
@@ -193,8 +208,10 @@ function BrandRow({ brand }: { brand: BrandItem }) {
   const router = useRouter();
   const [busy, setBusy] = React.useState<string | null>(null);
   const [editingToken, setEditingToken] = React.useState(false);
+  const [editingProfile, setEditingProfile] = React.useState(false);
   const [identifier, setIdentifier] = React.useState(brand.crispIdentifier ?? "");
   const [key, setKey] = React.useState("");
+  const [profile, setProfile] = React.useState(brand.wpProfileSlug ?? "");
   const [testResult, setTestResult] = React.useState<{
     ok: boolean;
     message: string;
@@ -280,6 +297,58 @@ function BrandRow({ brand }: { brand: BrandItem }) {
     }
   };
 
+  const saveProfile = async (clear = false) => {
+    setBusy("profile");
+    try {
+      const res = await fetch(`/api/brands/${brand.id}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ wpProfileSlug: clear ? "" : profile.trim() }),
+      });
+      const body = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        toast.error(body.error ?? "Failed to save wp.org profile");
+        return;
+      }
+      toast.success(clear ? "wp.org profile cleared" : "wp.org profile saved");
+      setEditingProfile(false);
+      router.refresh();
+    } catch {
+      toast.error("Failed to save wp.org profile");
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const importPlugins = async () => {
+    setBusy("import");
+    try {
+      const res = await fetch(`/api/brands/${brand.id}/import-plugins`, {
+        method: "POST",
+      });
+      const body = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        toast.error(body.error ?? "Failed to import plugins");
+        return;
+      }
+      const skippedNote = body.skipped > 0 ? ` (${body.skipped} skipped)` : "";
+      toast.success(
+        `Imported ${body.imported} plugin${body.imported === 1 ? "" : "s"} from wp.org${skippedNote}`,
+        {
+          description:
+            Array.isArray(body.errors) && body.errors.length > 0
+              ? body.errors[0]
+              : undefined,
+        }
+      );
+      router.refresh();
+    } catch {
+      toast.error("Failed to import plugins");
+    } finally {
+      setBusy(null);
+    }
+  };
+
   return (
     <div className="rounded-lg border">
       <div className="flex items-center gap-4 px-4 py-3">
@@ -309,6 +378,11 @@ function BrandRow({ brand }: { brand: BrandItem }) {
                 Using .env
               </Badge>
             )}
+            {brand.wpProfileSlug ? (
+              <Badge variant="outline" className="font-mono text-[11px]">
+                wp.org/author/{brand.wpProfileSlug}
+              </Badge>
+            ) : null}
           </div>
           <p className="text-muted-foreground mt-0.5 truncate font-mono text-xs">
             {brand.crispWebsiteId}
@@ -343,6 +417,31 @@ function BrandRow({ brand }: { brand: BrandItem }) {
             <KeyRound className="size-3.5" />
             {brand.hasCrispKey ? "Update token" : "Set token"}
           </Button>
+          <Button
+            variant="ghost"
+            size="sm"
+            onClick={() => setEditingProfile((v) => !v)}
+            disabled={busy !== null}
+          >
+            <Globe className="size-3.5" />
+            {brand.wpProfileSlug ? "Update wp.org" : "Set wp.org"}
+          </Button>
+          {brand.wpProfileSlug ? (
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={importPlugins}
+              disabled={busy !== null}
+              title="Import all plugins from this wp.org author profile"
+            >
+              {busy === "import" ? (
+                <LoaderCircle className="size-3.5 animate-spin" />
+              ) : (
+                <PackagePlus className="size-3.5" />
+              )}
+              Import plugins
+            </Button>
+          ) : null}
           <Button
             variant="ghost"
             size="icon"
@@ -430,6 +529,56 @@ function BrandRow({ brand }: { brand: BrandItem }) {
               size="sm"
               onClick={() => setEditingToken(false)}
               disabled={busy === "token"}
+            >
+              Cancel
+            </Button>
+          </div>
+        </div>
+      ) : null}
+
+      {editingProfile ? (
+        <div className="space-y-3 border-t px-4 py-3">
+          <div className="space-y-1.5">
+            <Label className="text-xs">wp.org author profile</Label>
+            <Input
+              value={profile}
+              onChange={(e) => setProfile(e.target.value)}
+              placeholder="ninjateam"
+              className="font-mono text-xs sm:max-w-xs"
+            />
+            <p className="text-muted-foreground text-xs">
+              The username from wordpress.org/plugins/author/&lt;slug&gt;/. Used
+              by &ldquo;Import plugins&rdquo; to bulk-add this brand&rsquo;s
+              plugins.
+            </p>
+          </div>
+          <div className="flex items-center gap-2">
+            <Button
+              size="sm"
+              onClick={() => saveProfile(false)}
+              disabled={busy === "profile" || !profile.trim()}
+            >
+              {busy === "profile" ? (
+                <LoaderCircle className="size-3.5 animate-spin" />
+              ) : null}
+              Save profile
+            </Button>
+            {brand.wpProfileSlug ? (
+              <Button
+                variant="ghost"
+                size="sm"
+                className="text-muted-foreground"
+                onClick={() => saveProfile(true)}
+                disabled={busy === "profile"}
+              >
+                Clear profile
+              </Button>
+            ) : null}
+            <Button
+              variant="ghost"
+              size="sm"
+              onClick={() => setEditingProfile(false)}
+              disabled={busy === "profile"}
             >
               Cancel
             </Button>

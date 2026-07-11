@@ -30,6 +30,9 @@ model Brand {
   // CRISP_IDENTIFIER/CRISP_KEY in .env.
   crispIdentifier String?
   crispKeyEnc     String?
+  // wordpress.org author username used to bulk-import the brand's plugins
+  // (from wordpress.org/plugins/author/<slug>/) with one click on /brands.
+  wpProfileSlug  String?
   createdAt      DateTime @default(now())
   updatedAt      DateTime @updatedAt
 

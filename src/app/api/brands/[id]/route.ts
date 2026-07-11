@@ -13,6 +13,8 @@ const patchSchema = z.object({
   // Token update: send both to set, or crispKey:"" (with identifier:"") to clear.
   crispIdentifier: z.string().max(200).nullable().optional(),
   crispKey: z.string().max(500).nullable().optional(),
+  // wordpress.org author username: send to set, "" or null to clear.
+  wpProfileSlug: z.string().max(100).nullable().optional(),
 });
 
 /** PATCH /api/brands/:id — update name/websiteId/domain/token. */
@@ -63,6 +65,9 @@ export async function PATCH(
           : {}),
         ...(parsed.data.domain !== undefined
           ? { domain: parsed.data.domain?.trim() || null }
+          : {}),
+        ...(parsed.data.wpProfileSlug !== undefined
+          ? { wpProfileSlug: parsed.data.wpProfileSlug?.trim() || null }
           : {}),
         ...tokenData,
       },

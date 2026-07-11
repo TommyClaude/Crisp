@@ -35,6 +35,8 @@ const createSchema = z.object({
   domain: z.string().max(200).optional(),
   crispIdentifier: z.string().max(200).optional(),
   crispKey: z.string().max(500).optional(),
+  // wordpress.org author username for one-click plugin import.
+  wpProfileSlug: z.string().max(100).nullable().optional(),
 });
 
 /**
@@ -57,7 +59,7 @@ export async function POST(request: NextRequest) {
     );
   }
 
-  const { name, crispWebsiteId, domain, crispIdentifier, crispKey } =
+  const { name, crispWebsiteId, domain, crispIdentifier, crispKey, wpProfileSlug } =
     parsed.data;
   const identifier = crispIdentifier?.trim() || null;
   const key = crispKey?.trim() || null;
@@ -77,6 +79,7 @@ export async function POST(request: NextRequest) {
         domain: domain?.trim() || null,
         crispIdentifier: identifier,
         crispKeyEnc: key ? encryptSecret(key) : null,
+        wpProfileSlug: wpProfileSlug?.trim() || null,
       },
     });
     // Adopt conversations that were synced before this brand existed.
