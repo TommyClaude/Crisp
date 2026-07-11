@@ -74,7 +74,8 @@ export function endSyncProgress(statusMessage: string): void {
 /**
  * Request a graceful halt of the running sync. `reason` decides the terminal
  * status the run records: "cancelled" (Stop) or "paused" (Pause) — a paused
- * run surfaces a "Continue from page N" affordance in the UI.
+ * (or failed) run surfaces a "Continue" affordance in the UI, pre-filled with
+ * the furthest page any run has reached.
  */
 export function requestSyncCancel(reason: CancelReason = "cancelled"): boolean {
   const state = getSyncProgress();

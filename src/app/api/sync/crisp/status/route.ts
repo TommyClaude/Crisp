@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { prisma } from "@/lib/db";
+import { getResumePage } from "@/lib/sync/sync-service";
 import { getSyncProgress } from "@/lib/sync/sync-state";
 
 export const dynamic = "force-dynamic";
@@ -9,17 +10,19 @@ export const dynamic = "force-dynamic";
  * Live progress of the current sync (if any) plus recent sync history.
  */
 export async function GET() {
-  const [recentLogs, lastCompleted] = await Promise.all([
+  const [recentLogs, lastCompleted, resumePage] = await Promise.all([
     prisma.syncLog.findMany({ orderBy: { startedAt: "desc" }, take: 10 }),
     prisma.syncLog.findFirst({
       where: { status: "completed" },
       orderBy: { finishedAt: "desc" },
     }),
+    getResumePage(),
   ]);
 
   return NextResponse.json({
     progress: getSyncProgress(),
     lastCompleted,
     recentLogs,
+    resumePage,
   });
 }

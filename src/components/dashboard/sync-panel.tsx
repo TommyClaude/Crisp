@@ -29,6 +29,7 @@ import {
   CardHeader,
   CardTitle,
 } from "@/components/ui/card";
+import { Input } from "@/components/ui/input";
 import { cn } from "@/lib/utils";
 
 /** Mirrors the shape returned by GET /api/sync/crisp/status → progress. */
@@ -50,6 +51,7 @@ interface StatusResponse {
   progress: SyncProgress;
   lastCompleted: SerializedSyncLog | null;
   recentLogs: SerializedSyncLog[];
+  resumePage: number;
 }
 
 export interface LastSyncSummary {
@@ -63,17 +65,37 @@ export interface LastSyncSummary {
 interface SyncPanelProps {
   lastSync: LastSyncSummary | null;
   recentLogs: SerializedSyncLog[];
+  /** The furthest page any past sync run has reached (see getResumePage). */
+  resumePage: number;
 }
 
 const numberFormat = new Intl.NumberFormat("en-US");
 
 const POLL_INTERVAL_MS = 2000;
 
-export function SyncPanel({ lastSync, recentLogs }: SyncPanelProps) {
+/** Parse a "resume from" text input into a valid page number (integer >= 1). */
+function clampResumePage(raw: string): number {
+  const parsed = Math.trunc(Number(raw));
+  return Number.isFinite(parsed) && parsed >= 1 ? parsed : 1;
+}
+
+export function SyncPanel({
+  lastSync,
+  recentLogs,
+  resumePage: initialResumePage,
+}: SyncPanelProps) {
   const router = useRouter();
   const [progress, setProgress] = React.useState<SyncProgress | null>(null);
   const [logs, setLogs] = React.useState<SerializedSyncLog[]>(recentLogs);
   const [last, setLast] = React.useState<LastSyncSummary | null>(lastSync);
+  // The furthest page any past run has reached, across all sync history —
+  // the default "Continue" resume point. Kept separate from the input value
+  // below so a manual edit is never clobbered by a status refresh.
+  const [resumePage, setResumePage] = React.useState(initialResumePage);
+  // Kept as a string so the field can be freely edited (including a brief
+  // empty state) without fighting the user on every keystroke; parsed and
+  // clamped to an integer >= 1 on blur and again right before starting.
+  const [resumeFrom, setResumeFrom] = React.useState(String(initialResumePage));
   const [starting, setStarting] = React.useState<
     "full" | "incremental" | "resume" | null
   >(null);
@@ -81,15 +103,26 @@ export function SyncPanel({ lastSync, recentLogs }: SyncPanelProps) {
   const [running, setRunning] = React.useState(false);
   const runningRef = React.useRef(false);
 
-  // When the most recent run stopped short (paused/cancelled/failed) with a
-  // saved page, offer to continue the backfill from there instead of page 1.
-  const resumable = React.useMemo(() => {
+  // The input tracks the latest computed resume page until the user edits it.
+  React.useEffect(() => {
+    setResumeFrom(String(resumePage));
+  }, [resumePage]);
+
+  // The most recent run that isn't still running. When it didn't complete
+  // (paused/cancelled/failed — a failed run included, so a bad token never
+  // hides the continue affordance) offer to continue the backfill, using the
+  // resume page derived from the FURTHEST page reached across all history,
+  // not just this run's own page.
+  const latestHalted = React.useMemo(() => {
     const latest = logs.find((log) => log.status !== "running");
     if (!latest || latest.status === "completed") return null;
-    const page = latest.pageTo ?? 0;
-    if (page < 1) return null;
-    return { page, kind: latest.kind, status: latest.status };
+    return latest;
   }, [logs]);
+  // Where this specific run itself stopped (for the "Interrupted at" copy) —
+  // may be behind resumePage if an earlier run got further.
+  const latestHaltedPage = latestHalted
+    ? (latestHalted.pageTo ?? latestHalted.pageFrom ?? 1)
+    : null;
 
   const refreshStatus = React.useCallback(async () => {
     try {
@@ -98,6 +131,7 @@ export function SyncPanel({ lastSync, recentLogs }: SyncPanelProps) {
       const data = (await res.json()) as StatusResponse;
       setProgress(data.progress);
       if (Array.isArray(data.recentLogs)) setLogs(data.recentLogs);
+      if (typeof data.resumePage === "number") setResumePage(data.resumePage);
       if (data.lastCompleted) {
         setLast({
           finishedAt: data.lastCompleted.finishedAt,
@@ -226,10 +260,12 @@ export function SyncPanel({ lastSync, recentLogs }: SyncPanelProps) {
             ) : (
               <span>No completed sync yet.</span>
             )}
-            {resumable && !running && (
+            {latestHalted && !running && (
               <span className="text-amber-600 dark:text-amber-400">
-                Interrupted at page {resumable.page} — continue where it left
-                off.
+                Interrupted at page {latestHaltedPage} — continue where it
+                left off.
+                {resumePage > (latestHaltedPage ?? 1) &&
+                  ` Earlier runs reached page ${resumePage}.`}
               </span>
             )}
           </CardDescription>
@@ -269,7 +305,7 @@ export function SyncPanel({ lastSync, recentLogs }: SyncPanelProps) {
                     : "Stop"}
                 </Button>
               </>
-            ) : resumable ? (
+            ) : latestHalted ? (
               <>
                 <Button
                   variant="outline"
@@ -286,6 +322,19 @@ export function SyncPanel({ lastSync, recentLogs }: SyncPanelProps) {
                   )}
                   Sync from start
                 </Button>
+                <Input
+                  type="number"
+                  min={1}
+                  step={1}
+                  value={resumeFrom}
+                  disabled={busy}
+                  onChange={(e) => setResumeFrom(e.target.value)}
+                  onBlur={() =>
+                    setResumeFrom(String(clampResumePage(resumeFrom)))
+                  }
+                  aria-label="Resume from page"
+                  className="h-8 w-20 tabular-nums"
+                />
                 <Button
                   size="sm"
                   disabled={busy}
@@ -293,11 +342,11 @@ export function SyncPanel({ lastSync, recentLogs }: SyncPanelProps) {
                     startSync({
                       key: "resume",
                       mode:
-                        resumable.kind === "incremental"
+                        latestHalted.kind === "incremental"
                           ? "incremental"
                           : "full",
-                      startPage: resumable.page,
-                      label: `Continue from page ${resumable.page}`,
+                      startPage: clampResumePage(resumeFrom),
+                      label: "Continue",
                     })
                   }
                 >
@@ -306,7 +355,7 @@ export function SyncPanel({ lastSync, recentLogs }: SyncPanelProps) {
                   ) : (
                     <Play className="size-3.5" />
                   )}
-                  Continue from page {resumable.page}
+                  Continue
                 </Button>
               </>
             ) : (

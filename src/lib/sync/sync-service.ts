@@ -593,6 +593,49 @@ async function runSync(options: RunSyncOptions): Promise<SyncRunResult> {
   };
 }
 
+/** The subset of SyncLog columns {@link computeResumePage} needs. */
+export interface ResumeCandidate {
+  pageFrom: number | null;
+  pageTo: number | null;
+  conversationsSynced: number;
+}
+
+/**
+ * Pure reduction over sync history: the furthest page any run reached, across
+ * ALL of history — not just the latest run. A run only counts if it made
+ * progress: it synced at least one conversation, or its pageTo advanced past
+ * its own pageFrom. Runs that failed at their own starting page with nothing
+ * synced are ignored, so a fresh run that dies immediately (e.g. a bad token)
+ * can never drag the suggestion backwards. Matches the existing "continue"
+ * convention of using pageTo directly as the next startPage (the loop in
+ * runSync re-processes that page, which is idempotent via upserts) — callers
+ * should NOT add 1 to the result. Falls back to 1 when nothing qualifies.
+ */
+export function computeResumePage(runs: ResumeCandidate[]): number {
+  let furthest = 0;
+  for (const run of runs) {
+    const pageTo = run.pageTo ?? 0;
+    const pageFrom = run.pageFrom ?? 1;
+    const madeProgress = run.conversationsSynced > 0 || pageTo > pageFrom;
+    if (madeProgress && pageTo > furthest) furthest = pageTo;
+  }
+  return Math.max(furthest, 1);
+}
+
+/**
+ * The default "Continue" resume point, derived from all SyncLog history (see
+ * {@link computeResumePage}).
+ */
+export async function getResumePage(): Promise<number> {
+  // No pageTo filter here — computeResumePage() null-handles it, and keeping
+  // the progress rules in one place avoids a silent SQL/JS logic split.
+  const runs = await prisma.syncLog.findMany({
+    where: { status: { not: "running" } },
+    select: { pageFrom: true, pageTo: true, conversationsSynced: true },
+  });
+  return computeResumePage(runs);
+}
+
 /** Full sync of all conversations, oldest data included. Resumable via startPage. */
 export function runFullSync(options?: { startPage?: number }): Promise<SyncRunResult> {
   return runSync({ kind: "full", startPage: options?.startPage });

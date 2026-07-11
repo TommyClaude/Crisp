@@ -18,6 +18,7 @@ import {
   CardTitle,
 } from "@/components/ui/card";
 import { getDashboardStats } from "@/lib/conversations";
+import { getResumePage } from "@/lib/sync/sync-service";
 
 export const dynamic = "force-dynamic";
 
@@ -51,7 +52,10 @@ interface StatCard {
 }
 
 export default async function DashboardPage() {
-  const stats = await getDashboardStats();
+  const [stats, resumePage] = await Promise.all([
+    getDashboardStats(),
+    getResumePage(),
+  ]);
 
   const lastSync = stats.lastSync
     ? {
@@ -131,7 +135,11 @@ export default async function DashboardPage() {
         ))}
       </section>
 
-      <SyncPanel lastSync={lastSync} recentLogs={recentLogs} />
+      <SyncPanel
+        lastSync={lastSync}
+        recentLogs={recentLogs}
+        resumePage={resumePage}
+      />
     </div>
   );
 }

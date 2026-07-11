@@ -6,8 +6,8 @@ export const dynamic = "force-dynamic";
 
 const bodySchema = z
   .object({
-    // Pause records the run as "paused" (resumable via "Continue from page N");
-    // Stop records it as "cancelled". Both halt gracefully after the page.
+    // Pause records the run as "paused" (resumable via the "Continue"
+    // button); Stop records it as "cancelled". Both halt after the page.
     pause: z.boolean().default(false),
   })
   .default({ pause: false });
