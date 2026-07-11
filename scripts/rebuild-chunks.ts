@@ -28,7 +28,12 @@ async function main() {
       },
     });
     console.log(
-      `Done: ${result.chunks} chunks from ${result.conversations} conversations.`
+      `Done: ${result.chunks} chunks from ${result.conversations} conversations` +
+        (result.skipped > 0 ? `, ${result.skipped} skipped as unchunkable` : "") +
+        (result.purged > 0
+          ? `, ${result.purged} stale conversations purged`
+          : "") +
+        "."
     );
     if (result.errors.length > 0) {
       console.warn(`Errors (${result.errors.length}):`);

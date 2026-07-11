@@ -78,6 +78,12 @@ export async function POST(request: NextRequest) {
     .then((result) =>
       console.log(
         `Chunk rebuild finished: ${result.chunks} chunks from ${result.conversations} conversations` +
+          (result.skipped > 0
+            ? `, ${result.skipped} skipped as unchunkable`
+            : "") +
+          (result.purged > 0
+            ? `, ${result.purged} stale conversations purged`
+            : "") +
           (result.errors.length > 0 ? `, ${result.errors.length} errors` : "")
       )
     )

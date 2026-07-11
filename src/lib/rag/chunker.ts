@@ -40,6 +40,64 @@ const MAX_CHUNK_CHARS = 1600;
 /** Message types that carry conversational content worth embedding. */
 const CONTENT_TYPES = new Set(["text", "file", "audio", "animation", "picker", "field"]);
 
+/**
+ * Automated-noise patterns tested against the FIRST customer message of a
+ * conversation. These target notification emails that were forwarded into
+ * Crisp and can even collect an operator reply, so the real-exchange rule in
+ * {@link isChunkableConversation} alone cannot catch them. Add new patterns
+ * sparingly — one-way notification mail (helpdesk "new ticket" emails etc.)
+ * is already excluded by the real-exchange rule.
+ */
+export const NOISE_PATTERNS: RegExp[] = [
+  // wordpress.org SVN commit notification emails, e.g.
+  // "**[WordPress Plugin][3558335] wp-duplicate-page/trunk: Version 1.8.4**"
+  // — optionally preceded by whitespace and markdown bold/italic markers
+  // added by the email-to-Crisp import.
+  /^\s*[*_]*\s*\[WordPress Plugin\]/,
+];
+
+/** The message fields the chunkability gate needs. */
+export type ChunkGateMessage = Pick<
+  Message,
+  "from" | "type" | "content" | "timestampCrisp"
+>;
+
+/**
+ * Data-quality gate for source="crisp_chat" chunking (docs/forum pipelines
+ * are unaffected). A conversation may produce RAG chunks only when BOTH
+ * rules hold:
+ *
+ * 1. Real exchange — at least one customer message (from="user") AND at
+ *    least one customer-facing operator reply (from="operator" with a type
+ *    other than "note"/"event"; internal notes and system events are not
+ *    replies). Automated notification emails forwarded into Crisp never get
+ *    an in-Crisp reply, so they yield zero chunks even when marked resolved.
+ * 2. Not known noise — the first customer message (by Crisp timestamp) does
+ *    not match any {@link NOISE_PATTERNS} entry. This catches automated mail
+ *    (wp.org SVN commit emails) that nevertheless accumulated a reply.
+ *
+ * Ineligible conversations must end up with ZERO chunks —
+ * rebuildChunksForConversation purges any existing chunks for them.
+ */
+export function isChunkableConversation(
+  messages: ChunkGateMessage[]
+): boolean {
+  const hasCustomerMessage = messages.some((m) => m.from === "user");
+  const hasOperatorReply = messages.some(
+    (m) => m.from === "operator" && m.type !== "note" && m.type !== "event"
+  );
+  if (!hasCustomerMessage || !hasOperatorReply) return false;
+
+  const firstCustomer = [...messages]
+    .sort(
+      (a, b) =>
+        (a.timestampCrisp?.getTime() ?? 0) - (b.timestampCrisp?.getTime() ?? 0)
+    )
+    .find((m) => m.from === "user");
+  const firstContent = firstCustomer?.content ?? "";
+  return !NOISE_PATTERNS.some((pattern) => pattern.test(firstContent));
+}
+
 function messageToLine(message: Message): string | null {
   if (!CONTENT_TYPES.has(message.type)) return null;
   if (message.type === "text") {
