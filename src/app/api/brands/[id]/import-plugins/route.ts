@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { Prisma } from "@prisma/client";
 import { prisma } from "@/lib/db";
 import { invalidateProductDefinitions } from "@/lib/rag/product-defs";
+import { touchProductDefsChanged } from "@/lib/rag/rebuild-advice";
 import { forumUrlForSlug } from "@/lib/wporg/forum-crawler";
 import {
   fetchAuthorPlugins,
@@ -152,7 +153,10 @@ export async function POST(
     usedSlugs.add(plugin.slug.toLowerCase());
   }
 
-  if (created.length > 0) invalidateProductDefinitions();
+  if (created.length > 0) {
+    invalidateProductDefinitions();
+    await touchProductDefsChanged();
+  }
 
   return NextResponse.json({
     imported: created.length,

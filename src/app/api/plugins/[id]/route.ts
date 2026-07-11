@@ -3,6 +3,7 @@ import { z } from "zod";
 import { Prisma } from "@prisma/client";
 import { prisma } from "@/lib/db";
 import { invalidateProductDefinitions } from "@/lib/rag/product-defs";
+import { touchProductDefsChanged } from "@/lib/rag/rebuild-advice";
 import { forumUrlForSlug } from "@/lib/wporg/forum-crawler";
 
 export const dynamic = "force-dynamic";
@@ -86,6 +87,7 @@ export async function PATCH(
       }
     }
     invalidateProductDefinitions();
+    await touchProductDefsChanged();
     return NextResponse.json({ plugin });
   } catch (error) {
     if (error instanceof Prisma.PrismaClientKnownRequestError) {
@@ -112,6 +114,7 @@ export async function DELETE(
   try {
     await prisma.plugin.delete({ where: { id } });
     invalidateProductDefinitions();
+    await touchProductDefsChanged();
     return NextResponse.json({ deleted: true });
   } catch (error) {
     if (

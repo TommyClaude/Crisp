@@ -34,6 +34,15 @@ interface Exchange {
   messageIds: string[];
 }
 
+/**
+ * Version of the chunk-building rules below. Bump when chunk-building rules
+ * change (e.g. the exchange grouping, the header format, or the chunkability
+ * gate) so installs are prompted to rebuild their chat chunks under the new
+ * rules. Version 2 = the noise-gate era ({@link NOISE_PATTERNS} filtering in
+ * {@link isChunkableConversation}); version 1 predated any noise filtering.
+ */
+export const CHUNKER_VERSION = 2;
+
 /** Target size for a chunk's body text, in characters (~350-400 tokens). */
 const MAX_CHUNK_CHARS = 1600;
 

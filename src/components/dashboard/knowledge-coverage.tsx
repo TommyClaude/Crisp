@@ -17,7 +17,18 @@ import {
   CardTitle,
 } from "@/components/ui/card";
 import { Separator } from "@/components/ui/separator";
+import type {
+  RebuildAdvice,
+  RebuildAdviceReasonCode,
+} from "@/lib/rag/rebuild-advice";
 import type { KnowledgeCoverage, KnowledgeCoverageFailure } from "@/lib/stats";
+
+/** Short forms of each staleness reason for the compact dashboard line. */
+const REBUILD_REASON_SHORT: Record<RebuildAdviceReasonCode, string> = {
+  defs_changed: "plugin or keyword definitions changed",
+  rules_updated: "chunk-building rules updated",
+  never_recorded: "no full rebuild recorded yet",
+};
 
 /**
  * "Knowledge coverage" — the dashboard's at-a-glance answer to "has
@@ -113,10 +124,13 @@ function SourceSection({
 export function KnowledgeCoveragePanel({
   coverage,
   lastSyncAt,
+  rebuildAdvice,
 }: {
   coverage: KnowledgeCoverage;
   /** finishedAt of the last completed Crisp sync (freshness of the chats source). */
   lastSyncAt?: Date | null;
+  /** "Rebuild recommended" staleness signal for the chat-chunk index. */
+  rebuildAdvice?: RebuildAdvice;
 }) {
   const { chats, docs, forum, embeddingsConfigured, pgvectorActive } =
     coverage;
@@ -174,6 +188,14 @@ export function KnowledgeCoveragePanel({
               {fmt(chats.chunks - chats.chunksEmbedded)} chunk
               {chats.chunks - chats.chunksEmbedded === 1 ? "" : "s"} not yet
               embedded
+            </AmberLine>
+          )}
+          {rebuildAdvice?.needsRebuild && rebuildAdvice.reasons[0] && (
+            <AmberLine>
+              <Link href="/rag" className="hover:underline">
+                Rebuild recommended —{" "}
+                {REBUILD_REASON_SHORT[rebuildAdvice.reasons[0].code]}
+              </Link>
             </AmberLine>
           )}
         </SourceSection>

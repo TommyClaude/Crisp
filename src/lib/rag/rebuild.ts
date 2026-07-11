@@ -6,6 +6,7 @@ import {
 } from "./chunker";
 import { embedTexts } from "./embeddings";
 import { getProductDefinitions } from "./product-defs";
+import { recordChunksRebuilt } from "./rebuild-advice";
 import {
   beginRebuildProgress,
   endRebuildProgress,
@@ -206,6 +207,18 @@ export async function rebuildAllChunks(options?: {
     }
 
     endRebuildProgress(cancelled ? "cancelled" : "completed");
+    // Only a run that re-indexed EVERY conversation under the current rules
+    // refreshes the staleness marker: not cancelled, and no per-conversation
+    // failures (a failed conversation may still carry old-rules chunks).
+    // Bookkeeping failures must not fail the rebuild — the real work is
+    // already committed — so this is best-effort.
+    if (!cancelled && errors.length === 0) {
+      try {
+        await recordChunksRebuilt();
+      } catch (error) {
+        console.error("Failed to record chunk-rebuild bookkeeping:", error);
+      }
+    }
     return {
       conversations: conversations.length,
       chunks: chunkCount,

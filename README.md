@@ -182,6 +182,8 @@ npm run rag:rebuild -- --no-embed   # skip embedding generation
 
 Or via `POST /api/rag/chunks/rebuild` (dashboard button) — background rebuild of all (resolved) conversations, or synchronous for a single `sessionId`.
 
+**Staleness notice** — when plugin/keyword definitions change or a release bumps the chunk-building rules (`CHUNKER_VERSION` in `src/lib/rag/chunker.ts`), the existing chat chunks no longer match the current rules. `GET /api/rag/rebuild-advice` (backed by a small `AppMeta` key-value table) surfaces a "Rebuild recommended" banner on `/rag`, an amber dot on the RAG Search nav item, and a line in the dashboard Knowledge-coverage panel until a full rebuild is run. Regular syncs and docs/forum ingest chunk with the current rules, so they never trigger it.
+
 ### Testing search
 
 Use the `/rag` page, or hit the API directly:

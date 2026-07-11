@@ -135,7 +135,22 @@ function rebuildSummary(p: RebuildProgress): string {
   return `Rebuild finished — ${p.chunksCreated} chunks from ${p.done} conversations${suffix}`;
 }
 
-export function RagSearch() {
+/** Mirrors RebuildAdvice from GET /api/rag/rebuild-advice (server lib stays server-side). */
+interface RebuildAdviceReason {
+  code: "defs_changed" | "rules_updated" | "never_recorded";
+  message: string;
+}
+
+interface RebuildAdvice {
+  needsRebuild: boolean;
+  reasons: RebuildAdviceReason[];
+}
+
+export function RagSearch({
+  initialAdvice,
+}: {
+  initialAdvice?: RebuildAdvice;
+}) {
   const router = useRouter();
   const [query, setQuery] = React.useState("");
   const [loading, setLoading] = React.useState(false);
@@ -143,9 +158,22 @@ export function RagSearch() {
   const [rebuildStarting, setRebuildStarting] = React.useState(false);
   const [stopping, setStopping] = React.useState(false);
   const rebuildWasRunning = React.useRef(false);
+  const [advice, setAdvice] = React.useState<RebuildAdvice | null>(
+    initialAdvice ?? null
+  );
   const [response, setResponse] = React.useState<RagSearchResponse | null>(null);
   const [error, setError] = React.useState<string | null>(null);
   const [source, setSource] = React.useState<ChunkSource | "all">("all");
+
+  const refreshAdvice = React.useCallback(async () => {
+    try {
+      const res = await fetch("/api/rag/rebuild-advice", { cache: "no-store" });
+      if (!res.ok) return;
+      setAdvice((await res.json()) as RebuildAdvice);
+    } catch {
+      // Best-effort — keep whatever advice we last had (or the SSR value).
+    }
+  }, []);
 
   const handleSearch = async (event: React.FormEvent<HTMLFormElement>) => {
     event.preventDefault();
@@ -197,18 +225,28 @@ export function RagSearch() {
           toast.error("Rebuild failed — see server logs");
         } else {
           toast.success(rebuildSummary(body));
+          // A completed rebuild re-indexed everything under the current rules,
+          // so the staleness reasons no longer hold — drop the banner/dot
+          // without waiting for a reload.
+          void refreshAdvice();
         }
         router.refresh();
       }
     } catch {
       // Best-effort polling; the next tick retries.
     }
-  }, [router]);
+  }, [router, refreshAdvice]);
 
   // Poll once on mount so a page reload picks up an in-flight rebuild.
   React.useEffect(() => {
     void pollRebuild();
   }, [pollRebuild]);
+
+  // Refresh advice on mount so the banner reflects the latest DB state even if
+  // the page was served from a stale render.
+  React.useEffect(() => {
+    void refreshAdvice();
+  }, [refreshAdvice]);
 
   // While a rebuild is active, track its progress every ~2.5s.
   React.useEffect(() => {
@@ -276,6 +314,29 @@ export function RagSearch() {
 
   return (
     <div className="space-y-6">
+      {advice?.needsRebuild && (
+        <div className="rounded-lg border border-amber-200 bg-amber-50/50 p-4 text-sm dark:border-amber-500/30 dark:bg-amber-500/5">
+          <div className="flex items-start gap-2.5">
+            <TriangleAlert className="mt-0.5 size-4 shrink-0 text-amber-600 dark:text-amber-400" />
+            <div className="min-w-0 space-y-1.5">
+              <p className="font-medium text-amber-800 dark:text-amber-300">
+                Rebuild recommended
+              </p>
+              <ul className="list-disc space-y-1 pl-4 text-amber-700 dark:text-amber-400/90">
+                {advice.reasons.map((reason) => (
+                  <li key={reason.code}>{reason.message}</li>
+                ))}
+              </ul>
+              <p className="text-amber-700/90 dark:text-amber-400/80">
+                Use{" "}
+                <span className="font-medium">Rebuild all chunks</span> below to
+                re-index chat chunks under the current rules.
+              </p>
+            </div>
+          </div>
+        </div>
+      )}
+
       <Card className="gap-4 py-5">
         <CardContent className="space-y-4 px-5">
           <form

@@ -1,5 +1,6 @@
 "use client";
 
+import * as React from "react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import {
@@ -27,6 +28,24 @@ const NAV_LINKS = [
 
 export function NavSidebar() {
   const pathname = usePathname();
+  const [needsRebuild, setNeedsRebuild] = React.useState(false);
+
+  // Silent, once-on-mount fetch: a failure just means no dot (never blocks
+  // paint or logs). The /rag page + its API are the source of truth.
+  React.useEffect(() => {
+    let active = true;
+    fetch("/api/rag/rebuild-advice", { cache: "no-store" })
+      .then((res) => (res.ok ? res.json() : null))
+      .then((data: { needsRebuild?: unknown } | null) => {
+        if (active && data && typeof data.needsRebuild === "boolean") {
+          setNeedsRebuild(data.needsRebuild);
+        }
+      })
+      .catch(() => {});
+    return () => {
+      active = false;
+    };
+  }, []);
 
   return (
     <aside className="bg-card fixed inset-y-0 left-0 z-40 flex w-56 flex-col border-r max-sm:w-14">
@@ -42,14 +61,15 @@ export function NavSidebar() {
       <nav className="flex flex-1 flex-col gap-1 overflow-y-auto p-2">
         {NAV_LINKS.map(({ href, label, icon: Icon }) => {
           const active = pathname.startsWith(href);
+          const showDot = href === "/rag" && needsRebuild;
           return (
             <Link
               key={href}
               href={href}
-              title={label}
+              title={showDot ? `${label} — rebuild recommended` : label}
               aria-current={active ? "page" : undefined}
               className={cn(
-                "flex items-center gap-2.5 rounded-md px-2.5 py-2 text-sm font-medium transition-colors max-sm:justify-center max-sm:px-0",
+                "relative flex items-center gap-2.5 rounded-md px-2.5 py-2 text-sm font-medium transition-colors max-sm:justify-center max-sm:px-0",
                 active
                   ? "bg-primary/10 text-primary"
                   : "text-muted-foreground hover:bg-accent hover:text-foreground"
@@ -57,6 +77,11 @@ export function NavSidebar() {
             >
               <Icon className="size-4 shrink-0" />
               <span className="truncate max-sm:hidden">{label}</span>
+              {showDot && (
+                <span className="ml-auto size-2 shrink-0 rounded-full bg-amber-500 max-sm:absolute max-sm:top-1.5 max-sm:right-1.5 max-sm:ml-0">
+                  <span className="sr-only">Rebuild recommended</span>
+                </span>
+              )}
             </Link>
           );
         })}

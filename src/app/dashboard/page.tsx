@@ -21,6 +21,7 @@ import {
   CardHeader,
   CardTitle,
 } from "@/components/ui/card";
+import { getRebuildAdvice } from "@/lib/rag/rebuild-advice";
 import { getGlobalStats, getKnowledgeCoverage } from "@/lib/stats";
 
 export const dynamic = "force-dynamic";
@@ -32,9 +33,10 @@ export const metadata: Metadata = {
 const numberFormat = new Intl.NumberFormat("en-US");
 
 export default async function GlobalDashboardPage() {
-  const [stats, coverage] = await Promise.all([
+  const [stats, coverage, rebuildAdvice] = await Promise.all([
     getGlobalStats(),
     getKnowledgeCoverage(),
+    getRebuildAdvice(),
   ]);
   const needsAttention =
     (stats.threadsByStatus.new ?? 0) + (stats.threadsByStatus.failed ?? 0);
@@ -165,6 +167,7 @@ export default async function GlobalDashboardPage() {
         <KnowledgeCoveragePanel
           coverage={coverage}
           lastSyncAt={stats.lastSync?.finishedAt ?? null}
+          rebuildAdvice={rebuildAdvice}
         />
       </section>
     </div>

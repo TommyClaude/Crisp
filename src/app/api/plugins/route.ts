@@ -3,6 +3,7 @@ import { z } from "zod";
 import { Prisma } from "@prisma/client";
 import { prisma } from "@/lib/db";
 import { invalidateProductDefinitions } from "@/lib/rag/product-defs";
+import { touchProductDefsChanged } from "@/lib/rag/rebuild-advice";
 import { forumUrlForSlug } from "@/lib/wporg/forum-crawler";
 
 export const dynamic = "force-dynamic";
@@ -76,6 +77,7 @@ export async function POST(request: NextRequest) {
       });
     }
     invalidateProductDefinitions();
+    await touchProductDefsChanged();
     return NextResponse.json({ plugin }, { status: 201 });
   } catch (error) {
     if (error instanceof Prisma.PrismaClientKnownRequestError) {

@@ -276,3 +276,12 @@ model SyncLog {
   @@index([status])
   @@index([startedAt])
 }
+
+// Small key-value store for app bookkeeping — rebuild timestamps, rule
+// versions, and similar single-row flags that don't warrant their own table.
+// Powers the "rebuild recommended" staleness notice (see rag/rebuild-advice.ts).
+model AppMeta {
+  key       String   @id
+  value     Json
+  updatedAt DateTime @updatedAt
+}
