@@ -46,8 +46,6 @@ export function BrandManager({ brands }: { brands: BrandItem[] }) {
   const [websiteId, setWebsiteId] = React.useState("");
   const [domain, setDomain] = React.useState("");
   const [wpProfile, setWpProfile] = React.useState("");
-  const [identifier, setIdentifier] = React.useState("");
-  const [key, setKey] = React.useState("");
   const [saving, setSaving] = React.useState(false);
 
   const createBrand = async (event: React.FormEvent<HTMLFormElement>) => {
@@ -62,8 +60,6 @@ export function BrandManager({ brands }: { brands: BrandItem[] }) {
           crispWebsiteId: websiteId.trim(),
           domain: domain.trim() || undefined,
           wpProfileSlug: wpProfile.trim() || undefined,
-          crispIdentifier: identifier.trim() || undefined,
-          crispKey: key.trim() || undefined,
         }),
       });
       const body = await res.json().catch(() => ({}));
@@ -81,8 +77,6 @@ export function BrandManager({ brands }: { brands: BrandItem[] }) {
       setWebsiteId("");
       setDomain("");
       setWpProfile("");
-      setIdentifier("");
-      setKey("");
       router.refresh();
     } catch {
       toast.error("Failed to create brand");
@@ -99,13 +93,11 @@ export function BrandManager({ brands }: { brands: BrandItem[] }) {
           <CardDescription>
             The website ID is in the Crisp app URL:
             app.crisp.chat/website/<span className="font-mono">&lt;website-id&gt;</span>/inbox.
-            Each Crisp website needs its own REST API token (Website settings →
-            Advanced → REST API → Create Token).
           </CardDescription>
         </CardHeader>
         <CardContent>
           <form onSubmit={createBrand} className="space-y-3">
-            <div className="grid gap-3 sm:grid-cols-[1fr_1.4fr_1fr_1fr]">
+            <div className="grid gap-3 sm:grid-cols-[1fr_1.4fr_1fr_1fr_auto]">
               <div className="space-y-1.5">
                 <Label htmlFor="brand-name">Name</Label>
                 <Input
@@ -146,29 +138,6 @@ export function BrandManager({ brands }: { brands: BrandItem[] }) {
                   className="font-mono text-xs"
                 />
               </div>
-            </div>
-            <div className="grid gap-3 sm:grid-cols-[1fr_1.4fr_auto]">
-              <div className="space-y-1.5">
-                <Label htmlFor="brand-identifier">Crisp token identifier</Label>
-                <Input
-                  id="brand-identifier"
-                  placeholder="token identifier"
-                  value={identifier}
-                  onChange={(e) => setIdentifier(e.target.value)}
-                  className="font-mono text-xs"
-                />
-              </div>
-              <div className="space-y-1.5">
-                <Label htmlFor="brand-key">Crisp token key</Label>
-                <Input
-                  id="brand-key"
-                  type="password"
-                  placeholder="token key (stored encrypted)"
-                  value={key}
-                  onChange={(e) => setKey(e.target.value)}
-                  className="font-mono text-xs"
-                />
-              </div>
               <div className="flex items-end">
                 <Button type="submit" disabled={saving || !name || !websiteId}>
                   {saving ? (
@@ -181,8 +150,9 @@ export function BrandManager({ brands }: { brands: BrandItem[] }) {
               </div>
             </div>
             <p className="text-muted-foreground text-xs">
-              Leave the token blank to fall back to the global
-              CRISP_IDENTIFIER/CRISP_KEY in .env. You can add it later.
+              New brands use the global CRISP_IDENTIFIER/CRISP_KEY from .env
+              until you set a per-brand Crisp token with the &ldquo;Set
+              token&rdquo; button below.
             </p>
           </form>
         </CardContent>
@@ -351,11 +321,15 @@ function BrandRow({ brand }: { brand: BrandItem }) {
 
   return (
     <div className="rounded-lg border">
-      <div className="flex items-center gap-4 px-4 py-3">
+      {/* flex-wrap: on narrow viewports the actions block drops to its own
+          row instead of overflowing and overlapping the badges. */}
+      <div className="flex flex-wrap items-center gap-x-4 gap-y-2 px-4 py-3">
         <div className="bg-muted flex size-9 shrink-0 items-center justify-center rounded-md">
           <Building2 className="text-muted-foreground size-4" />
         </div>
-        <div className="min-w-0 flex-1">
+        {/* basis-56 keeps the info column readable — when the actions block
+            can't fit beside it, the block wraps below instead of overlapping. */}
+        <div className="min-w-0 grow basis-56">
           <div className="flex flex-wrap items-center gap-2">
             <span className="text-sm font-medium">{brand.name}</span>
             {brand.domain ? (
@@ -388,7 +362,7 @@ function BrandRow({ brand }: { brand: BrandItem }) {
             {brand.crispWebsiteId}
           </p>
         </div>
-        <div className="flex shrink-0 items-center gap-2">
+        <div className="ml-auto flex flex-wrap items-center gap-2">
           <Badge variant="secondary" className="tabular-nums">
             {brand.pluginCount} plugins
           </Badge>
