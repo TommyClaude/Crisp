@@ -1,16 +1,19 @@
 import { createHash } from "crypto";
+import { Prisma } from "@prisma/client";
 import { prisma } from "@/lib/db";
 import { embeddingsConfigured } from "@/env";
 import { embedTexts } from "@/lib/rag/embeddings";
 import { redactText } from "@/lib/rag/redact";
-import { storeChunkEmbeddings } from "@/lib/rag/search";
+import { hasPgvector, storeChunkEmbeddings } from "@/lib/rag/search";
 import { crawlForum, isWpOrgForumUrl } from "@/lib/wporg/forum-crawler";
 import { crawlDocs } from "./crawler";
 
 /**
  * Docs ingestion: crawl a DocsSource, store pages, and (re)build their RAG
  * chunks. Unchanged pages (same content hash) keep their existing chunks and
- * embeddings; removed pages are deleted. Chunks are tagged with
+ * embeddings — except chunks that never got an embedding, which are
+ * backfilled on every ingest once embeddings are configured; removed pages
+ * are deleted. Chunks are tagged with
  * source="plugin_docs" + pluginId so RAG search can mix or separate
  * documentation and historical conversations.
  *
@@ -74,6 +77,42 @@ export function splitDocsText(text: string, maxChars = MAX_CHUNK_CHARS): string[
 
 function contentHash(text: string): string {
   return createHash("sha256").update(text).digest("hex");
+}
+
+/**
+ * Existing chunks of this source that have no embedding yet — the JSON
+ * fallback column and (when pgvector is enabled) the vector column are both
+ * NULL. These belong to pages skipped as "unchanged" this run but whose
+ * chunks were saved on an earlier run without embeddings (e.g. the OpenAI
+ * key was added after the first crawl), so the page loop never revisits them.
+ * Exported for tests.
+ */
+export async function unembeddedChunks(
+  docsSourceId: string,
+  excludeIds: string[]
+): Promise<Array<{ id: string; chunkText: string }>> {
+  if (await hasPgvector()) {
+    // Never bind an empty array (Prisma can't infer its element type); a ""
+    // placeholder can't collide with a real cuid.
+    const exclude = excludeIds.length > 0 ? excludeIds : [""];
+    return prisma.$queryRaw<Array<{ id: string; chunkText: string }>>`
+      SELECT c.id, c."chunkText"
+      FROM "EmbeddingChunk" c
+      JOIN "DocsPage" p ON p.id = c."docsPageId"
+      WHERE p."docsSourceId" = ${docsSourceId}
+        AND c."embeddingJson" IS NULL
+        AND c.embedding IS NULL
+        AND c.id <> ALL(${exclude}::text[])
+    `;
+  }
+  return prisma.embeddingChunk.findMany({
+    where: {
+      docsPage: { docsSourceId },
+      embeddingJson: { equals: Prisma.DbNull },
+      id: { notIn: excludeIds },
+    },
+    select: { id: true, chunkText: true },
+  });
 }
 
 export async function ingestDocsSource(
@@ -212,6 +251,17 @@ export async function ingestDocsSource(
 
     const wantEmbeddings = options?.withEmbeddings ?? true;
     let embedded = false;
+    if (wantEmbeddings && embeddingsConfigured()) {
+      // Self-heal: backfill embeddings for chunks of unchanged pages that
+      // were stored without one, so a plain re-ingest fixes them instead of
+      // leaving them keyword-only forever.
+      embedTargets.push(
+        ...(await unembeddedChunks(
+          docsSourceId,
+          embedTargets.map((t) => t.id)
+        ))
+      );
+    }
     if (wantEmbeddings && embeddingsConfigured() && embedTargets.length > 0) {
       try {
         const vectors = await embedTexts(embedTargets.map((t) => t.chunkText));
