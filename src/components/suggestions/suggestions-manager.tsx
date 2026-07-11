@@ -5,6 +5,7 @@ import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import { formatDistanceToNow } from "date-fns";
 import {
   Check,
+  EllipsisVertical,
   ExternalLink,
   Lightbulb,
   LoaderCircle,
@@ -32,6 +33,12 @@ import {
   CardHeader,
   CardTitle,
 } from "@/components/ui/card";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
 import {
   Select,
   SelectContent,
@@ -258,23 +265,51 @@ export function SuggestionsManager({
               </SelectContent>
             </Select>
           ) : null}
-          {missingCount > 0 || bulk.running ? (
-            <Button
-              size="sm"
-              variant="outline"
-              onClick={generateMissingDrafts}
-              disabled={bulk.running || bulkStarting}
-            >
-              {bulk.running || bulkStarting ? (
-                <LoaderCircle className="size-3.5 animate-spin" />
-              ) : (
-                <Sparkles className="size-3.5" />
-              )}
-              {bulk.running
-                ? `Drafting… ${bulk.done}/${bulk.total}`
-                : `Generate missing drafts (${missingCount})`}
+          {bulk.running || bulkStarting ? (
+            // A run is active — keep the same progress affordance visible in
+            // the toolbar (there's no stop/cancel action to preserve; the
+            // bulk generator has none). The kebab reappears once it's done.
+            <Button size="sm" variant="outline" disabled>
+              <LoaderCircle className="size-3.5 animate-spin" />
+              {bulk.running ? `Drafting… ${bulk.done}/${bulk.total}` : "Starting…"}
             </Button>
-          ) : null}
+          ) : (
+            <DropdownMenu>
+              <DropdownMenuTrigger asChild>
+                <Button
+                  size="icon"
+                  variant="outline"
+                  className="size-8"
+                  aria-label="More actions"
+                >
+                  <EllipsisVertical className="size-4" />
+                </Button>
+              </DropdownMenuTrigger>
+              <DropdownMenuContent>
+                <DropdownMenuItem
+                  disabled={missingCount === 0 || !llmConfigured}
+                  onSelect={() => void generateMissingDrafts()}
+                >
+                  <div className="flex flex-col gap-0.5 py-0.5">
+                    <span className="flex items-center gap-2">
+                      <Sparkles className="size-3.5" />
+                      {`Generate missing drafts (${missingCount})`}
+                    </span>
+                    {missingCount === 0 ? (
+                      <span className="text-muted-foreground text-xs">
+                        No topics are missing a draft
+                      </span>
+                    ) : !llmConfigured ? (
+                      <span className="text-muted-foreground text-xs">
+                        No LLM provider configured — set ANTHROPIC_API_KEY or
+                        OPENAI_API_KEY
+                      </span>
+                    ) : null}
+                  </div>
+                </DropdownMenuItem>
+              </DropdownMenuContent>
+            </DropdownMenu>
+          )}
           <Button size="sm" onClick={checkForums} disabled={checking}>
             {checking ? (
               <LoaderCircle className="size-3.5 animate-spin" />
@@ -392,7 +427,7 @@ function ThreadCard({
           <p className="text-destructive text-xs">
             Draft failed: {thread.suggestError}
           </p>
-        ) : thread.status === "drafted" ? (
+        ) : thread.status === "new" ? (
           <p className="text-muted-foreground text-xs">
             {llmConfigured
               ? "No drafts yet — click Generate drafts to create suggestions from your configured AI providers."

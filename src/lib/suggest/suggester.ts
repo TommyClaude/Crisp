@@ -144,7 +144,7 @@ export interface DraftSuggestionInput {
 export interface DraftSuggestionResult {
   drafts: DraftItem[];
   contextChunks: ContextChunkSummary[];
-  status: "drafted" | "failed";
+  status: "new" | "drafted" | "failed";
   suggestError: string | null;
 }
 
@@ -186,9 +186,6 @@ export async function draftSuggestion(
   const context = await retrieveContext(query, input.plugin.id);
   const contextChunks = context.map(toContextSummary);
 
-  let status: "drafted" | "failed" = "drafted";
-  let suggestError: string | null = null;
-
   // Draft from every configured provider in parallel — one card per provider.
   const providers = availableProviders();
   const drafts: DraftItem[] =
@@ -207,15 +204,24 @@ export async function draftSuggestion(
         )
       : [];
 
-  // All providers failing => status "failed". No LLM configured => status
-  // stays "drafted" with context only; the UI shows the retrieved chunks so a
-  // human can compose the reply.
+  // Status only becomes "drafted" once at least one provider actually
+  // produced draft text — a thread with zero drafts is never "drafted",
+  // regardless of why (no provider configured, or every provider failed).
+  // No LLM configured => status stays "new" with context only persisted; the
+  // UI shows the retrieved chunks so a human can compose the reply, and the
+  // topic still counts as missing a draft. All providers failing => "failed".
+  let status: "new" | "drafted" | "failed";
+  let suggestError: string | null = null;
   const firstOk = drafts.find((draft) => draft.text);
-  if (providers.length > 0 && !firstOk) {
+  if (firstOk) {
+    status = "drafted";
+  } else if (providers.length > 0) {
     status = "failed";
     suggestError = drafts
       .map((draft) => `${draft.provider}: ${draft.error ?? "empty"}`)
       .join("; ");
+  } else {
+    status = "new";
   }
 
   return { drafts, contextChunks, status, suggestError };
