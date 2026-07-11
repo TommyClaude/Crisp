@@ -93,14 +93,16 @@ export function buildFollowupPrompt(
     "Never invent features, settings, or file paths. Be friendly, concise and concrete: give numbered steps when applicable, " +
     "and reference documentation links from the context when they support the answer. " +
     "Continue the conversation naturally: stay consistent with what the support team has already said, do NOT repeat greetings or answers given earlier in the thread, and directly address the customer's most recent message. " +
-    "Write plain text suitable for a forum reply (no markdown headings). Do not mention the context, Crisp, or that you are an AI.";
+    "Write plain text suitable for a forum reply (no markdown headings). Do not mention the context, Crisp, or that you are an AI. " +
+    "Your state assessment is INTERNAL: never state it in the output. Output ONLY the reply text itself — no analysis, no preamble, no explanation of your decision. " +
+    "When it reads naturally, open by addressing the person you are replying to by their @username.";
 
   const user =
     `Ongoing forum thread on wordpress.org/support/plugin:\n\n` +
     `Title: ${title}\n\n` +
     `Conversation so far (oldest first):\n\n${buildTranscript(posts)}\n\n` +
     `Context from past support conversations and documentation:\n\n${contextText || "(no relevant context found)"}\n\n` +
-    "First decide whether the customer's most recent message is closing the conversation (resolved / thanks / review left) or still needs help, then draft the support team's next reply accordingly.";
+    "First decide (internally — do not write this out) whether the customer's most recent message is closing the conversation (resolved / thanks / review left) or still needs help, then output ONLY the support team's next reply.";
 
   return { system, user };
 }
