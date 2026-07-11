@@ -14,6 +14,7 @@ Crisp is a *data source* here, not the product: the tool syncs every support con
 - **Multi-brand sync** — one `Brand` per Crisp website (e.g. YayCommerce, Ninja Team, CatFolders...), managed in `/brands`. The sync iterates every brand with a single plugin token; conversations are linked to their brand and filterable by it.
 - **wp.org forum watcher + answer suggester** — polls each plugin's WordPress.org support-forum feed (`wpOrgSlug`), stores new topics, retrieves the most relevant past conversations + docs via RAG, and (when an LLM provider is configured) drafts a reply for human review in `/suggestions`. Drafts are **never** posted automatically. Provider-agnostic: Anthropic (`claude-opus-4-8` by default) or OpenAI via `SUGGESTER_PROVIDER`; with no key configured the page still shows the retrieved grounding context.
 - **Docs ingestion** — each plugin can register documentation sources (a URL to crawl or a sitemap). Ingestion crawls the pages (same-origin, same path prefix, max 200 pages), extracts clean text, chunks + embeds it into the same RAG index with `source="plugin_docs"`, and re-crawls incrementally (unchanged pages keep their chunks; removed pages are pruned). RAG search can mix chat and docs results or filter by source.
+- **wp.org forum Q&A ingestion** — the assistant also learns from the plugin's own support forum. A source of type `wporg_forum` (auto-created when a plugin has a `wpOrgSlug`, and auto-detected when you paste a `wordpress.org/support/plugin/…` URL) walks the forum listing, fetches every **answered** thread (up to 200 newest per run, following reply pagination), and stores each one as a Q&A transcript — question + replies with wp.org roles (`Plugin Author`, `Plugin Support`) and a `[Resolved]` marker preserved. Threads with no replies and sticky announcements are skipped. Transcripts are PII-redacted, chunked and embedded with `source="wporg_forum"`, and forum history **accumulates**: threads that scroll past the crawl window on later runs are kept. Re-running Ingest only processes new/changed threads.
 
 ## Tech stack
 
@@ -202,16 +203,16 @@ All routes require Basic auth (see Security). All bodies/queries are Zod-validat
 | `POST` | `/api/sync/crisp/conversation/{sessionId}` | Re-fetch one conversation from Crisp, upsert it, rebuild its chunks |
 | `GET` | `/api/conversations` | Paginated list. Query: `page, pageSize, state, tag, product, brandId, email, operatorId, hasAttachment, dateFrom, dateTo, search` |
 | `GET` | `/api/conversations/{sessionId}` | Full conversation detail: messages, files, operator, chunk summaries |
-| `GET` | `/api/rag/search` | RAG search. Query: `query` (required), `limit` (default 8, max 50), `source` (`crisp_chat`\|`plugin_docs`), `pluginId`, `brandId` |
+| `GET` | `/api/rag/search` | RAG search. Query: `query` (required), `limit` (default 8, max 50), `source` (`crisp_chat`\|`plugin_docs`\|`wporg_forum`), `pluginId`, `brandId` |
 | `POST` | `/api/rag/chunks/rebuild` | Rebuild chat chunks. Body `{sessionId?, onlyResolved?, withEmbeddings?}`. Single session is synchronous; full rebuild runs in the background (`202`, `409` if already running) |
 | `GET`/`POST` | `/api/brands` | List brands / create a brand `{name, crispWebsiteId, domain?}` (adopts already-synced conversations with that website ID) |
 | `PATCH`/`DELETE` | `/api/brands/{id}` | Update or delete a brand — including its Crisp token (conversations are kept; plugins/docs cascade) |
 | `POST` | `/api/brands/{id}/test` | Verify the brand's Crisp token can reach its website (page-1 probe) |
 | `GET`/`POST` | `/api/plugins` | List plugins (with docs sources) / create `{brandId, name, wpOrgSlug?, detectionKeywords?}` |
 | `PATCH`/`DELETE` | `/api/plugins/{id}` | Update or delete a plugin (docs pages + doc chunks cascade) |
-| `POST` | `/api/docs/sources` | Register a docs source `{pluginId, url, type: "url"\|"sitemap"}` |
+| `POST` | `/api/docs/sources` | Register a docs source `{pluginId, url, type: "url"\|"sitemap"\|"wporg_forum"}` — wp.org forum URLs are auto-detected whatever type is sent |
 | `GET`/`DELETE` | `/api/docs/sources/{id}` | Source status (for polling) / remove the source and its pages/chunks |
-| `POST` | `/api/docs/sources/{id}/ingest` | Crawl + chunk + embed in the background (`202`, `409` while running) |
+| `POST` | `/api/docs/sources/{id}/ingest` | Crawl + chunk + embed in the background (`202`, `409` while running). For `wporg_forum` sources this imports answered forum threads as Q&A transcripts |
 | `POST` | `/api/wporg/check` | Poll wp.org forum feeds of all plugins with a `wpOrgSlug`; store new topics and draft suggestions. Body `{withSuggestions?, pluginId?}` |
 | `GET` | `/api/wporg/threads` | Support threads + suggestions. Query: `status, pluginId, page, pageSize` |
 | `PATCH`/`DELETE` | `/api/wporg/threads/{id}` | Update review status (`reviewed`/`dismissed`/...) or delete |
@@ -221,13 +222,13 @@ All routes require Basic auth (see Security). All bodies/queries are Zod-validat
 
 | Page | What it shows |
 | --- | --- |
-| `/dashboard` | Global overview: open threads / drafts ready / reviewed, knowledge-chunk totals (chats vs docs), latest forum threads, knowledge-source summary |
+| `/dashboard` | Global overview: open threads / drafts ready / reviewed, knowledge-chunk totals (chats vs docs vs forum), latest forum threads, knowledge-source summary |
 | `/crisp/dashboard` | Crisp tab: conversation/message/brand totals, sync controls with live progress, recent sync log table |
 | `/crisp/conversations` | Crisp tab: filterable, paginated conversation list (state, tag, product, brand, operator, email, attachments, date range, search) |
 | `/crisp/conversations/{sessionId}` | Chat-style message log with attachments, visitor panel (masked PII), resync/rebuild actions, chunk summaries |
-| `/rag` | Search playground: query the chunk store (all sources / chats only / docs only), see mode + similarity scores + source conversation or docs-page links |
+| `/rag` | Search playground: query the chunk store (all sources / chats / docs / forum Q&A), see mode + similarity scores + source conversation, docs-page or forum-thread links |
 | `/brands` | Manage brands — one per Crisp website; the sync covers every brand listed |
-| `/plugins` | Manage plugins per brand (detection keywords, wp.org slug) and their docs sources, with one-click ingest and live crawl status |
+| `/plugins` | Manage plugins per brand (detection keywords, wp.org slug), their docs sources and wp.org forum Q&A sources, with one-click ingest and live crawl status |
 | `/suggestions` | wp.org forum threads with RAG-grounded reply drafts: filter by status/plugin, check forums on demand, regenerate/copy drafts, mark reviewed or dismissed |
 
 `/` redirects to `/dashboard`.

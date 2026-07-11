@@ -6,6 +6,7 @@ import { formatDistanceToNow } from "date-fns";
 import {
   BookOpen,
   Download,
+  LifeBuoy,
   LoaderCircle,
   Package,
   Plus,
@@ -62,6 +63,13 @@ const SOURCE_STATUS_STYLES: Record<string, string> = {
   completed:
     "bg-emerald-100 text-emerald-700 dark:bg-emerald-500/15 dark:text-emerald-400",
   failed: "bg-red-100 text-red-700 dark:bg-red-500/15 dark:text-red-400",
+};
+
+/** Display labels for docs-source types (falls back to the raw value). */
+const SOURCE_TYPE_LABELS: Record<string, string> = {
+  url: "URL",
+  sitemap: "Sitemap",
+  wporg_forum: "Forum Q&A",
 };
 
 export function PluginManager({
@@ -223,8 +231,18 @@ function AddPluginCard({ brands }: { brands: Array<{ id: string; name: string }>
 function PluginCard({ plugin }: { plugin: PluginItem }) {
   const router = useRouter();
   const [sourceUrl, setSourceUrl] = React.useState("");
-  const [sourceType, setSourceType] = React.useState<"url" | "sitemap">("url");
+  const [sourceType, setSourceType] = React.useState<
+    "url" | "sitemap" | "wporg_forum"
+  >("url");
   const [busy, setBusy] = React.useState<string | null>(null);
+  // Match the forum source by type OR by a wp.org forum listing URL, so a
+  // legacy "url"-typed forum row (healed to "wporg_forum" only on its next
+  // ingest) still hides the "Add forum source" button and avoids a duplicate.
+  const hasForumSource = plugin.docsSources.some(
+    (source) =>
+      source.type === "wporg_forum" ||
+      /\/\/(?:[^/]*\.)?wordpress\.org\/support\/plugin\//i.test(source.url)
+  );
 
   const call = async (
     key: string,
@@ -329,7 +347,11 @@ function PluginCard({ plugin }: { plugin: PluginItem }) {
                 key={source.id}
                 className="flex flex-wrap items-center gap-2 rounded-md border px-3 py-2"
               >
-                <BookOpen className="text-muted-foreground size-4 shrink-0" />
+                {source.type === "wporg_forum" ? (
+                  <LifeBuoy className="text-muted-foreground size-4 shrink-0" />
+                ) : (
+                  <BookOpen className="text-muted-foreground size-4 shrink-0" />
+                )}
                 <a
                   href={source.url}
                   target="_blank"
@@ -340,7 +362,7 @@ function PluginCard({ plugin }: { plugin: PluginItem }) {
                   {source.url}
                 </a>
                 <Badge variant="outline" className="text-[11px] uppercase">
-                  {source.type}
+                  {SOURCE_TYPE_LABELS[source.type] ?? source.type}
                 </Badge>
                 <Badge
                   className={cn(
@@ -352,7 +374,9 @@ function PluginCard({ plugin }: { plugin: PluginItem }) {
                   {source.status}
                 </Badge>
                 <span className="text-muted-foreground text-xs tabular-nums">
-                  {source.pageCount} pages · {source.chunkCount} chunks
+                  {source.pageCount}{" "}
+                  {source.type === "wporg_forum" ? "threads" : "pages"} ·{" "}
+                  {source.chunkCount} chunks
                 </span>
                 {source.lastCrawledAt ? (
                   <span
@@ -443,14 +467,17 @@ function PluginCard({ plugin }: { plugin: PluginItem }) {
           />
           <Select
             value={sourceType}
-            onValueChange={(v) => setSourceType(v as "url" | "sitemap")}
+            onValueChange={(v) =>
+              setSourceType(v as "url" | "sitemap" | "wporg_forum")
+            }
           >
-            <SelectTrigger className="w-32">
+            <SelectTrigger className="w-36">
               <SelectValue />
             </SelectTrigger>
             <SelectContent>
               <SelectItem value="url">Crawl URL</SelectItem>
               <SelectItem value="sitemap">Sitemap</SelectItem>
+              <SelectItem value="wporg_forum">wp.org forum</SelectItem>
             </SelectContent>
           </Select>
           <Button
@@ -466,6 +493,38 @@ function PluginCard({ plugin }: { plugin: PluginItem }) {
             Add source
           </Button>
         </form>
+
+        {plugin.wpOrgSlug && !hasForumSource ? (
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            disabled={busy === "add-forum"}
+            onClick={() =>
+              void call(
+                "add-forum",
+                () =>
+                  fetch("/api/docs/sources", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({
+                      pluginId: plugin.id,
+                      url: `https://wordpress.org/support/plugin/${plugin.wpOrgSlug}/`,
+                      type: "wporg_forum",
+                    }),
+                  }),
+                "Forum Q&A source added — click Ingest to import answered threads"
+              )
+            }
+          >
+            {busy === "add-forum" ? (
+              <LoaderCircle className="size-3.5 animate-spin" />
+            ) : (
+              <LifeBuoy className="size-3.5" />
+            )}
+            Add wp.org forum Q&A source
+          </Button>
+        ) : null}
       </CardContent>
     </Card>
   );

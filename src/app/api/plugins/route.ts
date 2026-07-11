@@ -3,6 +3,7 @@ import { z } from "zod";
 import { Prisma } from "@prisma/client";
 import { prisma } from "@/lib/db";
 import { invalidateProductDefinitions } from "@/lib/rag/product-defs";
+import { forumUrlForSlug } from "@/lib/wporg/forum-crawler";
 
 export const dynamic = "force-dynamic";
 
@@ -63,6 +64,17 @@ export async function POST(request: NextRequest) {
       },
       include: { brand: { select: { id: true, name: true } } },
     });
+    // A wp.org slug implies a support forum — register it as a Q&A source
+    // right away so "Ingest" is one click on the Plugins page.
+    if (plugin.wpOrgSlug) {
+      await prisma.docsSource.create({
+        data: {
+          pluginId: plugin.id,
+          url: forumUrlForSlug(plugin.wpOrgSlug),
+          type: "wporg_forum",
+        },
+      });
+    }
     invalidateProductDefinitions();
     return NextResponse.json({ plugin }, { status: 201 });
   } catch (error) {

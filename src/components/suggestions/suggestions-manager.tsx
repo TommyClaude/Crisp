@@ -11,6 +11,7 @@ import {
   Copy,
   ExternalLink,
   Lightbulb,
+  LifeBuoy,
   LoaderCircle,
   MessagesSquare,
   RefreshCw,
@@ -37,7 +38,7 @@ import {
 } from "@/components/ui/select";
 
 export interface ContextChunkItem {
-  source: "crisp_chat" | "plugin_docs";
+  source: "crisp_chat" | "plugin_docs" | "wporg_forum";
   similarity: number | null;
   title: string;
   link: string | null;
@@ -307,6 +308,8 @@ function ThreadCard({ thread }: { thread: SuggestionThreadItem }) {
               >
                 {chunk.source === "plugin_docs" ? (
                   <BookOpen className="text-muted-foreground size-3.5 shrink-0" />
+                ) : chunk.source === "wporg_forum" ? (
+                  <LifeBuoy className="text-muted-foreground size-3.5 shrink-0" />
                 ) : (
                   <MessagesSquare className="text-muted-foreground size-3.5 shrink-0" />
                 )}

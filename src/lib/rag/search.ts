@@ -12,13 +12,14 @@ import { cosineSimilarity, embedTexts } from "./embeddings";
  *   3. "keyword" — no OpenAI key → Postgres full-text search with ILIKE
  *                  fallback.
  *
- * Chunks come from two sources — archived Crisp conversations
- * ("crisp_chat") and crawled plugin documentation ("plugin_docs") — and
- * every result links back to its source conversation or docs page.
+ * Chunks come from three sources — archived Crisp conversations
+ * ("crisp_chat"), crawled plugin documentation ("plugin_docs") and ingested
+ * wp.org support-forum Q&A threads ("wporg_forum") — and every result links
+ * back to its source conversation or docs/forum page.
  */
 
 export type RagSearchMode = "vector" | "hybrid" | "keyword";
-export type ChunkSource = "crisp_chat" | "plugin_docs";
+export type ChunkSource = "crisp_chat" | "plugin_docs" | "wporg_forum";
 
 export interface RagSearchFilters {
   source?: ChunkSource;

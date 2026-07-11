@@ -59,7 +59,7 @@ export default async function GlobalDashboardPage() {
     {
       label: "Knowledge chunks",
       value: stats.totalChunks,
-      description: `${numberFormat.format(stats.chunksBySource.crisp_chat ?? 0)} from chats · ${numberFormat.format(stats.chunksBySource.plugin_docs ?? 0)} from docs`,
+      description: `${numberFormat.format(stats.chunksBySource.crisp_chat ?? 0)} from chats · ${numberFormat.format(stats.chunksBySource.plugin_docs ?? 0)} from docs · ${numberFormat.format(stats.chunksBySource.wporg_forum ?? 0)} from forum`,
       icon: BookOpen,
     },
   ];

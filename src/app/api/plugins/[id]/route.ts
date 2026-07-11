@@ -3,6 +3,7 @@ import { z } from "zod";
 import { Prisma } from "@prisma/client";
 import { prisma } from "@/lib/db";
 import { invalidateProductDefinitions } from "@/lib/rag/product-defs";
+import { forumUrlForSlug } from "@/lib/wporg/forum-crawler";
 
 export const dynamic = "force-dynamic";
 
@@ -47,6 +48,43 @@ export async function PATCH(
           : {}),
       },
     });
+    // A wp.org slug implies a support forum. Register / repoint the plugin's
+    // forum Q&A source when the slug is set or changed.
+    if (plugin.wpOrgSlug && parsed.data.wpOrgSlug !== undefined) {
+      const forumUrl = forumUrlForSlug(plugin.wpOrgSlug);
+      // Match by type OR forum URL so a legacy "url"-typed forum source counts
+      // as the existing one (and isn't duplicated).
+      const existing = await prisma.docsSource.findFirst({
+        where: {
+          pluginId: plugin.id,
+          OR: [{ type: "wporg_forum" }, { url: forumUrl }],
+        },
+        select: { id: true, url: true },
+      });
+      if (!existing) {
+        await prisma.docsSource.create({
+          data: { pluginId: plugin.id, url: forumUrl, type: "wporg_forum" },
+        });
+      } else if (existing.url !== forumUrl) {
+        // Slug changed — repoint at the new forum and drop the old slug's
+        // ingested threads so they don't linger under the wrong product.
+        await prisma.$transaction([
+          prisma.docsPage.deleteMany({ where: { docsSourceId: existing.id } }),
+          prisma.docsSource.update({
+            where: { id: existing.id },
+            data: {
+              url: forumUrl,
+              type: "wporg_forum",
+              status: "idle",
+              pageCount: 0,
+              chunkCount: 0,
+              lastCrawledAt: null,
+              error: null,
+            },
+          }),
+        ]);
+      }
+    }
     invalidateProductDefinitions();
     return NextResponse.json({ plugin });
   } catch (error) {

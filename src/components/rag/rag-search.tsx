@@ -6,6 +6,7 @@ import { format } from "date-fns";
 import {
   ArrowUpRight,
   BookOpen,
+  LifeBuoy,
   LoaderCircle,
   MessagesSquare,
   RefreshCw,
@@ -25,7 +26,16 @@ import { cn } from "@/lib/utils";
 /** Mirrors RagSearchResponse from GET /api/rag/search (server lib types stay server-side). */
 type RagSearchMode = "vector" | "hybrid" | "keyword";
 
-type ChunkSource = "crisp_chat" | "plugin_docs";
+type ChunkSource = "crisp_chat" | "plugin_docs" | "wporg_forum";
+
+const SOURCE_META: Record<
+  ChunkSource,
+  { label: string; icon: React.ComponentType<{ className?: string }> }
+> = {
+  crisp_chat: { label: "Chat", icon: MessagesSquare },
+  plugin_docs: { label: "Docs", icon: BookOpen },
+  wporg_forum: { label: "Forum Q&A", icon: LifeBuoy },
+};
 
 interface RagSearchResult {
   chunkId: string;
@@ -203,6 +213,7 @@ export function RagSearch() {
                   ["all", "All sources"],
                   ["crisp_chat", "Chats"],
                   ["plugin_docs", "Docs"],
+                  ["wporg_forum", "Forum Q&A"],
                 ] as const
               ).map(([value, label]) => (
                 <Button
@@ -302,18 +313,16 @@ export function RagSearch() {
 function ResultCard({ result }: { result: RagSearchResult }) {
   const { conversation, docsPage } = result;
   const extraTags = conversation ? conversation.tags.length - MAX_TAGS : 0;
+  const sourceMeta = SOURCE_META[result.source] ?? SOURCE_META.crisp_chat;
+  const SourceIcon = sourceMeta.icon;
 
   return (
     <Card className="gap-3 py-4">
       <CardHeader className="px-4">
         <div className="flex min-w-0 flex-wrap items-center gap-2">
           <Badge variant="outline" className="gap-1">
-            {result.source === "plugin_docs" ? (
-              <BookOpen className="size-3" />
-            ) : (
-              <MessagesSquare className="size-3" />
-            )}
-            {result.source === "plugin_docs" ? "Docs" : "Chat"}
+            <SourceIcon className="size-3" />
+            {sourceMeta.label}
           </Badge>
           {result.product && (
             <Badge className="border-transparent bg-blue-600 text-white dark:bg-blue-600">
@@ -386,7 +395,7 @@ function ResultCard({ result }: { result: RagSearchResult }) {
               rel="noreferrer"
               className="group text-foreground flex min-w-0 items-center gap-1.5 font-medium transition-colors hover:text-blue-600 dark:hover:text-blue-400"
             >
-              <BookOpen className="text-muted-foreground size-3.5 transition-colors group-hover:text-blue-600 dark:group-hover:text-blue-400" />
+              <SourceIcon className="text-muted-foreground size-3.5 transition-colors group-hover:text-blue-600 dark:group-hover:text-blue-400" />
               <span className="truncate">
                 {docsPage.title ?? docsPage.url}
               </span>

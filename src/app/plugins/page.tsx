@@ -27,7 +27,8 @@ export default async function PluginsPage() {
         </h1>
         <p className="text-muted-foreground mt-1 text-sm">
           Plugins drive product detection on chat chunks; each plugin can have
-          documentation sources that are crawled into the RAG index.
+          documentation and wp.org forum Q&amp;A sources that are crawled into
+          the RAG index.
         </p>
       </div>
       <PluginManager

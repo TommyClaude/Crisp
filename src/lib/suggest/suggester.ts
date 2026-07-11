@@ -10,7 +10,7 @@ import { generateDraft, suggesterConfigured } from "./llm";
  */
 
 export interface ContextChunkSummary {
-  source: "crisp_chat" | "plugin_docs";
+  source: "crisp_chat" | "plugin_docs" | "wporg_forum";
   similarity: number | null;
   title: string;
   link: string | null;
@@ -31,9 +31,12 @@ const CONTEXT_LIMIT = 6;
 const PROMPT_CHUNK_CHARS = 1200;
 
 function toContextSummary(result: RagSearchResult): ContextChunkSummary {
-  if (result.source === "plugin_docs" && result.docsPage) {
+  if (
+    (result.source === "plugin_docs" || result.source === "wporg_forum") &&
+    result.docsPage
+  ) {
     return {
-      source: "plugin_docs",
+      source: result.source,
       similarity: result.similarity,
       title: result.docsPage.title ?? result.docsPage.url,
       link: result.docsPage.url,
@@ -79,7 +82,7 @@ function buildPrompt(
   const system =
     `You are a senior support engineer for the WordPress plugin "${pluginName}". ` +
     "You draft replies to forum threads on wordpress.org for a human teammate to review and post. " +
-    "Ground your answer ONLY in the provided context (past resolved support conversations and official documentation). " +
+    "Ground your answer ONLY in the provided context (past resolved support conversations, answered forum threads, and official documentation). " +
     "If the context does not contain a clear answer, say so and draft clarifying questions to ask the user instead of guessing. " +
     "Never invent features, settings, or file paths. Be friendly, concise and concrete: greet the user briefly, give numbered steps when applicable, " +
     "and reference documentation links from the context when they support the answer. " +
@@ -90,7 +93,9 @@ function buildPrompt(
       const label =
         result.source === "plugin_docs"
           ? `DOCS (${result.docsPage?.url ?? "unknown"})`
-          : "PAST SUPPORT CONVERSATION";
+          : result.source === "wporg_forum"
+            ? `ANSWERED FORUM THREAD (${result.docsPage?.url ?? "unknown"})`
+            : "PAST SUPPORT CONVERSATION";
       return `--- Context ${index + 1} [${label}] ---\n${result.chunkText.slice(0, PROMPT_CHUNK_CHARS)}`;
     })
     .join("\n\n");

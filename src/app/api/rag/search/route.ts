@@ -7,7 +7,7 @@ export const dynamic = "force-dynamic";
 const querySchema = z.object({
   query: z.string().min(1, "query is required").max(1000),
   limit: z.coerce.number().int().min(1).max(50).default(8),
-  source: z.enum(["crisp_chat", "plugin_docs"]).optional(),
+  source: z.enum(["crisp_chat", "plugin_docs", "wporg_forum"]).optional(),
   pluginId: z.string().optional(),
   brandId: z.string().optional(),
 });

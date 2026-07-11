@@ -136,7 +136,7 @@ export function extractLinks(html: string, baseUrl: URL): URL[] {
   return links;
 }
 
-async function fetchHtml(
+export async function fetchHtml(
   url: string,
   timeoutMs: number
 ): Promise<string | null> {
