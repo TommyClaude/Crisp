@@ -5,6 +5,10 @@ import {
   rebuildAllChunks,
   rebuildChunksForConversation,
 } from "@/lib/rag/rebuild";
+import {
+  getRebuildProgress,
+  isRebuildRunning,
+} from "@/lib/rag/rebuild-state";
 
 export const dynamic = "force-dynamic";
 
@@ -16,7 +20,14 @@ const bodySchema = z
   })
   .default({ onlyResolved: true, withEmbeddings: true });
 
-const globalForRebuild = globalThis as unknown as { ragRebuildRunning?: boolean };
+/**
+ * GET /api/rag/chunks/rebuild
+ * Live progress of the current full rebuild (zeros / "idle" before the first
+ * run; final counts remain readable after a run finishes).
+ */
+export async function GET() {
+  return NextResponse.json(getRebuildProgress());
+}
 
 /**
  * POST /api/rag/chunks/rebuild
@@ -67,17 +78,21 @@ export async function POST(request: NextRequest) {
     }
   }
 
-  if (globalForRebuild.ragRebuildRunning) {
+  if (isRebuildRunning()) {
     return NextResponse.json(
       { error: "A full chunk rebuild is already running" },
       { status: 409 }
     );
   }
-  globalForRebuild.ragRebuildRunning = true;
+  // rebuildAllChunks claims the single-flight guard synchronously (before its
+  // first await), so no additional flag is set here. Fire-and-forget: respond
+  // 202 and let the UI poll GET for progress. It also releases the guard and
+  // records the terminal status on completion/failure.
   rebuildAllChunks({ onlyResolved, withEmbeddings })
     .then((result) =>
       console.log(
-        `Chunk rebuild finished: ${result.chunks} chunks from ${result.conversations} conversations` +
+        `Chunk rebuild ${result.cancelled ? "cancelled" : "finished"}: ` +
+          `${result.chunks} chunks from ${result.conversations} conversations` +
           (result.skipped > 0
             ? `, ${result.skipped} skipped as unchunkable`
             : "") +
@@ -87,10 +102,7 @@ export async function POST(request: NextRequest) {
           (result.errors.length > 0 ? `, ${result.errors.length} errors` : "")
       )
     )
-    .catch((error) => console.error("Chunk rebuild failed:", error))
-    .finally(() => {
-      globalForRebuild.ragRebuildRunning = false;
-    });
+    .catch((error) => console.error("Chunk rebuild failed:", error));
 
   return NextResponse.json({ started: true, onlyResolved, withEmbeddings }, { status: 202 });
 }

@@ -6,6 +6,10 @@ import {
 } from "./chunker";
 import { embedTexts } from "./embeddings";
 import { getProductDefinitions } from "./product-defs";
+import {
+  beginRebuildProgress,
+  endRebuildProgress,
+} from "./rebuild-state";
 import { storeChunkEmbeddings } from "./search";
 
 export interface RebuildResult {
@@ -107,70 +111,111 @@ export async function rebuildAllChunks(options?: {
   skipped: number;
   purged: number;
   errors: string[];
+  cancelled: boolean;
 }> {
-  const onlyResolved = options?.onlyResolved ?? true;
-  const where = onlyResolved ? { state: "resolved" } : {};
-  const conversations = await prisma.conversation.findMany({
-    where,
-    select: { id: true, sessionId: true },
-    orderBy: { updatedAtCrisp: "desc" },
-  });
-
-  let chunkCount = 0;
-  let skipped = 0;
-  const errors: string[] = [];
-  for (let i = 0; i < conversations.length; i++) {
-    try {
-      const result = await rebuildChunksForConversation(conversations[i].id, {
-        withEmbeddings: options?.withEmbeddings,
-      });
-      chunkCount += result.chunksCreated;
-      if (result.skipped) skipped += 1;
-    } catch (error) {
-      errors.push(`${conversations[i].sessionId}: ${String(error)}`);
-    }
-    options?.onProgress?.(i + 1, conversations.length);
-  }
-
-  // Widen past the state filter: conversations that hold chunks but were not
-  // iterated above must not keep stale chunks when they are no longer
-  // eligible. Eligible ones (e.g. deliberately chunked via a per-conversation
-  // rebuild while unresolved) are left untouched.
-  let purged = 0;
-  if (onlyResolved) {
-    const iterated = new Set(conversations.map((c) => c.id));
-    const holders = await prisma.conversation.findMany({
-      where: {
-        chunks: { some: {} },
-        OR: [{ state: null }, { state: { not: "resolved" } }],
-      },
-      select: {
-        id: true,
-        sessionId: true,
-        messages: {
-          select: { from: true, type: true, content: true, timestampCrisp: true },
-        },
-      },
+  // Claim the single-flight guard + reset live progress. This runs
+  // synchronously before the first await, so a concurrent route-level start
+  // observes running=true and returns 409 (see isRebuildRunning in the route).
+  const progress = beginRebuildProgress();
+  try {
+    const onlyResolved = options?.onlyResolved ?? true;
+    const where = onlyResolved ? { state: "resolved" } : {};
+    const conversations = await prisma.conversation.findMany({
+      where,
+      select: { id: true, sessionId: true },
+      orderBy: { updatedAtCrisp: "desc" },
     });
-    for (const holder of holders) {
-      if (iterated.has(holder.id)) continue;
-      if (isChunkableConversation(holder.messages)) continue;
-      try {
-        await prisma.embeddingChunk.deleteMany({
-          where: { conversationId: holder.id },
-        });
-        purged += 1;
-      } catch (error) {
-        errors.push(`${holder.sessionId}: ${String(error)}`);
+    // `total`/`done` track the resolved-conversation work list only; the
+    // stale-holder purge sweep below is bounded cleanup reported separately via
+    // `purged`, and is run FIRST so the progress bar never regresses or
+    // over-counts. The displayed numbers therefore never lie: done N of total M
+    // is always "conversations chunked".
+    progress.total = conversations.length;
+
+    const errors: string[] = [];
+
+    // Widen past the state filter first: conversations that hold chunks but are
+    // not in the work list above must not keep stale chunks when they are no
+    // longer eligible. Eligible ones (e.g. deliberately chunked via a
+    // per-conversation rebuild while unresolved) are left untouched.
+    let purged = 0;
+    if (onlyResolved) {
+      const iterated = new Set(conversations.map((c) => c.id));
+      const holders = await prisma.conversation.findMany({
+        where: {
+          chunks: { some: {} },
+          OR: [{ state: null }, { state: { not: "resolved" } }],
+        },
+        select: {
+          id: true,
+          sessionId: true,
+          messages: {
+            select: {
+              from: true,
+              type: true,
+              content: true,
+              timestampCrisp: true,
+            },
+          },
+        },
+      });
+      for (const holder of holders) {
+        // The purge sweep honours Stop too — remaining stale chunks are
+        // simply picked up by the next rebuild.
+        if (progress.cancelRequested) break;
+        if (iterated.has(holder.id)) continue;
+        if (isChunkableConversation(holder.messages)) continue;
+        try {
+          await prisma.embeddingChunk.deleteMany({
+            where: { conversationId: holder.id },
+          });
+          purged += 1;
+          progress.purged = purged;
+        } catch (error) {
+          errors.push(`${holder.sessionId}: ${String(error)}`);
+        }
       }
     }
-  }
+    progress.purged = purged;
 
-  return {
-    conversations: conversations.length,
-    chunks: chunkCount,
-    skipped,
-    purged,
-    errors,
-  };
+    let chunkCount = 0;
+    let skipped = 0;
+    let cancelled = false;
+    for (let i = 0; i < conversations.length; i++) {
+      // Honour a graceful stop BEFORE any further chunk-building or embedding
+      // for the next conversation. Work already committed stays.
+      if (progress.cancelRequested) {
+        cancelled = true;
+        break;
+      }
+      try {
+        const result = await rebuildChunksForConversation(conversations[i].id, {
+          withEmbeddings: options?.withEmbeddings,
+        });
+        chunkCount += result.chunksCreated;
+        progress.chunksCreated += result.chunksCreated;
+        if (result.skipped) {
+          skipped += 1;
+          progress.skipped += 1;
+        }
+      } catch (error) {
+        errors.push(`${conversations[i].sessionId}: ${String(error)}`);
+      }
+      progress.done = i + 1;
+      options?.onProgress?.(i + 1, conversations.length);
+    }
+
+    endRebuildProgress(cancelled ? "cancelled" : "completed");
+    return {
+      conversations: conversations.length,
+      chunks: chunkCount,
+      skipped,
+      purged,
+      errors,
+      cancelled,
+    };
+  } catch (error) {
+    endRebuildProgress("failed");
+    throw error;
+  }
 }

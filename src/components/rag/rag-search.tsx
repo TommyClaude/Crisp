@@ -2,6 +2,7 @@
 
 import * as React from "react";
 import Link from "next/link";
+import { useRouter } from "next/navigation";
 import { format } from "date-fns";
 import {
   ArrowUpRight,
@@ -13,6 +14,7 @@ import {
   Search,
   SearchX,
   Sparkles,
+  Square,
   TriangleAlert,
 } from "lucide-react";
 import { toast } from "sonner";
@@ -99,10 +101,48 @@ function similarityPercent(similarity: number): number {
   return Math.round(Math.max(0, Math.min(1, similarity)) * 100);
 }
 
+/** Progress payload from GET /api/rag/chunks/rebuild. */
+interface RebuildProgress {
+  running: boolean;
+  total: number;
+  done: number;
+  chunksCreated: number;
+  skipped: number;
+  purged: number;
+  cancelRequested: boolean;
+  status: "idle" | "running" | "completed" | "cancelled" | "failed";
+}
+
+const REBUILD_IDLE: RebuildProgress = {
+  running: false,
+  total: 0,
+  done: 0,
+  chunksCreated: 0,
+  skipped: 0,
+  purged: 0,
+  cancelRequested: false,
+  status: "idle",
+};
+
+const REBUILD_POLL_INTERVAL_MS = 2500;
+
+/** "Rebuild finished — N chunks from M conversations (X skipped, Y purged)". */
+function rebuildSummary(p: RebuildProgress): string {
+  const extras: string[] = [];
+  if (p.skipped > 0) extras.push(`${p.skipped} skipped`);
+  if (p.purged > 0) extras.push(`${p.purged} purged`);
+  const suffix = extras.length > 0 ? ` (${extras.join(", ")})` : "";
+  return `Rebuild finished — ${p.chunksCreated} chunks from ${p.done} conversations${suffix}`;
+}
+
 export function RagSearch() {
+  const router = useRouter();
   const [query, setQuery] = React.useState("");
   const [loading, setLoading] = React.useState(false);
-  const [rebuilding, setRebuilding] = React.useState(false);
+  const [rebuild, setRebuild] = React.useState<RebuildProgress>(REBUILD_IDLE);
+  const [rebuildStarting, setRebuildStarting] = React.useState(false);
+  const [stopping, setStopping] = React.useState(false);
+  const rebuildWasRunning = React.useRef(false);
   const [response, setResponse] = React.useState<RagSearchResponse | null>(null);
   const [error, setError] = React.useState<string | null>(null);
   const [source, setSource] = React.useState<ChunkSource | "all">("all");
@@ -137,9 +177,49 @@ export function RagSearch() {
     }
   };
 
+  const pollRebuild = React.useCallback(async () => {
+    try {
+      const res = await fetch("/api/rag/chunks/rebuild", { cache: "no-store" });
+      if (!res.ok) return;
+      const body = (await res.json()) as RebuildProgress;
+      setRebuild(body);
+      if (body.running) {
+        rebuildWasRunning.current = true;
+      } else if (rebuildWasRunning.current) {
+        // The run we were watching finished — summarize and reload the page so
+        // dashboard chunk counts refresh.
+        rebuildWasRunning.current = false;
+        if (body.status === "cancelled") {
+          toast.success(
+            `Rebuild stopped — processed ${body.done} of ${body.total} conversations`
+          );
+        } else if (body.status === "failed") {
+          toast.error("Rebuild failed — see server logs");
+        } else {
+          toast.success(rebuildSummary(body));
+        }
+        router.refresh();
+      }
+    } catch {
+      // Best-effort polling; the next tick retries.
+    }
+  }, [router]);
+
+  // Poll once on mount so a page reload picks up an in-flight rebuild.
+  React.useEffect(() => {
+    void pollRebuild();
+  }, [pollRebuild]);
+
+  // While a rebuild is active, track its progress every ~2.5s.
+  React.useEffect(() => {
+    if (!rebuild.running) return;
+    const id = setInterval(() => void pollRebuild(), REBUILD_POLL_INTERVAL_MS);
+    return () => clearInterval(id);
+  }, [rebuild.running, pollRebuild]);
+
   const handleRebuild = async () => {
-    if (rebuilding) return;
-    setRebuilding(true);
+    if (rebuild.running || rebuildStarting) return;
+    setRebuildStarting(true);
     try {
       const res = await fetch("/api/rag/chunks/rebuild", {
         method: "POST",
@@ -152,6 +232,7 @@ export function RagSearch() {
       } | null;
       if (res.status === 409) {
         toast.error(data?.error ?? "A full chunk rebuild is already running");
+        await pollRebuild();
         return;
       }
       if (!res.ok || !data?.started) {
@@ -159,10 +240,35 @@ export function RagSearch() {
         return;
       }
       toast.success("Rebuild started in background");
+      rebuildWasRunning.current = true;
+      setRebuild({ ...REBUILD_IDLE, running: true, status: "running" });
     } catch {
       toast.error("Failed to start chunk rebuild");
     } finally {
-      setRebuilding(false);
+      setRebuildStarting(false);
+    }
+  };
+
+  const handleStopRebuild = async () => {
+    if (rebuild.cancelRequested || stopping) return;
+    setStopping(true);
+    try {
+      const res = await fetch("/api/rag/chunks/rebuild/stop", {
+        method: "POST",
+      });
+      if (!res.ok) {
+        const data = (await res.json().catch(() => ({}))) as {
+          error?: string;
+        };
+        toast.error(data.error ?? "Failed to request stop");
+        return;
+      }
+      toast.success("Stop requested — finishing the current conversation");
+      await pollRebuild();
+    } catch {
+      toast.error("Failed to request stop");
+    } finally {
+      setStopping(false);
     }
   };
 
@@ -228,20 +334,41 @@ export function RagSearch() {
                 </Button>
               ))}
             </div>
-            <Button
-              type="button"
-              variant="outline"
-              size="sm"
-              onClick={handleRebuild}
-              disabled={rebuilding}
-            >
-              {rebuilding ? (
-                <LoaderCircle className="size-3.5 animate-spin" />
-              ) : (
-                <RefreshCw className="size-3.5" />
+            <div className="flex items-center gap-2">
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                onClick={handleRebuild}
+                disabled={rebuild.running || rebuildStarting}
+              >
+                {rebuild.running || rebuildStarting ? (
+                  <LoaderCircle className="size-3.5 animate-spin" />
+                ) : (
+                  <RefreshCw className="size-3.5" />
+                )}
+                {rebuild.running
+                  ? `Rebuilding… ${rebuild.done}/${rebuild.total}`
+                  : "Rebuild all chunks"}
+              </Button>
+              {rebuild.running && (
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  onClick={handleStopRebuild}
+                  disabled={rebuild.cancelRequested || stopping}
+                  className="border-red-200 text-red-600 hover:bg-red-50 hover:text-red-700 dark:border-red-500/30 dark:text-red-400 dark:hover:bg-red-500/10"
+                >
+                  {stopping ? (
+                    <LoaderCircle className="size-3.5 animate-spin" />
+                  ) : (
+                    <Square className="size-3.5" />
+                  )}
+                  {rebuild.cancelRequested ? "Stopping…" : "Stop"}
+                </Button>
               )}
-              Rebuild all chunks
-            </Button>
+            </div>
           </div>
         </CardContent>
       </Card>
