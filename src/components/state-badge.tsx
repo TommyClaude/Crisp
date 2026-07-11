@@ -91,6 +91,33 @@ export function NewReplyBadge({ className }: { className?: string }) {
   );
 }
 
+/**
+ * Amber "Follow-up due" badge: the support team promised an update N days ago
+ * (SupportThread.followupPromisedAt) and nothing has been posted since. Shown
+ * only once the promise is older than WPORG_PROMISE_REMINDER_DAYS (that gating
+ * is computed server-side; this component just renders). Amber reads as
+ * "overdue / needs attention", distinct from the sky "New reply" badge.
+ */
+export function FollowupDueBadge({
+  days,
+  className,
+}: {
+  days: number;
+  className?: string;
+}) {
+  return (
+    <Badge
+      title={`Support promised a follow-up ${days} day${days === 1 ? "" : "s"} ago and nothing was posted since.`}
+      className={cn(
+        "border-transparent bg-amber-100 text-amber-700 dark:bg-amber-500/15 dark:text-amber-400",
+        className
+      )}
+    >
+      Follow-up due
+    </Badge>
+  );
+}
+
 /** Avatar-fallback initials derived from a nickname or email. */
 export function initialsOf(
   nickname: string | null | undefined,

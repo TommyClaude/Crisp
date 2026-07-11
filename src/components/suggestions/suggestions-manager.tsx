@@ -24,7 +24,11 @@ import {
 import { toast } from "sonner";
 
 import { HelpTip } from "@/components/help-tip";
-import { NewReplyBadge, ThreadStatusBadge } from "@/components/state-badge";
+import {
+  FollowupDueBadge,
+  NewReplyBadge,
+  ThreadStatusBadge,
+} from "@/components/state-badge";
 import {
   ContextChunkList,
   DraftCards,
@@ -57,6 +61,13 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
+import {
+  activeTabValue,
+  DEFAULT_TAB,
+  emptyStateMessage,
+  NEEDS_REPLY,
+  SUGGESTION_TABS,
+} from "@/lib/suggest/suggestions-view";
 
 // Re-exported so existing importers (e.g. app/suggestions/page.tsx) keep their
 // current import paths after the shared extraction.
@@ -78,14 +89,15 @@ export interface SuggestionThreadItem {
   // A customer posted a fresh reply on this (possibly old) topic — drives the
   // "New reply" badge. Cleared on regenerate or a status change.
   hasNewReply: boolean;
+  // Days since an overdue support-team follow-up promise (null when there is no
+  // promise, or it is still within the grace period) — drives the amber
+  // "Follow-up due" badge. Gating is computed server-side.
+  promiseDueDays: number | null;
   publishedAt: string | null;
   fetchedAt: string;
   plugin: { id: string; name: string };
 }
 
-const STATUS_FILTERS = ["all", "new", "drafted", "failed", "reviewed", "dismissed"];
-/** The no-status-filter tab keeps the "all" value but reads as "Recent". */
-const STATUS_LABELS: Record<string, string> = { all: "Recent" };
 const ALL = "__all__";
 
 /** Progress payload from GET /api/wporg/suggest-missing. */
@@ -169,6 +181,7 @@ export function SuggestionsManager({
   threads,
   plugins,
   llmConfigured,
+  totalThreadCount,
   initialCheckProgress,
   initialLastCheck,
   initialResumeIndex,
@@ -177,6 +190,9 @@ export function SuggestionsManager({
   threads: SuggestionThreadItem[];
   plugins: Array<{ id: string; name: string }>;
   llmConfigured: boolean;
+  /** Count of ALL support topics in the DB (ignoring filters) — distinguishes
+   *  a truly empty DB (onboarding hint) from an empty filtered view. */
+  totalThreadCount: number;
   initialCheckProgress: CheckProgress;
   initialLastCheck: ForumCheckLogView | null;
   initialResumeIndex: number;
@@ -239,7 +255,7 @@ export function SuggestionsManager({
   const halted =
     !checkRunning && lastCheck !== null && HALTED_STATUSES.includes(lastCheck.status);
 
-  const activeStatus = searchParams.get("status") ?? "all";
+  const activeTab = activeTabValue(searchParams.get("status"));
   const activePlugin = searchParams.get("pluginId") ?? ALL;
 
   // Topics in view with no draft text yet — same rule the bulk API applies.
@@ -450,16 +466,29 @@ export function SuggestionsManager({
     <div className="space-y-4">
       <div className="flex flex-wrap items-center gap-2">
         <div className="flex items-center gap-1">
-          {STATUS_FILTERS.map((status) => (
-            <Button
-              key={status}
-              size="sm"
-              variant={activeStatus === status ? "secondary" : "ghost"}
-              className="h-7 px-2.5 text-xs capitalize"
-              onClick={() => setParam("status", status)}
-            >
-              {STATUS_LABELS[status] ?? status}
-            </Button>
+          {SUGGESTION_TABS.map((tab) => (
+            <React.Fragment key={tab.value}>
+              <Button
+                size="sm"
+                variant={activeTab === tab.value ? "secondary" : "ghost"}
+                className="h-7 px-2.5 text-xs"
+                onClick={() =>
+                  // The default tab clears the param for a clean URL.
+                  setParam("status", tab.value === DEFAULT_TAB ? null : tab.value)
+                }
+              >
+                {tab.label}
+              </Button>
+              {tab.value === NEEDS_REPLY ? (
+                <HelpTip subject="the Needs reply tab" className="mr-1">
+                  Your work queue: every topic still waiting on a human — no
+                  draft yet, a draft to review, or a failed draft — plus anything
+                  flagged for attention even after review: a fresh customer
+                  reply, or a support follow-up your team promised and hasn&rsquo;t
+                  posted. Dismissed topics never appear here.
+                </HelpTip>
+              ) : null}
+            </React.Fragment>
           ))}
         </div>
         <div className="ml-auto flex items-center gap-2">
@@ -764,8 +793,11 @@ export function SuggestionsManager({
       {threads.length === 0 ? (
         <div className="text-muted-foreground rounded-lg border border-dashed p-10 text-center text-sm">
           <Lightbulb className="mx-auto mb-2 size-6 opacity-60" />
-          No forum topics yet — set a wp.org slug on your plugins, then click
-          “Check forums now”.
+          {emptyStateMessage({
+            tab: activeTab,
+            totalInDb: totalThreadCount,
+            pluginFilterActive: activePlugin !== ALL,
+          })}
         </div>
       ) : (
         threads.map((thread) => (
@@ -869,6 +901,9 @@ function ThreadCard({
             <div className="flex min-w-0 flex-wrap items-center gap-2">
               <ThreadStatusBadge status={thread.status} />
               {thread.hasNewReply ? <NewReplyBadge /> : null}
+              {thread.promiseDueDays != null ? (
+                <FollowupDueBadge days={thread.promiseDueDays} />
+              ) : null}
               <Badge variant="secondary">{thread.plugin.name}</Badge>
               {thread.publishedAt ? (
                 <span
@@ -935,9 +970,26 @@ function ThreadCard({
         ) : null}
 
         {/* Follow-up reply (the next reply for the whole thread) — only
-            populated by the manual Regenerate action. */}
+            populated by the manual Regenerate action. "Draft anyway" on a
+            support-last skip forces a promise-delivering follow-up. */}
         {thread.followup ? (
-          <FollowupSection followup={thread.followup} />
+          <FollowupSection
+            followup={thread.followup}
+            onDraftAnyway={() =>
+              void call(
+                "draft-anyway",
+                () =>
+                  fetch(`/api/wporg/threads/${thread.id}/suggest`, {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ forceFollowup: true }),
+                  }),
+                "Follow-up drafted"
+              )
+            }
+            draftAnywayLoading={busy === "draft-anyway"}
+            draftAnywayDisabled={busy !== null}
+          />
         ) : null}
 
         <ContextChunkList chunks={thread.contextChunks} />

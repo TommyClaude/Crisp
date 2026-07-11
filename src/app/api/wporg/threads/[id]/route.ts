@@ -33,8 +33,13 @@ export async function PATCH(
     const thread = await prisma.supportThread.update({
       where: { id },
       // A status change (reviewed/dismissed/…) means the admin has acted on the
-      // topic — clear the "New reply" flag so the badge doesn't linger.
-      data: { status: parsed.data.status, hasNewReply: false },
+      // topic — clear the "New reply" flag and any pending follow-up promise so
+      // neither badge lingers.
+      data: {
+        status: parsed.data.status,
+        hasNewReply: false,
+        followupPromisedAt: null,
+      },
     });
     return NextResponse.json({ thread });
   } catch (error) {

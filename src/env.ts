@@ -36,6 +36,12 @@ const envSchema = z.object({
   // ancient items in their RSS feed; this stops years-old topics from wasting
   // requests, DB rows, and LLM calls. Topics with no publish date are kept.
   WPORG_TOPIC_MAX_AGE_DAYS: z.coerce.number().int().positive().default(30),
+  // Grace period before a support-team follow-up promise counts as overdue.
+  // When the watcher detects the team's last reply promised a further update
+  // ("let me check and get back to you"), it stamps SupportThread.followup-
+  // PromisedAt; the "Follow-up due" badge and the "Needs reply" queue only
+  // surface it once it's older than this many days.
+  WPORG_PROMISE_REMINDER_DAYS: z.coerce.number().int().positive().default(3),
   BASIC_AUTH_USER: z.string().optional(),
   BASIC_AUTH_PASSWORD: z.string().optional(),
   CRISP_REQUEST_INTERVAL_MS: z.coerce.number().int().positive().default(150),

@@ -103,6 +103,14 @@ model SupportThread {
   hasNewReply    Boolean   @default(false)
   lastReplyAt    DateTime?
   lastActivityAt DateTime?
+  // Set when the support team's most recent reply promised a further update
+  // ("let me check with the team and get back to you") — armed by the watcher's
+  // resurface path (a tiny YES/NO LLM classification of that last post) to the
+  // reply's date, and cleared when the team delivers/closes, the customer
+  // replies, the thread is regenerated, or its status changes. Once it is older
+  // than WPORG_PROMISE_REMINDER_DAYS it drives the amber "Follow-up due" badge
+  // and pulls the topic into the "Needs reply" work queue.
+  followupPromisedAt DateTime?
   fetchedAt    DateTime  @default(now())
   updatedAt    DateTime  @updatedAt
 
@@ -110,6 +118,7 @@ model SupportThread {
   @@index([status])
   @@index([publishedAt])
   @@index([lastActivityAt])
+  @@index([followupPromisedAt])
 }
 
 // A crawlable documentation source for a plugin (site URL or sitemap.xml).

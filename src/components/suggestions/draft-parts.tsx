@@ -9,6 +9,7 @@ import {
   Copy,
   CornerDownRight,
   LifeBuoy,
+  LoaderCircle,
   MessagesSquare,
   Sparkles,
 } from "lucide-react";
@@ -170,8 +171,25 @@ export interface FollowupView {
  * live thread, rendered below the first-reply drafts in a distinct amber box
  * so the two kinds are easy to tell apart. Falls back to a muted one-line note
  * for the skipped cases.
+ *
+ * On the support_last skip, an optional "Draft anyway" affordance (wired by the
+ * parent via `onDraftAnyway`) forces a follow-up that delivers the update the
+ * team owes — for when support posted last but promised to come back.
  */
-export function FollowupSection({ followup }: { followup: FollowupView }) {
+export function FollowupSection({
+  followup,
+  onDraftAnyway,
+  draftAnywayLoading,
+  draftAnywayDisabled,
+}: {
+  followup: FollowupView;
+  /** When provided, renders a "Draft anyway" button on the support_last skip. */
+  onDraftAnyway?: () => void;
+  /** Spinner state for the "Draft anyway" button (this action is in flight). */
+  draftAnywayLoading?: boolean;
+  /** Disable the button while any of the card's actions are running. */
+  draftAnywayDisabled?: boolean;
+}) {
   const hasDrafts = followup.drafts.some((draft) => draft.text);
   return (
     <div className="space-y-2 rounded-md border border-amber-300/70 bg-amber-50/30 p-3 dark:border-amber-500/25 dark:bg-amber-500/[0.04]">
@@ -191,10 +209,28 @@ export function FollowupSection({ followup }: { followup: FollowupView }) {
           Couldn&apos;t fetch the live thread from wp.org — try again.
         </p>
       ) : followup.skipped === "support_last" ? (
-        <p className="text-muted-foreground text-xs">
-          Your team posted the latest reply — waiting on the customer, so no
-          follow-up is needed right now.
-        </p>
+        <div className="space-y-2">
+          <p className="text-muted-foreground text-xs">
+            Your team posted the latest reply — waiting on the customer, so no
+            follow-up is needed right now.
+          </p>
+          {onDraftAnyway ? (
+            <Button
+              variant="outline"
+              size="sm"
+              disabled={draftAnywayDisabled}
+              onClick={onDraftAnyway}
+              className="border-amber-300 text-amber-700 hover:bg-amber-50 hover:text-amber-800 dark:border-amber-500/30 dark:text-amber-400 dark:hover:bg-amber-500/10"
+            >
+              {draftAnywayLoading ? (
+                <LoaderCircle className="size-3.5 animate-spin" />
+              ) : (
+                <CornerDownRight className="size-3.5" />
+              )}
+              Draft anyway
+            </Button>
+          ) : null}
+        </div>
       ) : hasDrafts ? (
         <>
           <DraftCards drafts={followup.drafts} accent="amber" />

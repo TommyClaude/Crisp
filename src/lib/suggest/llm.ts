@@ -22,6 +22,9 @@ const MAX_RETRIES = 2;
 // Reasoning models (gpt-5.x) spend hidden thinking tokens from this same
 // budget, so it must be well above the length of the visible draft.
 const MAX_DRAFT_TOKENS = 4096;
+// Tiny cap for one-word triage calls (e.g. the follow-up promise YES/NO
+// classifier) — enough for the answer, cheap, and never a full draft.
+export const MAX_CLASSIFY_TOKENS = 10;
 
 export function resolveProvider(): SuggesterProvider | null {
   return availableProviders()[0] ?? null;
@@ -88,7 +91,8 @@ async function postJson(
 
 async function draftWithAnthropic(
   system: string,
-  userPrompt: string
+  userPrompt: string,
+  maxTokens: number = MAX_DRAFT_TOKENS
 ): Promise<DraftResult> {
   const env = getEnv();
   const model = env.ANTHROPIC_MODEL;
@@ -100,7 +104,7 @@ async function draftWithAnthropic(
     },
     {
       model,
-      max_tokens: MAX_DRAFT_TOKENS,
+      max_tokens: maxTokens,
       system,
       messages: [{ role: "user", content: userPrompt }],
     }
@@ -120,7 +124,8 @@ async function draftWithAnthropic(
 
 async function draftWithOpenAI(
   system: string,
-  userPrompt: string
+  userPrompt: string,
+  maxTokens: number = MAX_DRAFT_TOKENS
 ): Promise<DraftResult> {
   const env = getEnv();
   const model = env.OPENAI_CHAT_MODEL;
@@ -131,7 +136,7 @@ async function draftWithOpenAI(
       model,
       // gpt-5.x / o-series reject `max_tokens`; `max_completion_tokens` is
       // the replacement and is accepted by older chat models too.
-      max_completion_tokens: MAX_DRAFT_TOKENS,
+      max_completion_tokens: maxTokens,
       messages: [
         { role: "system", content: system },
         { role: "user", content: userPrompt },
@@ -143,15 +148,20 @@ async function draftWithOpenAI(
   return { text, model: body.model ?? model };
 }
 
-/** Generate a draft from a specific provider. */
+/**
+ * Generate a draft from a specific provider. `maxTokens` defaults to the full
+ * draft budget; pass a small cap (e.g. {@link MAX_CLASSIFY_TOKENS}) for a terse
+ * one-word triage call.
+ */
 export function generateDraftFor(
   provider: SuggesterProvider,
   system: string,
-  userPrompt: string
+  userPrompt: string,
+  maxTokens?: number
 ): Promise<DraftResult> {
   return provider === "anthropic"
-    ? draftWithAnthropic(system, userPrompt)
-    : draftWithOpenAI(system, userPrompt);
+    ? draftWithAnthropic(system, userPrompt, maxTokens)
+    : draftWithOpenAI(system, userPrompt, maxTokens);
 }
 
 /** Generate a draft with whichever provider is configured (first available). */

@@ -44,7 +44,24 @@ export interface DraftFollowupInput {
   plugin: { id: string; name: string };
   /** The owning brand's house-style instructions, when set. */
   replyStyle?: string | null;
+  /**
+   * Deliver on a support-team promise: when true, a thread whose SUPPORT team
+   * posted last is NOT skipped — instead the draft delivers the update the team
+   * promised. Set from a standing followupPromisedAt or the manual "Draft
+   * anyway" (forceFollowup) action.
+   */
+  deliverPromise?: boolean;
 }
+
+/**
+ * Injected into the follow-up prompt when delivering on a promise, so the model
+ * writes the team's overdue update instead of skipping (support posted last) or
+ * closing the thread out. The exact wording is asserted in tests.
+ */
+export const PROMISE_DELIVERY_INSTRUCTION =
+  "The support team's latest message promised to investigate and come back. " +
+  "Draft the reply that DELIVERS on that promise: report the outcome or current " +
+  "status and the next step. Do not treat the thread as closed.";
 
 /** A post counts as the support side when wp.org tagged it with a role. */
 function isSupportPost(post: ForumPost): boolean {
@@ -85,11 +102,17 @@ export function buildFollowupPrompt(
   posts: ForumPost[],
   pluginName: string,
   contextText: string,
-  replyStyle?: string | null
+  replyStyle?: string | null,
+  deliverPromise: boolean = false
 ): { system: string; user: string } {
+  // When delivering on a promise, lead with the override so it frames the whole
+  // reply before the state-assessment rules (whose "did the customer close it?"
+  // logic doesn't apply — SUPPORT posted last here).
+  const promiseFraming = deliverPromise ? `${PROMISE_DELIVERY_INSTRUCTION} ` : "";
   const system = appendReplyStyle(
     `You are a senior support engineer for the WordPress plugin "${pluginName}". ` +
       "You are drafting the NEXT reply your support team should post in an ongoing wordpress.org forum thread, for a human teammate to review and post. " +
+      promiseFraming +
       // State assessment first: a thread that is already resolved must get a
       // short goodbye, not another round of troubleshooting — the retrieved
       // context is full of solutions and would otherwise drag the reply there.
@@ -113,12 +136,16 @@ export function buildFollowupPrompt(
     replyStyle
   );
 
+  const closing = deliverPromise
+    ? "The support team already promised to follow up and now needs to deliver. Output ONLY the support team's next reply, delivering on that promise (the outcome or current status and the next step) — do not close the thread out."
+    : "First decide silently (do not write this out) whether the customer's most recent message is closing the conversation (resolved / thanks / review left), still needs help, or does both at once (a thank-you plus a brand-new question), then output ONLY the support team's next reply.";
+
   const user =
     `Ongoing forum thread on wordpress.org/support/plugin:\n\n` +
     `Title: ${title}\n\n` +
     `Conversation so far (oldest first):\n\n${buildTranscript(posts)}\n\n` +
     `Context from past support conversations and documentation:\n\n${contextText || "(no relevant context found)"}\n\n` +
-    "First decide silently (do not write this out) whether the customer's most recent message is closing the conversation (resolved / thanks / review left), still needs help, or does both at once (a thank-you plus a brand-new question), then output ONLY the support team's next reply.";
+    closing;
 
   return { system, user };
 }
@@ -151,10 +178,15 @@ export async function draftFollowup(
     };
   }
 
-  // The support team spoke last — the ball is with the customer, so there is
-  // nothing to reply to yet. Skip instead of burning LLM calls on a reply
-  // that would only repeat what support just said.
-  if (isSupportPost(fetched.posts[fetched.posts.length - 1])) {
+  // The support team spoke last — normally the ball is with the customer, so
+  // there is nothing to reply to yet and we skip (no wasted LLM calls). But
+  // when we are delivering on a promise (a standing followupPromisedAt, or the
+  // manual "Draft anyway"), we DON'T skip: the team owes an update, so we draft
+  // it with the deliver-the-promise framing instead.
+  if (
+    !input.deliverPromise &&
+    isSupportPost(fetched.posts[fetched.posts.length - 1])
+  ) {
     return {
       generatedAt,
       postCount: fetched.posts.length,
@@ -177,7 +209,8 @@ export async function draftFollowup(
             fetched.posts,
             input.plugin.name,
             formatContextBlock(context),
-            input.replyStyle
+            input.replyStyle,
+            input.deliverPromise ?? false
           ),
           `follow-up "${title}"`
         )
@@ -190,9 +223,19 @@ export async function draftFollowup(
  * Generate and persist the follow-up drafts for a thread. Overwrites any
  * previous followupJson. Called after the normal drafts are already saved, so
  * on any failure the caller can keep those first-reply drafts intact.
+ *
+ * Deliver-the-promise: if the thread has a standing followupPromisedAt (the
+ * watcher detected the team promised an update) or `force` is set (the manual
+ * "Draft anyway" on a support-last skip), we draft the delivering reply instead
+ * of skipping. Either way the promise reminder is retired here — Regenerate is
+ * the human actively working the thread, so the "you forgot" flag has done its
+ * job. This clearing lives on the manual follow-up step (not the shared
+ * first-reply core) so a bulk/watcher first-reply draft never wrongly retires a
+ * pending promise.
  */
 export async function generateFollowupForThread(
-  threadId: string
+  threadId: string,
+  options?: { force?: boolean }
 ): Promise<FollowupResult> {
   const thread = await prisma.supportThread.findUniqueOrThrow({
     where: { id: threadId },
@@ -207,16 +250,27 @@ export async function generateFollowupForThread(
     },
   });
 
+  const deliverPromise =
+    (options?.force ?? false) || thread.followupPromisedAt != null;
+
   const result = await draftFollowup({
     url: thread.url,
     title: thread.title,
     plugin: { id: thread.plugin.id, name: thread.plugin.name },
     replyStyle: thread.plugin.brand?.replyStyle ?? null,
+    deliverPromise,
   });
 
+  // Retire the promise reminder ONLY when a real drafting attempt happened.
+  // A skipped pass (wp.org unreachable, no replies) delivered nothing — nulling
+  // the reminder there would silently drop it with no way to re-arm until the
+  // team posts again, which is exactly what the reminder exists to prevent.
   await prisma.supportThread.update({
     where: { id: threadId },
-    data: { followupJson: result as object },
+    data: {
+      followupJson: result as object,
+      ...(result.skipped ? {} : { followupPromisedAt: null }),
+    },
   });
 
   return result;

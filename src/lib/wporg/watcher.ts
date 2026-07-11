@@ -1,5 +1,6 @@
 import { prisma } from "@/lib/db";
 import { getEnv } from "@/env";
+import { classifyFollowupPromise } from "@/lib/suggest/promise";
 import { generateSuggestionForThread } from "@/lib/suggest/suggester";
 import { fetchTopicThread } from "@/lib/wporg/forum-crawler";
 import {
@@ -127,10 +128,21 @@ async function resurfaceReplies(
     if (!customerLast) {
       // Support answered last. Record lastReplyAt to skip refetching next time;
       // don't flag, and don't create a row for a topic we weren't tracking.
+      // For a tracked thread, classify whether that last post promised a
+      // further update the team may forget ("let me check and get back to
+      // you"): YES arms the follow-up reminder (followupPromisedAt = this reply
+      // date); NO clears any prior promise (the team delivered or closed). The
+      // classifier is best-effort — a failure resolves to NO and never blocks
+      // the check. We only reach here when the reply is newer than the last one
+      // processed, so a standing promise isn't re-classified every check.
       if (existing) {
+        const promised = await classifyFollowupPromise(lastPost.text);
         await prisma.supportThread.update({
           where: { id: existing.id },
-          data: { lastReplyAt: replyDate },
+          data: {
+            lastReplyAt: replyDate,
+            followupPromisedAt: promised ? replyDate : null,
+          },
         });
       }
       continue;
@@ -143,6 +155,9 @@ async function resurfaceReplies(
           hasNewReply: true,
           lastReplyAt: replyDate,
           lastActivityAt: replyDate,
+          // A fresh customer reply supersedes any pending support promise —
+          // the ball is back with the team via the "New reply" badge instead.
+          followupPromisedAt: null,
         },
       });
       flaggedIds.add(existing.id);

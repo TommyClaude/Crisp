@@ -10,7 +10,13 @@ import {
 } from "lucide-react";
 
 import { KnowledgeCoveragePanel } from "@/components/dashboard/knowledge-coverage";
-import { NewReplyBadge, ThreadStatusBadge } from "@/components/state-badge";
+import {
+  FollowupDueBadge,
+  NewReplyBadge,
+  ThreadStatusBadge,
+} from "@/components/state-badge";
+import { getEnv } from "@/env";
+import { daysSincePromise, isPromiseDue } from "@/lib/suggest/promise";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
@@ -40,6 +46,8 @@ export default async function GlobalDashboardPage() {
   ]);
   const needsAttention =
     (stats.threadsByStatus.new ?? 0) + (stats.threadsByStatus.failed ?? 0);
+  const promiseReminderDays = getEnv().WPORG_PROMISE_REMINDER_DAYS;
+  const dashboardNow = new Date();
 
   const statCards = [
     {
@@ -157,6 +165,18 @@ export default async function GlobalDashboardPage() {
                       </div>
                       <div className="flex shrink-0 items-center gap-1.5">
                         {thread.hasNewReply ? <NewReplyBadge /> : null}
+                        {isPromiseDue(
+                          thread.followupPromisedAt,
+                          promiseReminderDays,
+                          dashboardNow
+                        ) ? (
+                          <FollowupDueBadge
+                            days={daysSincePromise(
+                              thread.followupPromisedAt!,
+                              dashboardNow
+                            )}
+                          />
+                        ) : null}
                         <ThreadStatusBadge status={thread.status} />
                       </div>
                     </Link>
