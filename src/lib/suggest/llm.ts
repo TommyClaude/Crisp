@@ -19,7 +19,9 @@ export interface DraftResult {
 
 const FETCH_TIMEOUT_MS = 120_000;
 const MAX_RETRIES = 2;
-const MAX_DRAFT_TOKENS = 1500;
+// Reasoning models (gpt-5.x) spend hidden thinking tokens from this same
+// budget, so it must be well above the length of the visible draft.
+const MAX_DRAFT_TOKENS = 4096;
 
 export function resolveProvider(): SuggesterProvider | null {
   return availableProviders()[0] ?? null;
@@ -127,7 +129,9 @@ async function draftWithOpenAI(
     { Authorization: `Bearer ${env.OPENAI_API_KEY}` },
     {
       model,
-      max_tokens: MAX_DRAFT_TOKENS,
+      // gpt-5.x / o-series reject `max_tokens`; `max_completion_tokens` is
+      // the replacement and is accepted by older chat models too.
+      max_completion_tokens: MAX_DRAFT_TOKENS,
       messages: [
         { role: "system", content: system },
         { role: "user", content: userPrompt },
