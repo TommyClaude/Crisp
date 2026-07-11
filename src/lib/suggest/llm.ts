@@ -105,7 +105,7 @@ async function draftWithAnthropic(
   );
 
   if (body.stop_reason === "refusal") {
-    throw new Error("The model declined to draft a reply for this thread");
+    throw new Error("The model declined to draft a reply for this topic");
   }
   const text = (body.content ?? [])
     .filter((block: any) => block.type === "text")

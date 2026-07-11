@@ -9,16 +9,16 @@ import {
  * WordPress.org support-forum Q&A crawler.
  *
  * Walks a plugin's forum listing (https://wordpress.org/support/plugin/{slug}/,
- * paginated as /page/N/), fetches every answered thread, and renders each one
+ * paginated as /page/N/), fetches every answered topic, and renders each one
  * as a plain-text Q&A transcript (question + replies, with author roles like
  * "Plugin Support" preserved). The output is CrawledPage-compatible so forum
- * threads flow through the exact same ingest pipeline as documentation pages:
+ * topics flow through the exact same ingest pipeline as documentation pages:
  * DocsPage rows, PII redaction, chunking, embeddings.
  *
  * Parsing is regex-based against bbPress's stable theme-compat markup
  * (div id="post-N", bbp-reply-content, bbp-topic-permalink, ...) with
- * defensive fallbacks — a thread that fails to parse is skipped, never stored
- * half-broken. Threads with zero replies are skipped: an unanswered question
+ * defensive fallbacks — a topic that fails to parse is skipped, never stored
+ * half-broken. Topics with zero replies are skipped: an unanswered question
  * teaches the assistant nothing.
  */
 
@@ -385,7 +385,7 @@ export async function crawlForum(
 
   if (topics.length === 0) {
     throw new Error(
-      "No forum threads found — check that the URL is a wp.org plugin support forum " +
+      "No forum topics found — check that the URL is a wp.org plugin support forum " +
         "(https://wordpress.org/support/plugin/{slug}/)."
     );
   }

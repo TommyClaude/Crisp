@@ -375,7 +375,7 @@ function PluginCard({ plugin }: { plugin: PluginItem }) {
                 </Badge>
                 <span className="text-muted-foreground text-xs tabular-nums">
                   {source.pageCount}{" "}
-                  {source.type === "wporg_forum" ? "threads" : "pages"} ·{" "}
+                  {source.type === "wporg_forum" ? "topics" : "pages"} ·{" "}
                   {source.chunkCount} chunks
                 </span>
                 {source.lastCrawledAt ? (
@@ -513,7 +513,7 @@ function PluginCard({ plugin }: { plugin: PluginItem }) {
                       type: "wporg_forum",
                     }),
                   }),
-                "Forum Q&A source added — click Ingest to import answered threads"
+                "Forum Q&A source added — click Ingest to import answered topics"
               )
             }
           >

@@ -20,7 +20,7 @@ export async function POST(
     select: { id: true },
   });
   if (!exists) {
-    return NextResponse.json({ error: "Thread not found" }, { status: 404 });
+    return NextResponse.json({ error: "Topic not found" }, { status: 404 });
   }
 
   try {

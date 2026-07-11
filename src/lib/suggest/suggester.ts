@@ -107,7 +107,7 @@ function buildPrompt(
         result.source === "plugin_docs"
           ? `DOCS (${result.docsPage?.url ?? "unknown"})`
           : result.source === "wporg_forum"
-            ? `ANSWERED FORUM THREAD (${result.docsPage?.url ?? "unknown"})`
+            ? `ANSWERED FORUM TOPIC (${result.docsPage?.url ?? "unknown"})`
             : "PAST SUPPORT CONVERSATION";
       return `--- Context ${index + 1} [${label}] ---\n${result.chunkText.slice(0, PROMPT_CHUNK_CHARS)}`;
     })

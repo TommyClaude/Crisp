@@ -40,7 +40,7 @@ export async function PATCH(
       error instanceof Prisma.PrismaClientKnownRequestError &&
       error.code === "P2025"
     ) {
-      return NextResponse.json({ error: "Thread not found" }, { status: 404 });
+      return NextResponse.json({ error: "Topic not found" }, { status: 404 });
     }
     throw error;
   }
@@ -60,7 +60,7 @@ export async function DELETE(
       error instanceof Prisma.PrismaClientKnownRequestError &&
       error.code === "P2025"
     ) {
-      return NextResponse.json({ error: "Thread not found" }, { status: 404 });
+      return NextResponse.json({ error: "Topic not found" }, { status: 404 });
     }
     throw error;
   }

@@ -73,20 +73,124 @@ export interface SuggestionThreadItem {
 const STATUS_FILTERS = ["all", "new", "drafted", "failed", "reviewed", "dismissed"];
 const ALL = "__all__";
 
+/** Progress payload from GET /api/wporg/suggest-missing. */
+interface BulkDraftProgress {
+  running: boolean;
+  total: number;
+  done: number;
+  drafted: number;
+  failed: number;
+}
+
+const BULK_IDLE: BulkDraftProgress = {
+  running: false,
+  total: 0,
+  done: 0,
+  drafted: 0,
+  failed: 0,
+};
+
+/** Statuses the bulk generator considers (matches the API's eligibility). */
+const BULK_ELIGIBLE_STATUSES = ["new", "drafted", "failed"];
+
 export function SuggestionsManager({
   threads,
   plugins,
+  llmConfigured,
 }: {
   threads: SuggestionThreadItem[];
   plugins: Array<{ id: string; name: string }>;
+  llmConfigured: boolean;
 }) {
   const router = useRouter();
   const pathname = usePathname();
   const searchParams = useSearchParams();
   const [checking, setChecking] = React.useState(false);
+  const [bulk, setBulk] = React.useState<BulkDraftProgress>(BULK_IDLE);
+  const [bulkStarting, setBulkStarting] = React.useState(false);
+  const bulkWasRunning = React.useRef(false);
 
   const activeStatus = searchParams.get("status") ?? "all";
   const activePlugin = searchParams.get("pluginId") ?? ALL;
+
+  // Topics in view with no draft text yet — same rule the bulk API applies.
+  const missingCount = threads.filter(
+    (thread) =>
+      BULK_ELIGIBLE_STATUSES.includes(thread.status) &&
+      !thread.drafts.some((draft) => draft.text)
+  ).length;
+
+  const pollBulk = React.useCallback(async () => {
+    try {
+      const res = await fetch("/api/wporg/suggest-missing", {
+        cache: "no-store",
+      });
+      if (!res.ok) return;
+      const body = (await res.json()) as BulkDraftProgress;
+      setBulk(body);
+      if (body.running) {
+        bulkWasRunning.current = true;
+      } else if (bulkWasRunning.current) {
+        // The run we were watching finished — summarize and reload the list.
+        bulkWasRunning.current = false;
+        toast.success(
+          `Draft generation finished — ${body.drafted} drafted, ${body.failed} failed`
+        );
+        router.refresh();
+      }
+    } catch {
+      // Best-effort polling; the next tick retries.
+    }
+  }, [router]);
+
+  // Poll once on mount so a page reload picks up an in-flight bulk run.
+  React.useEffect(() => {
+    void pollBulk();
+  }, [pollBulk]);
+
+  // While a bulk run is active, track its progress every 3s.
+  React.useEffect(() => {
+    if (!bulk.running) return;
+    const id = setInterval(() => void pollBulk(), 3000);
+    return () => clearInterval(id);
+  }, [bulk.running, pollBulk]);
+
+  const generateMissingDrafts = async () => {
+    setBulkStarting(true);
+    try {
+      const res = await fetch("/api/wporg/suggest-missing", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(
+          activePlugin === ALL ? {} : { pluginId: activePlugin }
+        ),
+      });
+      const body = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        toast.error(body.error ?? "Failed to start draft generation");
+        return;
+      }
+      if (!body.queued) {
+        toast.success("No topics are missing drafts");
+        return;
+      }
+      toast.success(
+        `Generating drafts for ${body.queued} topics in the background…`
+      );
+      bulkWasRunning.current = true;
+      setBulk({
+        running: true,
+        total: body.queued,
+        done: 0,
+        drafted: 0,
+        failed: 0,
+      });
+    } catch {
+      toast.error("Failed to start draft generation");
+    } finally {
+      setBulkStarting(false);
+    }
+  };
 
   const setParam = (key: string, value: string | null) => {
     const params = new URLSearchParams(searchParams.toString());
@@ -113,7 +217,7 @@ export function SuggestionsManager({
         return;
       }
       toast.success(
-        `Checked ${body.pluginsChecked} forums — ${body.newThreads} new threads, ${body.drafted} drafts`,
+        `Checked ${body.pluginsChecked} forums — ${body.newThreads} new topics, ${body.drafted} drafts`,
         {
           description:
             body.errors?.length > 0 ? `${body.errors.length} feed error(s) — see server logs` : undefined,
@@ -162,6 +266,23 @@ export function SuggestionsManager({
               </SelectContent>
             </Select>
           ) : null}
+          {missingCount > 0 || bulk.running ? (
+            <Button
+              size="sm"
+              variant="outline"
+              onClick={generateMissingDrafts}
+              disabled={bulk.running || bulkStarting}
+            >
+              {bulk.running || bulkStarting ? (
+                <LoaderCircle className="size-3.5 animate-spin" />
+              ) : (
+                <Sparkles className="size-3.5" />
+              )}
+              {bulk.running
+                ? `Drafting… ${bulk.done}/${bulk.total}`
+                : `Generate missing drafts (${missingCount})`}
+            </Button>
+          ) : null}
           <Button size="sm" onClick={checkForums} disabled={checking}>
             {checking ? (
               <LoaderCircle className="size-3.5 animate-spin" />
@@ -176,11 +297,17 @@ export function SuggestionsManager({
       {threads.length === 0 ? (
         <div className="text-muted-foreground rounded-lg border border-dashed p-10 text-center text-sm">
           <Lightbulb className="mx-auto mb-2 size-6 opacity-60" />
-          No forum threads yet — set a wp.org slug on your plugins, then click
+          No forum topics yet — set a wp.org slug on your plugins, then click
           “Check forums now”.
         </div>
       ) : (
-        threads.map((thread) => <ThreadCard key={thread.id} thread={thread} />)
+        threads.map((thread) => (
+          <ThreadCard
+            key={thread.id}
+            thread={thread}
+            llmConfigured={llmConfigured}
+          />
+        ))
       )}
     </div>
   );
@@ -191,7 +318,13 @@ const PROVIDER_LABELS: Record<string, string> = {
   openai: "OpenAI",
 };
 
-function ThreadCard({ thread }: { thread: SuggestionThreadItem }) {
+function ThreadCard({
+  thread,
+  llmConfigured,
+}: {
+  thread: SuggestionThreadItem;
+  llmConfigured: boolean;
+}) {
   const router = useRouter();
   const [busy, setBusy] = React.useState<string | null>(null);
   const [copiedKey, setCopiedKey] = React.useState<string | null>(null);
@@ -327,9 +460,9 @@ function ThreadCard({ thread }: { thread: SuggestionThreadItem }) {
           </p>
         ) : thread.status === "drafted" ? (
           <p className="text-muted-foreground text-xs">
-            No LLM provider configured — use the retrieved context below to
-            compose a reply (set ANTHROPIC_API_KEY or OPENAI_API_KEY to enable
-            drafts).
+            {llmConfigured
+              ? "No drafts yet — click Generate drafts to create suggestions from your configured AI providers."
+              : "No LLM provider configured — use the retrieved context below to compose a reply (set ANTHROPIC_API_KEY or OPENAI_API_KEY to enable drafts)."}
           </p>
         ) : null}
 
@@ -449,7 +582,7 @@ function ThreadCard({ thread }: { thread: SuggestionThreadItem }) {
               size="sm"
               className="text-muted-foreground"
               disabled={busy !== null}
-              onClick={() => void setStatus("dismissed", "Thread dismissed")}
+              onClick={() => void setStatus("dismissed", "Topic dismissed")}
             >
               <X className="size-3.5" />
               Dismiss

@@ -15,10 +15,10 @@ import { crawlDocs } from "./crawler";
  * documentation and historical conversations.
  *
  * Sources of type "wporg_forum" are the plugin's wp.org support forum: each
- * answered thread becomes one DocsPage whose contentText is a Q&A transcript,
+ * answered topic becomes one DocsPage whose contentText is a Q&A transcript,
  * and its chunks carry source="wporg_forum" so the assistant can cite past
  * forum answers separately from documentation. Forum history accumulates —
- * threads that scroll past the crawl horizon on later runs are kept, not
+ * topics that scroll past the crawl horizon on later runs are kept, not
  * deleted (unlike docs pages that disappear from a site).
  */
 
@@ -91,7 +91,7 @@ export async function ingestDocsSource(
   });
 
   // Auto-heal: a wp.org forum URL added as a plain "url" source would crawl
-  // the listing chrome instead of the threads — upgrade it to the forum type.
+  // the listing chrome instead of the topics — upgrade it to the forum type.
   let sourceType = source.type;
   if (sourceType !== "wporg_forum" && isWpOrgForumUrl(source.url)) {
     sourceType = "wporg_forum";
@@ -119,7 +119,7 @@ export async function ingestDocsSource(
     if (crawled.length === 0) {
       throw new Error(
         isForum
-          ? "No answered forum threads found — check the URL points at a wp.org plugin support forum."
+          ? "No answered forum topics found — check the URL points at a wp.org plugin support forum."
           : "Crawl returned no indexable pages — check the URL (and that the site serves HTML)."
       );
     }
@@ -170,7 +170,7 @@ export async function ingestDocsSource(
       changedPageIds.push(dbPage.id);
 
       const headerKind = isForum ? "Forum Q&A" : "Docs";
-      // Forum thread titles are user-authored and can carry PII (emails in the
+      // Forum topic titles are user-authored and can carry PII (emails in the
       // subject line), so redact the title before it enters the chunk header
       // or the searchable `topic` column — same rule as the body.
       const safeTitle = page.title ? redactText(page.title) : null;
@@ -199,8 +199,8 @@ export async function ingestDocsSource(
     }
 
     // Pages that disappeared from the docs site (cascades their chunks).
-    // Forum sources skip this: the crawl only reaches the newest N threads,
-    // and older ingested threads remain valid knowledge.
+    // Forum sources skip this: the crawl only reaches the newest N topics,
+    // and older ingested topics remain valid knowledge.
     const removed = isForum
       ? { count: 0 }
       : await prisma.docsPage.deleteMany({
@@ -234,7 +234,7 @@ export async function ingestDocsSource(
     const chunkCount = await prisma.embeddingChunk.count({
       where: { docsPage: { docsSourceId } },
     });
-    // Forum history accumulates across runs, so count stored threads rather
+    // Forum history accumulates across runs, so count stored topics rather
     // than this run's crawl window.
     const pageCount = isForum
       ? await prisma.docsPage.count({ where: { docsSourceId } })

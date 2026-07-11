@@ -4,6 +4,7 @@ import {
   type DraftItemView,
   type SuggestionThreadItem,
 } from "@/components/suggestions/suggestions-manager";
+import { suggesterConfigured } from "@/lib/suggest/llm";
 import type { ContextChunkSummary, DraftItem } from "@/lib/suggest/suggester";
 
 export const dynamic = "force-dynamic";
@@ -92,7 +93,11 @@ export default async function SuggestionsPage({
           post — nothing is posted automatically.
         </p>
       </div>
-      <SuggestionsManager threads={items} plugins={plugins} />
+      <SuggestionsManager
+        threads={items}
+        plugins={plugins}
+        llmConfigured={suggesterConfigured()}
+      />
     </div>
   );
 }

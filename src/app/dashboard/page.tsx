@@ -39,7 +39,7 @@ export default async function GlobalDashboardPage() {
 
   const statCards = [
     {
-      label: "Open threads",
+      label: "Open topics",
       value: needsAttention,
       description: "New or failed — waiting for a draft/review",
       icon: Inbox,
@@ -53,7 +53,7 @@ export default async function GlobalDashboardPage() {
     {
       label: "Reviewed",
       value: stats.threadsByStatus.reviewed ?? 0,
-      description: "Threads handled by the team",
+      description: "Topics handled by the team",
       icon: Sparkles,
     },
     {
@@ -69,7 +69,7 @@ export default async function GlobalDashboardPage() {
       <header>
         <h1 className="text-2xl font-semibold tracking-tight">Dashboard</h1>
         <p className="text-muted-foreground mt-1 text-sm">
-          Tickets and threads across your plugins, and the knowledge powering
+          Tickets and topics across your plugins, and the knowledge powering
           the answer suggestions.
         </p>
       </header>
@@ -102,7 +102,7 @@ export default async function GlobalDashboardPage() {
           <CardHeader>
             <CardTitle className="flex items-center gap-2 text-base">
               <Lightbulb className="text-muted-foreground size-4" />
-              Latest forum threads
+              Latest forum topics
             </CardTitle>
             <CardDescription>
               Newest topics from the wp.org support forums of your plugins.
@@ -119,7 +119,7 @@ export default async function GlobalDashboardPage() {
           <CardContent>
             {stats.recentThreads.length === 0 ? (
               <p className="text-muted-foreground py-6 text-center text-sm">
-                No threads yet — add wp.org slugs to your plugins and run a
+                No topics yet — add wp.org slugs to your plugins and run a
                 forum check from the Suggestions page.
               </p>
             ) : (
