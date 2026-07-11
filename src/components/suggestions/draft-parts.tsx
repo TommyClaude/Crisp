@@ -162,7 +162,7 @@ export function DraftErrorLines({ drafts }: { drafts: DraftItemView[] }) {
 export interface FollowupView {
   postCount: number;
   drafts: DraftItemView[];
-  skipped: "no_replies" | "fetch_failed" | null;
+  skipped: "no_replies" | "fetch_failed" | "support_last" | null;
 }
 
 /**
@@ -189,6 +189,11 @@ export function FollowupSection({ followup }: { followup: FollowupView }) {
       ) : followup.skipped === "fetch_failed" ? (
         <p className="text-muted-foreground text-xs">
           Couldn&apos;t fetch the live thread from wp.org — try again.
+        </p>
+      ) : followup.skipped === "support_last" ? (
+        <p className="text-muted-foreground text-xs">
+          Your team posted the latest reply — waiting on the customer, so no
+          follow-up is needed right now.
         </p>
       ) : hasDrafts ? (
         <>

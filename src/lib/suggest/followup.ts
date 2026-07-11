@@ -35,7 +35,7 @@ export interface FollowupResult {
   drafts: DraftItem[];
   context: ContextChunkSummary[];
   /** Set when no drafts were produced: why the follow-up was skipped. */
-  skipped?: "no_replies" | "fetch_failed";
+  skipped?: "no_replies" | "fetch_failed" | "support_last";
 }
 
 export interface DraftFollowupInput {
@@ -148,6 +148,19 @@ export async function draftFollowup(
       drafts: [],
       context: [],
       skipped: "no_replies",
+    };
+  }
+
+  // The support team spoke last — the ball is with the customer, so there is
+  // nothing to reply to yet. Skip instead of burning LLM calls on a reply
+  // that would only repeat what support just said.
+  if (isSupportPost(fetched.posts[fetched.posts.length - 1])) {
+    return {
+      generatedAt,
+      postCount: fetched.posts.length,
+      drafts: [],
+      context: [],
+      skipped: "support_last",
     };
   }
 
