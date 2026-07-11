@@ -21,7 +21,6 @@ const DEMO_BRANDS = [
   {
     slug: "demo-yaycommerce",
     name: "YayCommerce",
-    domain: "yaycommerce.com",
     crispWebsiteId: "demo-website-yaycommerce",
     plugins: [
       { name: "YayMail", slug: "demo-yaymail", keywords: ["yay mail"], wpOrgSlug: "yaymail" },
@@ -32,7 +31,6 @@ const DEMO_BRANDS = [
   {
     slug: "demo-ninjateam",
     name: "Ninja Team",
-    domain: "ninjateam.org",
     crispWebsiteId: "demo-website-ninjateam",
     plugins: [
       { name: "FileBird", slug: "demo-filebird", keywords: ["file bird", "njt-filebird"], wpOrgSlug: "filebird" },
@@ -314,7 +312,6 @@ async function main() {
       data: {
         name: spec.name,
         slug: spec.slug,
-        domain: spec.domain,
         crispWebsiteId: spec.crispWebsiteId,
       },
     });

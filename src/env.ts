@@ -10,14 +10,11 @@ const envSchema = z.object({
   // website ID) are managed in the Brand table / /brands UI. Only used when
   // that table is empty.
   CRISP_WEBSITE_ID: z.string().optional(),
-  // Optional global fallback token — brands normally carry their own token
-  // (managed in /brands). Used only for brands without a token, or the
-  // legacy single-website fallback when no brands exist.
+  // Global Crisp REST API token — a Crisp Marketplace plugin production
+  // token, which (once approved) reaches every workspace the plugin is
+  // installed on. Every brand authenticates with this single token.
   CRISP_IDENTIFIER: z.string().optional().or(z.literal("")),
   CRISP_KEY: z.string().optional().or(z.literal("")),
-  // Secret used to encrypt per-brand Crisp keys at rest. Falls back to
-  // BASIC_AUTH_PASSWORD; set a dedicated value in production.
-  CREDENTIALS_SECRET: z.string().optional(),
   DATABASE_URL: z.string().url("DATABASE_URL must be a valid connection URL"),
   OPENAI_API_KEY: z.string().optional().or(z.literal("")),
   OPENAI_EMBEDDING_MODEL: z.string().default("text-embedding-3-small"),

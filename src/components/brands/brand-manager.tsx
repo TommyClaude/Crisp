@@ -6,7 +6,6 @@ import {
   Building2,
   CheckCircle2,
   Globe,
-  KeyRound,
   LoaderCircle,
   PackagePlus,
   Plug,
@@ -31,11 +30,8 @@ import { Label } from "@/components/ui/label";
 export interface BrandItem {
   id: string;
   name: string;
-  domain: string | null;
   crispWebsiteId: string;
-  crispIdentifier: string | null;
   wpProfileSlug: string | null;
-  hasCrispKey: boolean;
   pluginCount: number;
   conversationCount: number;
 }
@@ -44,7 +40,6 @@ export function BrandManager({ brands }: { brands: BrandItem[] }) {
   const router = useRouter();
   const [name, setName] = React.useState("");
   const [websiteId, setWebsiteId] = React.useState("");
-  const [domain, setDomain] = React.useState("");
   const [wpProfile, setWpProfile] = React.useState("");
   const [saving, setSaving] = React.useState(false);
 
@@ -58,7 +53,6 @@ export function BrandManager({ brands }: { brands: BrandItem[] }) {
         body: JSON.stringify({
           name: name.trim(),
           crispWebsiteId: websiteId.trim(),
-          domain: domain.trim() || undefined,
           wpProfileSlug: wpProfile.trim() || undefined,
         }),
       });
@@ -75,7 +69,6 @@ export function BrandManager({ brands }: { brands: BrandItem[] }) {
       });
       setName("");
       setWebsiteId("");
-      setDomain("");
       setWpProfile("");
       router.refresh();
     } catch {
@@ -97,7 +90,7 @@ export function BrandManager({ brands }: { brands: BrandItem[] }) {
         </CardHeader>
         <CardContent>
           <form onSubmit={createBrand} className="space-y-3">
-            <div className="grid gap-3 sm:grid-cols-[1fr_1.4fr_1fr_1fr_auto]">
+            <div className="grid gap-3 sm:grid-cols-[1fr_1.4fr_1fr_auto]">
               <div className="space-y-1.5">
                 <Label htmlFor="brand-name">Name</Label>
                 <Input
@@ -117,15 +110,6 @@ export function BrandManager({ brands }: { brands: BrandItem[] }) {
                   onChange={(e) => setWebsiteId(e.target.value)}
                   className="font-mono text-xs"
                   required
-                />
-              </div>
-              <div className="space-y-1.5">
-                <Label htmlFor="brand-domain">Domain (optional)</Label>
-                <Input
-                  id="brand-domain"
-                  placeholder="yaycommerce.com"
-                  value={domain}
-                  onChange={(e) => setDomain(e.target.value)}
                 />
               </div>
               <div className="space-y-1.5">
@@ -150,9 +134,9 @@ export function BrandManager({ brands }: { brands: BrandItem[] }) {
               </div>
             </div>
             <p className="text-muted-foreground text-xs">
-              New brands use the global CRISP_IDENTIFIER/CRISP_KEY from .env
-              until you set a per-brand Crisp token with the &ldquo;Set
-              token&rdquo; button below.
+              Brands authenticate with the global CRISP_IDENTIFIER/CRISP_KEY
+              from .env — a Crisp Marketplace plugin production token, so the
+              plugin must be installed on each brand&rsquo;s workspace.
             </p>
           </form>
         </CardContent>
@@ -177,10 +161,7 @@ export function BrandManager({ brands }: { brands: BrandItem[] }) {
 function BrandRow({ brand }: { brand: BrandItem }) {
   const router = useRouter();
   const [busy, setBusy] = React.useState<string | null>(null);
-  const [editingToken, setEditingToken] = React.useState(false);
   const [editingProfile, setEditingProfile] = React.useState(false);
-  const [identifier, setIdentifier] = React.useState(brand.crispIdentifier ?? "");
-  const [key, setKey] = React.useState("");
   const [profile, setProfile] = React.useState(brand.wpProfileSlug ?? "");
   const [testResult, setTestResult] = React.useState<{
     ok: boolean;
@@ -223,7 +204,7 @@ function BrandRow({ brand }: { brand: BrandItem }) {
       if (body.ok) {
         setTestResult({
           ok: true,
-          message: `Connected${body.usingEnvFallback ? " (using .env token)" : ""} — ${body.sampleCount} conversation(s) on page 1.`,
+          message: `Connected — ${body.sampleCount} conversation(s) on page 1.`,
         });
       } else {
         setTestResult({
@@ -233,35 +214,6 @@ function BrandRow({ brand }: { brand: BrandItem }) {
       }
     } catch {
       setTestResult({ ok: false, message: "Connection failed" });
-    } finally {
-      setBusy(null);
-    }
-  };
-
-  const saveToken = async (clear = false) => {
-    setBusy("token");
-    try {
-      const res = await fetch(`/api/brands/${brand.id}`, {
-        method: "PATCH",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(
-          clear
-            ? { crispIdentifier: "", crispKey: "" }
-            : { crispIdentifier: identifier.trim(), crispKey: key.trim() }
-        ),
-      });
-      const body = await res.json().catch(() => ({}));
-      if (!res.ok) {
-        toast.error(body.error ?? "Failed to save token");
-        return;
-      }
-      toast.success(clear ? "Token cleared" : "Token saved");
-      setEditingToken(false);
-      setKey("");
-      setTestResult(null);
-      router.refresh();
-    } catch {
-      toast.error("Failed to save token");
     } finally {
       setBusy(null);
     }
@@ -332,26 +284,6 @@ function BrandRow({ brand }: { brand: BrandItem }) {
         <div className="min-w-0 grow basis-56">
           <div className="flex flex-wrap items-center gap-2">
             <span className="text-sm font-medium">{brand.name}</span>
-            {brand.domain ? (
-              <span className="text-muted-foreground inline-flex items-center gap-1 text-xs">
-                <Globe className="size-3" />
-                {brand.domain}
-              </span>
-            ) : null}
-            {brand.hasCrispKey ? (
-              <Badge
-                variant="outline"
-                className="gap-1 border-emerald-200 text-emerald-700 dark:border-emerald-500/30 dark:text-emerald-400"
-              >
-                <KeyRound className="size-3" />
-                Token set
-              </Badge>
-            ) : (
-              <Badge variant="outline" className="text-muted-foreground gap-1">
-                <KeyRound className="size-3" />
-                Using .env
-              </Badge>
-            )}
             {brand.wpProfileSlug ? (
               <Badge variant="outline" className="font-mono text-[11px]">
                 wp.org/author/{brand.wpProfileSlug}
@@ -381,15 +313,6 @@ function BrandRow({ brand }: { brand: BrandItem }) {
               <Plug className="size-3.5" />
             )}
             Test
-          </Button>
-          <Button
-            variant="ghost"
-            size="sm"
-            onClick={() => setEditingToken((v) => !v)}
-            disabled={busy !== null}
-          >
-            <KeyRound className="size-3.5" />
-            {brand.hasCrispKey ? "Update token" : "Set token"}
           </Button>
           <Button
             variant="ghost"
@@ -448,65 +371,6 @@ function BrandRow({ brand }: { brand: BrandItem }) {
             <XCircle className="size-3.5 shrink-0" />
           )}
           {testResult.message}
-        </div>
-      ) : null}
-
-      {editingToken ? (
-        <div className="space-y-3 border-t px-4 py-3">
-          <div className="grid gap-3 sm:grid-cols-2">
-            <div className="space-y-1.5">
-              <Label className="text-xs">Token identifier</Label>
-              <Input
-                value={identifier}
-                onChange={(e) => setIdentifier(e.target.value)}
-                placeholder="token identifier"
-                className="font-mono text-xs"
-              />
-            </div>
-            <div className="space-y-1.5">
-              <Label className="text-xs">Token key</Label>
-              <Input
-                type="password"
-                value={key}
-                onChange={(e) => setKey(e.target.value)}
-                placeholder={
-                  brand.hasCrispKey ? "•••••• (enter to replace)" : "token key"
-                }
-                className="font-mono text-xs"
-              />
-            </div>
-          </div>
-          <div className="flex items-center gap-2">
-            <Button
-              size="sm"
-              onClick={() => saveToken(false)}
-              disabled={busy === "token" || !identifier.trim() || !key.trim()}
-            >
-              {busy === "token" ? (
-                <LoaderCircle className="size-3.5 animate-spin" />
-              ) : null}
-              Save token
-            </Button>
-            {brand.hasCrispKey ? (
-              <Button
-                variant="ghost"
-                size="sm"
-                className="text-muted-foreground"
-                onClick={() => saveToken(true)}
-                disabled={busy === "token"}
-              >
-                Clear token (use .env)
-              </Button>
-            ) : null}
-            <Button
-              variant="ghost"
-              size="sm"
-              onClick={() => setEditingToken(false)}
-              disabled={busy === "token"}
-            >
-              Cancel
-            </Button>
-          </div>
         </div>
       ) : null}
 

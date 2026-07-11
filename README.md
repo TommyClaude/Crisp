@@ -42,19 +42,18 @@ npm run dev                  # http://localhost:3000
 
 Then either run a real sync (`npm run sync:crisp`, needs Crisp credentials) or load fake data with `npm run seed:demo` to explore the UI immediately.
 
-## Crisp API tokens (per brand)
+## Crisp API token (one, global)
 
-Each brand is a separate Crisp **website**, and a Crisp REST API token only reaches its own website. So every brand gets its own token, entered in the `/brands` UI (the key is stored AES-256-GCM encrypted; `CREDENTIALS_SECRET` is the encryption secret).
+Each brand is a separate Crisp **website**, and a plain Crisp REST API token only reaches the website that created it. YayAssist instead uses a **production token from an approved Crisp Marketplace plugin**, which reaches every workspace the plugin is installed on — so a single `CRISP_IDENTIFIER`/`CRISP_KEY` pair in `.env` covers every brand.
 
-To create a token for one website:
+To bring a brand's website into scope:
 
-1. In the Crisp app, open that website, then **Website Settings → Advanced configuration**.
-2. Under **REST API + MCP Server Tokens**, click **Create Token**. When prompted for scopes, grant read access to conversations (`website:conversation:sessions`, `website:conversation:messages`).
-3. Copy the **Identifier** and **Key**.
-4. In YayAssist, go to `/brands`, add the brand (or click **Set token** on an existing one), paste the two values, and click **Test** to confirm the token reaches the website.
-5. Find the **website ID** in the Crisp app URL (`app.crisp.chat/website/<website_id>/...`) — enter it as the brand's Crisp website ID.
+1. Install the YayAssist Marketplace plugin on that Crisp workspace.
+2. Set `CRISP_IDENTIFIER`/`CRISP_KEY` in `.env` to the plugin's production token (once, not per brand).
+3. Find the **website ID** in the Crisp app URL (`app.crisp.chat/website/<website_id>/...`) — enter it as the brand's Crisp website ID when adding it in `/brands`.
+4. Click **Test** on the brand row to confirm the token reaches that website.
 
-> A single token that spans multiple websites requires a **public** Marketplace plugin (Crisp review). For an internal tool, per-website tokens are simpler. The global `CRISP_IDENTIFIER`/`CRISP_KEY` in `.env` remain as an optional fallback for brands without their own token.
+> `CRISP_WEBSITE_ID` remains as a legacy single-website fallback, only used when no brands exist yet.
 
 ## Environment variables
 
@@ -63,9 +62,8 @@ Copy `.env.example` to `.env`. Validated at startup by `src/env.ts` (Zod) — in
 | Variable | Required | Default | Purpose |
 | --- | --- | --- | --- |
 | `CRISP_WEBSITE_ID` | no (legacy) | — | Single-website fallback, used only when no brands exist yet. Prefer adding brands (one per Crisp website) in `/brands` |
-| `CREDENTIALS_SECRET` | no | `BASIC_AUTH_PASSWORD` | Secret to encrypt per-brand Crisp keys at rest (AES-256-GCM). Set a dedicated random value in production |
-| `CRISP_IDENTIFIER` | no | — | Global fallback token identifier. Brands normally carry their own token (see below); used only for brands without one |
-| `CRISP_KEY` | no | — | Global fallback token key. Per-brand tokens (managed in `/brands`) take precedence |
+| `CRISP_IDENTIFIER` | no | — | Crisp Marketplace plugin production token identifier, shared by every brand (see above) |
+| `CRISP_KEY` | no | — | Crisp Marketplace plugin production token key, shared by every brand |
 | `DATABASE_URL` | yes | — | Postgres connection URL |
 | `OPENAI_API_KEY` | no | empty | Enables embedding generation for vector/hybrid RAG search. Unset → keyword search only |
 | `OPENAI_EMBEDDING_MODEL` | no | `text-embedding-3-small` | Embedding model (1536 dimensions) |
@@ -213,9 +211,9 @@ All routes require Basic auth (see Security). All bodies/queries are Zod-validat
 | `GET` | `/api/conversations/{sessionId}` | Full conversation detail: messages, files, operator, chunk summaries |
 | `GET` | `/api/rag/search` | RAG search. Query: `query` (required), `limit` (default 8, max 50), `source` (`crisp_chat`\|`plugin_docs`\|`wporg_forum`), `pluginId`, `brandId` |
 | `POST` | `/api/rag/chunks/rebuild` | Rebuild chat chunks. Body `{sessionId?, onlyResolved?, withEmbeddings?}`. Single session is synchronous; full rebuild runs in the background (`202`, `409` if already running) |
-| `GET`/`POST` | `/api/brands` | List brands / create a brand `{name, crispWebsiteId, domain?, wpProfileSlug?}` (adopts already-synced conversations with that website ID) |
-| `PATCH`/`DELETE` | `/api/brands/{id}` | Update or delete a brand — including its Crisp token and `wpProfileSlug` (conversations are kept; plugins/docs cascade) |
-| `POST` | `/api/brands/{id}/test` | Verify the brand's Crisp token can reach its website (page-1 probe) |
+| `GET`/`POST` | `/api/brands` | List brands / create a brand `{name, crispWebsiteId, wpProfileSlug?}` (adopts already-synced conversations with that website ID) |
+| `PATCH`/`DELETE` | `/api/brands/{id}` | Update or delete a brand — name, `crispWebsiteId`, `wpProfileSlug` (conversations are kept; plugins/docs cascade) |
+| `POST` | `/api/brands/{id}/test` | Verify the global Crisp token can reach the brand's website (page-1 probe) |
 | `POST` | `/api/brands/{id}/import-plugins` | Bulk-create a Plugin (+ idle Forum Q&A source) for every plugin published by the brand's `wpProfileSlug` wp.org author; existing plugins (by wp.org slug or derived name) are skipped, nothing is ingested. `502` on wp.org API failure |
 | `GET`/`POST` | `/api/plugins` | List plugins (with docs sources) / create `{brandId, name, wpOrgSlug?, detectionKeywords?}` |
 | `PATCH`/`DELETE` | `/api/plugins/{id}` | Update or delete a plugin (docs pages + doc chunks cascade) |

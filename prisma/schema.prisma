@@ -16,20 +16,15 @@ datasource db {
 }
 
 // A brand = one Crisp website (e.g. YayCommerce, Ninja Team). Sync iterates
-// all brands; CRISP_WEBSITE_ID in .env is only a legacy single-site fallback
-// used when this table is empty.
+// all brands, authenticating with the single global CRISP_IDENTIFIER/CRISP_KEY
+// in .env (a Crisp Marketplace plugin production token, installed on every
+// brand's workspace); CRISP_WEBSITE_ID in .env is only a legacy single-site
+// fallback used when this table is empty.
 model Brand {
   id             String   @id @default(cuid())
   name           String
   slug           String   @unique
-  domain         String?
   crispWebsiteId String   @unique
-  // Per-brand Crisp REST API token. Each Crisp website needs its own token
-  // (a private/development token only reaches its trusted workspace). The
-  // key is stored AES-256-GCM encrypted; when unset, sync falls back to the
-  // CRISP_IDENTIFIER/CRISP_KEY in .env.
-  crispIdentifier String?
-  crispKeyEnc     String?
   // wordpress.org author username used to bulk-import the brand's plugins
   // (from wordpress.org/plugins/author/<slug>/) with one click on /brands.
   wpProfileSlug  String?

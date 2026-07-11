@@ -22,11 +22,8 @@ export default async function BrandsPage() {
         brands={brands.map((brand) => ({
           id: brand.id,
           name: brand.name,
-          domain: brand.domain,
           crispWebsiteId: brand.crispWebsiteId,
-          crispIdentifier: brand.crispIdentifier,
           wpProfileSlug: brand.wpProfileSlug,
-          hasCrispKey: Boolean(brand.crispKeyEnc),
           pluginCount: brand._count.plugins,
           conversationCount: brand._count.conversations,
         }))}

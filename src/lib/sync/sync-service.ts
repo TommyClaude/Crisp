@@ -1,7 +1,6 @@
 import { prisma } from "@/lib/db";
 import { getEnv } from "@/env";
 import { CrispApiError, CrispClient } from "@/lib/crisp/client";
-import { decryptSecret } from "@/lib/crypto";
 import type { CrispConversation, CrispMessage } from "@/lib/crisp/types";
 import { rebuildChunksForConversation } from "@/lib/rag/rebuild";
 import {
@@ -37,55 +36,30 @@ export interface SyncTarget {
   brandId: string | null;
   websiteId: string;
   name: string;
-  /** Per-brand token; when null the env CRISP_IDENTIFIER/CRISP_KEY is used. */
-  identifier: string | null;
-  key: string | null;
-}
-
-/** Resolve a brand's Crisp token, decrypting the stored key. */
-export function brandCredentials(brand: {
-  crispIdentifier: string | null;
-  crispKeyEnc: string | null;
-}): { identifier: string | null; key: string | null } {
-  if (!brand.crispIdentifier || !brand.crispKeyEnc) {
-    return { identifier: null, key: null };
-  }
-  try {
-    return {
-      identifier: brand.crispIdentifier,
-      key: decryptSecret(brand.crispKeyEnc),
-    };
-  } catch (error) {
-    console.error("Failed to decrypt a brand's Crisp key:", error);
-    return { identifier: null, key: null };
-  }
-}
-
-/** A Crisp client for a target, using its token or the env fallback. */
-export function crispClientForTarget(target: SyncTarget): CrispClient {
-  return new CrispClient({
-    identifier: target.identifier ?? undefined,
-    key: target.key ?? undefined,
-  });
 }
 
 /**
- * Websites to sync: every Brand in the database (each with its own token),
- * or — when none are configured yet — the legacy CRISP_WEBSITE_ID from .env.
+ * A Crisp client for a target. Every brand authenticates with the same
+ * global CRISP_IDENTIFIER/CRISP_KEY in .env (a Crisp Marketplace plugin
+ * production token, installed on every brand's workspace) — there is no
+ * per-brand credential to resolve.
+ */
+export function crispClientForTarget(): CrispClient {
+  return new CrispClient();
+}
+
+/**
+ * Websites to sync: every Brand in the database, or — when none are
+ * configured yet — the legacy CRISP_WEBSITE_ID from .env.
  */
 export async function getSyncTargets(): Promise<SyncTarget[]> {
   const brands = await prisma.brand.findMany({ orderBy: { createdAt: "asc" } });
   if (brands.length > 0) {
-    return brands.map((brand) => {
-      const creds = brandCredentials(brand);
-      return {
-        brandId: brand.id,
-        websiteId: brand.crispWebsiteId,
-        name: brand.name,
-        identifier: creds.identifier,
-        key: creds.key,
-      };
-    });
+    return brands.map((brand) => ({
+      brandId: brand.id,
+      websiteId: brand.crispWebsiteId,
+      name: brand.name,
+    }));
   }
   const env = getEnv();
   if (env.CRISP_WEBSITE_ID) {
@@ -98,8 +72,6 @@ export async function getSyncTargets(): Promise<SyncTarget[]> {
         brandId: null,
         websiteId: env.CRISP_WEBSITE_ID,
         name: "default",
-        identifier: null,
-        key: null,
       },
     ];
   }
@@ -297,15 +269,17 @@ export async function resyncConversation(sessionId: string): Promise<{
       ]
     : targets;
 
+  // One client across the candidate probes — same token everywhere, and the
+  // instance's inter-request pacing should span the whole probe sequence.
+  const probeClient = crispClientForTarget();
   for (const candidate of knownFirst) {
-    const candidateClient = crispClientForTarget(candidate);
     try {
-      conversation = await candidateClient.getConversation(
+      conversation = await probeClient.getConversation(
         candidate.websiteId,
         sessionId
       );
       target = candidate;
-      client = candidateClient;
+      client = probeClient;
       break;
     } catch (error) {
       if (error instanceof CrispApiError && error.status === 404) continue;
@@ -381,17 +355,16 @@ async function runSync(options: RunSyncOptions): Promise<SyncRunResult> {
   try {
     const targets = await getSyncTargets();
     // Remember which website a failed session belongs to for the retry pass,
-    // and reuse one client per brand so rate limiting stays per-token.
+    // and reuse one client per brand so each brand's requests queue and rate
+    // limit independently.
     const failedTargets = new Map<string, SyncTarget>();
-    const clientsByTarget = new Map<string, CrispClient>();
-    const clientFor = (target: SyncTarget): CrispClient => {
-      const cacheKey = target.brandId ?? "__env__";
-      let c = clientsByTarget.get(cacheKey);
-      if (!c) {
-        c = crispClientForTarget(target);
-        clientsByTarget.set(cacheKey, c);
-      }
-      return c;
+    // Every brand authenticates with the same global token, so one shared
+    // client for the whole run keeps a single request queue and a single
+    // inter-request pacing state — no burst at brand boundaries.
+    let sharedClient: CrispClient | null = null;
+    const clientFor = (): CrispClient => {
+      sharedClient ??= crispClientForTarget();
+      return sharedClient;
     };
 
     for (let t = 0; t < targets.length; t++) {
@@ -403,7 +376,7 @@ async function runSync(options: RunSyncOptions): Promise<SyncRunResult> {
 
       let client: CrispClient;
       try {
-        client = clientFor(target);
+        client = clientFor();
       } catch (error) {
         // Missing/invalid token for this brand — skip it, don't abort others.
         const message = `${target.name}: ${error instanceof Error ? error.message : String(error)}`;
@@ -528,7 +501,7 @@ async function runSync(options: RunSyncOptions): Promise<SyncRunResult> {
         }
         state.statusMessage = `retrying failed conversation ${sessionId}`;
         try {
-          const client = clientFor(target);
+          const client = clientFor();
           const conversation = await client.getConversation(
             target.websiteId,
             sessionId

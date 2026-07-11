@@ -56,8 +56,8 @@ export class CrispClient {
     const key = options?.key || env.CRISP_KEY;
     if (!identifier || !key) {
       throw new Error(
-        "No Crisp token available — set the brand's token in /brands, or " +
-          "CRISP_IDENTIFIER/CRISP_KEY in .env."
+        "No Crisp token available — set CRISP_IDENTIFIER/CRISP_KEY in .env " +
+          "(the Crisp Marketplace plugin's production token)."
       );
     }
     this.minIntervalMs =
