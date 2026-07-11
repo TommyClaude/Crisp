@@ -226,7 +226,7 @@ All routes require Basic auth (see Security). All bodies/queries are Zod-validat
 
 | Page | What it shows |
 | --- | --- |
-| `/dashboard` | Global overview: open topics / drafts ready / reviewed, knowledge-chunk totals (chats vs docs vs forum), latest forum topics, knowledge-source summary |
+| `/dashboard` | Global overview: open topics / drafts ready / reviewed, knowledge-chunk totals, latest forum topics, and the **Knowledge coverage** panel — per-source chunked/embedded accounting with failed-source and crawl-cap warnings plus the active search tier |
 | `/crisp/dashboard` | Crisp tab: conversation/message/brand totals, sync controls with live progress, recent sync log table |
 | `/crisp/conversations` | Crisp tab: filterable, paginated conversation list (state, tag, product, brand, operator, email, attachments, date range, search) |
 | `/crisp/conversations/{sessionId}` | Chat-style message log with attachments, visitor panel (masked PII), resync/rebuild actions, chunk summaries |

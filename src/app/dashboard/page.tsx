@@ -6,10 +6,10 @@ import {
   BookOpen,
   Inbox,
   Lightbulb,
-  MessagesSquare,
   Sparkles,
 } from "lucide-react";
 
+import { KnowledgeCoveragePanel } from "@/components/dashboard/knowledge-coverage";
 import { ThreadStatusBadge } from "@/components/state-badge";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -21,8 +21,7 @@ import {
   CardHeader,
   CardTitle,
 } from "@/components/ui/card";
-import { Separator } from "@/components/ui/separator";
-import { getGlobalStats } from "@/lib/stats";
+import { getGlobalStats, getKnowledgeCoverage } from "@/lib/stats";
 
 export const dynamic = "force-dynamic";
 
@@ -33,7 +32,10 @@ export const metadata: Metadata = {
 const numberFormat = new Intl.NumberFormat("en-US");
 
 export default async function GlobalDashboardPage() {
-  const stats = await getGlobalStats();
+  const [stats, coverage] = await Promise.all([
+    getGlobalStats(),
+    getKnowledgeCoverage(),
+  ]);
   const needsAttention =
     (stats.threadsByStatus.new ?? 0) + (stats.threadsByStatus.failed ?? 0);
 
@@ -160,95 +162,10 @@ export default async function GlobalDashboardPage() {
           </CardContent>
         </Card>
 
-        {/* Knowledge sources */}
-        <Card className="lg:col-span-2">
-          <CardHeader>
-            <CardTitle className="flex items-center gap-2 text-base">
-              <BookOpen className="text-muted-foreground size-4" />
-              Knowledge sources
-            </CardTitle>
-            <CardDescription>
-              What the suggester has learned from.
-            </CardDescription>
-          </CardHeader>
-          <CardContent className="space-y-4">
-            <div>
-              <div className="flex items-center justify-between">
-                <p className="flex items-center gap-2 text-sm font-medium">
-                  <MessagesSquare className="text-muted-foreground size-4" />
-                  Crisp conversations
-                </p>
-                <Button asChild variant="ghost" size="sm" className="h-7 px-2 text-xs">
-                  <Link href="/crisp/dashboard">
-                    Open
-                    <ArrowRight className="size-3" />
-                  </Link>
-                </Button>
-              </div>
-              <dl className="text-muted-foreground mt-2 space-y-1 text-xs">
-                <div className="flex justify-between">
-                  <dt>Conversations</dt>
-                  <dd className="text-foreground tabular-nums">
-                    {numberFormat.format(stats.conversationCount)}
-                  </dd>
-                </div>
-                <div className="flex justify-between">
-                  <dt>Messages</dt>
-                  <dd className="text-foreground tabular-nums">
-                    {numberFormat.format(stats.messageCount)}
-                  </dd>
-                </div>
-                <div className="flex justify-between">
-                  <dt>Last sync</dt>
-                  <dd className="text-foreground" suppressHydrationWarning>
-                    {stats.lastSync?.finishedAt
-                      ? formatDistanceToNow(stats.lastSync.finishedAt, {
-                          addSuffix: true,
-                        })
-                      : "never"}
-                  </dd>
-                </div>
-              </dl>
-            </div>
-
-            <Separator />
-
-            <div>
-              <div className="flex items-center justify-between">
-                <p className="flex items-center gap-2 text-sm font-medium">
-                  <BookOpen className="text-muted-foreground size-4" />
-                  Documentation
-                </p>
-                <Button asChild variant="ghost" size="sm" className="h-7 px-2 text-xs">
-                  <Link href="/plugins">
-                    Open
-                    <ArrowRight className="size-3" />
-                  </Link>
-                </Button>
-              </div>
-              <dl className="text-muted-foreground mt-2 space-y-1 text-xs">
-                <div className="flex justify-between">
-                  <dt>Docs pages indexed</dt>
-                  <dd className="text-foreground tabular-nums">
-                    {numberFormat.format(stats.docsPageCount)}
-                  </dd>
-                </div>
-                <div className="flex justify-between">
-                  <dt>Plugins</dt>
-                  <dd className="text-foreground tabular-nums">
-                    {numberFormat.format(stats.pluginCount)}
-                  </dd>
-                </div>
-                <div className="flex justify-between">
-                  <dt>Brands</dt>
-                  <dd className="text-foreground tabular-nums">
-                    {numberFormat.format(stats.brandCount)}
-                  </dd>
-                </div>
-              </dl>
-            </div>
-          </CardContent>
-        </Card>
+        <KnowledgeCoveragePanel
+          coverage={coverage}
+          lastSyncAt={stats.lastSync?.finishedAt ?? null}
+        />
       </section>
     </div>
   );
