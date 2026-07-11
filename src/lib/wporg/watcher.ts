@@ -1,14 +1,16 @@
 import { prisma } from "@/lib/db";
 import { getEnv } from "@/env";
 import { generateSuggestionForThread } from "@/lib/suggest/suggester";
+import { fetchTopicThread } from "@/lib/wporg/forum-crawler";
 import {
   beginCheckProgress,
   endCheckProgress,
   getCheckProgress,
   isCheckRunning,
   type CheckHaltReason,
+  type CheckProgress,
 } from "./check-state";
-import { fetchForumTopics } from "./feed";
+import { fetchForumFeed, type ForumReply } from "./feed";
 
 /**
  * WordPress.org forum watcher: polls the support-forum feed of every plugin
@@ -29,6 +31,11 @@ export interface WatcherResult {
   drafted: number;
   /** Feed topics skipped for being older than WPORG_TOPIC_MAX_AGE_DAYS. */
   skippedOld: number;
+  /**
+   * Old topics resurfaced by a fresh customer reply: an existing thread
+   * flagged, or a thread created for a customer-last old topic.
+   */
+  resurfaced: number;
   /** Terminal status of the run. */
   status: "completed" | "paused" | "cancelled" | "failed";
   /** Highest 1-based plugin index fully processed (the resume point). */
@@ -38,6 +45,132 @@ export interface WatcherResult {
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/** Politeness delay between separate live-thread fetches (mirrors the
+ *  between-plugins feed delay). */
+const FEED_POLITENESS_MS = 500;
+
+/**
+ * Cap on the excerpt stored for a resurfaced topic's ORIGINAL first post —
+ * mirrors MAX_EXCERPT_CHARS in feed.ts (kept in sync by hand; not exported
+ * there to avoid coupling the crawler to the feed reader).
+ */
+const RESURFACE_EXCERPT_CHARS = 4000;
+
+/**
+ * Resurface topics that got a fresh customer reply. For each plugin's reply
+ * feed items (newest kept per topic) within the age cutoff, cheaply dedupe by
+ * the stored lastReplyAt, then fetch the live thread ONCE and inspect the last
+ * post's role:
+ *   - support-team-last → record lastReplyAt (so a later check won't refetch)
+ *     but do NOT flag/create;
+ *   - customer-last + existing thread → flag hasNewReply + bump dates;
+ *   - customer-last + missing thread → create it from the fetched first post.
+ * No drafting happens here (cost control) — the admin regenerates.
+ */
+async function resurfaceReplies(
+  plugin: { id: string; name: string },
+  replies: ForumReply[],
+  ageCutoffMs: number,
+  result: WatcherResult,
+  state: CheckProgress,
+  /** Ids flagged hasNewReply this run — lets the drafting phase restore the flag. */
+  flaggedIds: Set<string>
+): Promise<void> {
+  // Collapse to the newest reply per topic so each topic is fetched at most
+  // once per check, regardless of feed ordering or several reply items.
+  const newestByTopic = new Map<string, ForumReply>();
+  for (const reply of replies) {
+    // No date → can't age-check or dedupe cheaply; skip (avoids a refetch).
+    if (!reply.publishedAt) continue;
+    // The cutoff applies to the REPLY date — the topic itself may be years old.
+    if (reply.publishedAt.getTime() < ageCutoffMs) continue;
+    const seen = newestByTopic.get(reply.topicGuid);
+    if (!seen || reply.publishedAt > seen.publishedAt!) {
+      newestByTopic.set(reply.topicGuid, reply);
+    }
+  }
+
+  for (const reply of newestByTopic.values()) {
+    // Honour Pause/Stop promptly — each candidate costs a politeness sleep
+    // plus a live-thread fetch. Unprocessed replies are retried (and deduped
+    // via lastReplyAt) on the next check.
+    if (state.cancelRequested) break;
+    const replyDate = reply.publishedAt!;
+    const existing = await prisma.supportThread.findUnique({
+      where: { pluginId_guid: { pluginId: plugin.id, guid: reply.topicGuid } },
+      select: { id: true, lastReplyAt: true },
+    });
+    // Already processed a reply at least this recent — nothing new.
+    if (existing?.lastReplyAt && existing.lastReplyAt >= replyDate) continue;
+
+    // Fetch the live thread once to read the last post's role. Be polite.
+    await sleep(FEED_POLITENESS_MS);
+    let fetched;
+    try {
+      fetched = await fetchTopicThread(reply.topicUrl);
+    } catch (error) {
+      result.errors.push(
+        `resurface ${reply.topicUrl}: ${error instanceof Error ? error.message : String(error)}`
+      );
+      continue;
+    }
+    // Fetch failed or nothing parsed — leave it for the next check to retry.
+    if (!fetched || fetched.posts.length === 0) continue;
+
+    const lastPost = fetched.posts[fetched.posts.length - 1];
+    // wp.org tags support-team posts with a role badge; a bare (roleless) last
+    // post means the customer spoke last and the thread is waiting on support.
+    const customerLast = lastPost.role == null;
+
+    if (!customerLast) {
+      // Support answered last. Record lastReplyAt to skip refetching next time;
+      // don't flag, and don't create a row for a topic we weren't tracking.
+      if (existing) {
+        await prisma.supportThread.update({
+          where: { id: existing.id },
+          data: { lastReplyAt: replyDate },
+        });
+      }
+      continue;
+    }
+
+    if (existing) {
+      await prisma.supportThread.update({
+        where: { id: existing.id },
+        data: {
+          hasNewReply: true,
+          lastReplyAt: replyDate,
+          lastActivityAt: replyDate,
+        },
+      });
+      flaggedIds.add(existing.id);
+    } else {
+      const firstPost = fetched.posts[0];
+      const created = await prisma.supportThread.create({
+        data: {
+          pluginId: plugin.id,
+          guid: reply.topicGuid,
+          url: reply.topicUrl,
+          title: fetched.title ?? reply.topicUrl,
+          author: firstPost.author,
+          // parseTopicPage carries no per-post dates, so the topic's original
+          // publish date is unknown here — left null. lastActivityAt still
+          // sorts it into "Recent" by the reply date.
+          excerpt: firstPost.text.slice(0, RESURFACE_EXCERPT_CHARS),
+          publishedAt: null,
+          status: "new",
+          hasNewReply: true,
+          lastReplyAt: replyDate,
+          lastActivityAt: replyDate,
+        },
+      });
+      flaggedIds.add(created.id);
+    }
+    result.resurfaced += 1;
+    state.resurfaced += 1;
+  }
 }
 
 /** True while a forum check is in progress (delegates to the check-state singleton). */
@@ -82,6 +215,7 @@ export async function checkPluginForums(options?: {
     newThreads: 0,
     drafted: 0,
     skippedOld: 0,
+    resurfaced: 0,
     status: "completed",
     lastIndex: null,
     errors: [],
@@ -113,6 +247,10 @@ export async function checkPluginForums(options?: {
     );
 
     const newThreadIds: string[] = [];
+    // Threads flagged hasNewReply this run — the drafting phase clears the
+    // flag as a side effect of generateSuggestionForThread, so it must be
+    // restored for threads that were both created and resurfaced in one poll.
+    const flaggedIds = new Set<string>();
     let halted: CheckHaltReason | null = null;
     let lastIndex = startIndex - 1;
 
@@ -136,7 +274,7 @@ export async function checkPluginForums(options?: {
       state.currentFeedTopics = null;
       result.pluginsChecked += 1;
       try {
-        const topics = await fetchForumTopics(plugin.wpOrgSlug);
+        const { topics, replies } = await fetchForumFeed(plugin.wpOrgSlug);
         state.currentFeedTopics = topics.length;
         for (const topic of topics) {
           // Skip topics older than the cutoff. Topics with no publish date
@@ -160,12 +298,17 @@ export async function checkPluginForums(options?: {
               author: topic.author,
               excerpt: topic.excerpt,
               publishedAt: topic.publishedAt,
+              // lastActivityAt drives the "Recent" tab: the publish date for a
+              // fresh topic (falling back to now when the feed omits it).
+              lastActivityAt: topic.publishedAt ?? new Date(),
             },
           });
           result.newThreads += 1;
           state.newThreads += 1;
           newThreadIds.push(thread.id);
         }
+        // Resurface old topics bumped by a fresh customer reply (reply items).
+        await resurfaceReplies(plugin, replies, ageCutoffMs, result, state, flaggedIds);
       } catch (error) {
         const message = `${plugin.name}: ${error instanceof Error ? error.message : String(error)}`;
         console.error("Forum check failed for", message);
@@ -192,6 +335,14 @@ export async function checkPluginForums(options?: {
             result.drafted += 1;
             state.drafted += 1;
           }
+          // Drafting clears hasNewReply; a topic that was created AND
+          // resurfaced in this same poll must keep its badge.
+          if (flaggedIds.has(threadId)) {
+            await prisma.supportThread.update({
+              where: { id: threadId },
+              data: { hasNewReply: true },
+            });
+          }
         } catch (error) {
           result.errors.push(
             `suggestion ${threadId}: ${error instanceof Error ? error.message : String(error)}`
@@ -211,13 +362,15 @@ export async function checkPluginForums(options?: {
         newThreads: result.newThreads,
         drafted: result.drafted,
         skippedOld: result.skippedOld,
+        resurfaced: result.resurfaced,
         lastIndex: result.lastIndex,
         errors: result.errors,
       },
     });
     console.log(
       `[wporg] check ${result.status}: ${result.pluginsChecked} plugins, ${result.newThreads} new, ` +
-        `${result.drafted} drafted, ${result.skippedOld} skipped (old), ${result.errors.length} error(s)`
+        `${result.resurfaced} resurfaced, ${result.drafted} drafted, ${result.skippedOld} skipped (old), ` +
+        `${result.errors.length} error(s)`
     );
     return result;
   } catch (error) {
@@ -237,6 +390,7 @@ export async function checkPluginForums(options?: {
           newThreads: result.newThreads,
           drafted: result.drafted,
           skippedOld: result.skippedOld,
+          resurfaced: result.resurfaced,
           lastIndex: result.lastIndex,
           errors: result.errors,
         },

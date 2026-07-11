@@ -257,6 +257,9 @@ export async function generateSuggestionForThread(
       draftsJson: drafts as object[],
       contextJson: contextChunks as object[],
       suggestError,
+      // (Re)generating drafts is the admin acting on the topic — clear the
+      // "New reply" flag so a resurfaced thread stops showing the badge.
+      hasNewReply: false,
     },
   });
 

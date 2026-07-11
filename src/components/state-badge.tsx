@@ -73,6 +73,24 @@ export function ThreadStatusBadge({
   );
 }
 
+/**
+ * Compact "New reply" badge for a support thread that a customer just bumped
+ * with a fresh reply (SupportThread.hasNewReply). Sky-toned so it reads as
+ * distinct from the status badge sitting next to it.
+ */
+export function NewReplyBadge({ className }: { className?: string }) {
+  return (
+    <Badge
+      className={cn(
+        "border-transparent bg-sky-100 text-sky-700 dark:bg-sky-500/15 dark:text-sky-400",
+        className
+      )}
+    >
+      New reply
+    </Badge>
+  );
+}
+
 /** Avatar-fallback initials derived from a nickname or email. */
 export function initialsOf(
   nickname: string | null | undefined,

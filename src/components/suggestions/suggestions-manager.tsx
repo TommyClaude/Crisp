@@ -5,6 +5,10 @@ import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import { formatDistanceToNow } from "date-fns";
 import {
   Check,
+  ChevronDown,
+  ChevronRight,
+  ChevronsDownUp,
+  ChevronsUpDown,
   EllipsisVertical,
   ExternalLink,
   Lightbulb,
@@ -19,7 +23,7 @@ import {
 } from "lucide-react";
 import { toast } from "sonner";
 
-import { ThreadStatusBadge } from "@/components/state-badge";
+import { NewReplyBadge, ThreadStatusBadge } from "@/components/state-badge";
 import {
   ContextChunkList,
   DraftCards,
@@ -41,6 +45,7 @@ import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
+  DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { Input } from "@/components/ui/input";
@@ -69,12 +74,17 @@ export interface SuggestionThreadItem {
   // Present once the manual Regenerate action has drafted a follow-up reply
   // (or recorded why it was skipped); null until then.
   followup: FollowupView | null;
+  // A customer posted a fresh reply on this (possibly old) topic — drives the
+  // "New reply" badge. Cleared on regenerate or a status change.
+  hasNewReply: boolean;
   publishedAt: string | null;
   fetchedAt: string;
   plugin: { id: string; name: string };
 }
 
 const STATUS_FILTERS = ["all", "new", "drafted", "failed", "reviewed", "dismissed"];
+/** The no-status-filter tab keeps the "all" value but reads as "Recent". */
+const STATUS_LABELS: Record<string, string> = { all: "Recent" };
 const ALL = "__all__";
 
 /** Progress payload from GET /api/wporg/suggest-missing. */
@@ -107,6 +117,7 @@ interface CheckProgress {
   drafted: number;
   draftsDone: number;
   skippedOld: number;
+  resurfaced: number;
   startedAt: string | null;
   cancelRequested: boolean;
   cancelReason: "cancelled" | "paused";
@@ -122,6 +133,7 @@ export interface ForumCheckLogView {
   newThreads: number;
   drafted: number;
   skippedOld: number;
+  resurfaced: number;
   lastIndex: number | null;
   errors: string[];
 }
@@ -175,6 +187,25 @@ export function SuggestionsManager({
   const [bulk, setBulk] = React.useState<BulkDraftProgress>(BULK_IDLE);
   const [bulkStarting, setBulkStarting] = React.useState(false);
   const bulkWasRunning = React.useRef(false);
+
+  // Accordion cards are collapsed by default (empty set = none expanded). The
+  // kebab's Expand/Collapse all and each card's chevron toggle membership here.
+  const [expandedIds, setExpandedIds] = React.useState<Set<string>>(
+    () => new Set()
+  );
+  const toggleExpanded = React.useCallback((id: string) => {
+    setExpandedIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  }, []);
+  const expandAll = React.useCallback(
+    () => setExpandedIds(new Set(threads.map((t) => t.id))),
+    [threads]
+  );
+  const collapseAll = React.useCallback(() => setExpandedIds(new Set()), []);
 
   // Forum-check progress: seeded from the server so an in-flight check (this
   // tab, another tab, or one started before navigation) shows with no flash,
@@ -426,7 +457,7 @@ export function SuggestionsManager({
               className="h-7 px-2.5 text-xs capitalize"
               onClick={() => setParam("status", status)}
             >
-              {status}
+              {STATUS_LABELS[status] ?? status}
             </Button>
           ))}
         </div>
@@ -490,6 +521,21 @@ export function SuggestionsManager({
                       </span>
                     ) : null}
                   </div>
+                </DropdownMenuItem>
+                <DropdownMenuSeparator />
+                <DropdownMenuItem
+                  disabled={threads.length === 0}
+                  onSelect={expandAll}
+                >
+                  <ChevronsUpDown className="size-3.5" />
+                  Expand all
+                </DropdownMenuItem>
+                <DropdownMenuItem
+                  disabled={threads.length === 0}
+                  onSelect={collapseAll}
+                >
+                  <ChevronsDownUp className="size-3.5" />
+                  Collapse all
                 </DropdownMenuItem>
               </DropdownMenuContent>
             </DropdownMenu>
@@ -625,6 +671,8 @@ export function SuggestionsManager({
           <span aria-hidden>·</span>
           <span>{checkProgress.newThreads} new</span>
           <span aria-hidden>·</span>
+          <span>{checkProgress.resurfaced} resurfaced</span>
+          <span aria-hidden>·</span>
           <span>{checkProgress.drafted} drafted</span>
           <span aria-hidden>·</span>
           <span>{checkProgress.skippedOld} skipped (old)</span>
@@ -643,6 +691,12 @@ export function SuggestionsManager({
             </span>
             <span aria-hidden>—</span>
             <span>{pluralTopics(lastCheck.newThreads)}</span>
+            {lastCheck.resurfaced > 0 ? (
+              <>
+                <span aria-hidden>·</span>
+                <span>{lastCheck.resurfaced} resurfaced</span>
+              </>
+            ) : null}
             <span aria-hidden>·</span>
             <span>{lastCheck.drafted} drafted</span>
             <span aria-hidden>·</span>
@@ -705,6 +759,8 @@ export function SuggestionsManager({
             key={thread.id}
             thread={thread}
             llmConfigured={llmConfigured}
+            expanded={expandedIds.has(thread.id)}
+            onToggle={() => toggleExpanded(thread.id)}
           />
         ))
       )}
@@ -712,12 +768,32 @@ export function SuggestionsManager({
   );
 }
 
+/** Collapsed one-liner: what's inside the card without opening it. */
+function summarizeThread(thread: SuggestionThreadItem): string {
+  const parts: string[] = [];
+  const draftCount = thread.drafts.filter((draft) => draft.text).length;
+  if (draftCount > 0) {
+    parts.push(`${draftCount} draft${draftCount === 1 ? "" : "s"}`);
+  }
+  if (thread.followup?.drafts.some((draft) => draft.text)) {
+    parts.push("follow-up");
+  }
+  if (thread.contextChunks.length > 0) {
+    parts.push(`${thread.contextChunks.length} context`);
+  }
+  return parts.length > 0 ? parts.join(" · ") : "No drafts yet";
+}
+
 function ThreadCard({
   thread,
   llmConfigured,
+  expanded,
+  onToggle,
 }: {
   thread: SuggestionThreadItem;
   llmConfigured: boolean;
+  expanded: boolean;
+  onToggle: () => void;
 }) {
   const router = useRouter();
   const [busy, setBusy] = React.useState<string | null>(null);
@@ -761,31 +837,62 @@ function ThreadCard({
   return (
     <Card className="gap-3 py-4">
       <CardHeader className="px-4">
-        <div className="flex min-w-0 flex-wrap items-center gap-2">
-          <ThreadStatusBadge status={thread.status} />
-          <Badge variant="secondary">{thread.plugin.name}</Badge>
-          {thread.publishedAt ? (
-            <span className="text-muted-foreground text-xs" suppressHydrationWarning>
-              {formatDistanceToNow(new Date(thread.publishedAt), { addSuffix: true })}
-            </span>
-          ) : null}
-          {thread.author ? (
-            <span className="text-muted-foreground text-xs">by {thread.author}</span>
-          ) : null}
-        </div>
-        <CardTitle className="text-sm leading-snug">
-          <a
-            href={thread.url}
-            target="_blank"
-            rel="noreferrer"
-            className="group inline-flex items-start gap-1 hover:text-blue-600 dark:hover:text-blue-400"
+        <div className="flex items-start gap-2">
+          <button
+            type="button"
+            onClick={onToggle}
+            aria-expanded={expanded}
+            aria-label={expanded ? "Collapse topic" : "Expand topic"}
+            className="text-muted-foreground hover:text-foreground mt-0.5 shrink-0 rounded transition-colors"
           >
-            {thread.title}
-            <ExternalLink className="mt-0.5 size-3.5 shrink-0 opacity-50 group-hover:opacity-100" />
-          </a>
-        </CardTitle>
+            {expanded ? (
+              <ChevronDown className="size-4" />
+            ) : (
+              <ChevronRight className="size-4" />
+            )}
+          </button>
+          <div className="min-w-0 flex-1 space-y-1.5">
+            <div className="flex min-w-0 flex-wrap items-center gap-2">
+              <ThreadStatusBadge status={thread.status} />
+              {thread.hasNewReply ? <NewReplyBadge /> : null}
+              <Badge variant="secondary">{thread.plugin.name}</Badge>
+              {thread.publishedAt ? (
+                <span
+                  className="text-muted-foreground text-xs"
+                  suppressHydrationWarning
+                >
+                  {formatDistanceToNow(new Date(thread.publishedAt), {
+                    addSuffix: true,
+                  })}
+                </span>
+              ) : null}
+              {thread.author ? (
+                <span className="text-muted-foreground text-xs">
+                  by {thread.author}
+                </span>
+              ) : null}
+            </div>
+            <CardTitle className="text-sm leading-snug">
+              <a
+                href={thread.url}
+                target="_blank"
+                rel="noreferrer"
+                className="group inline-flex items-start gap-1 hover:text-blue-600 dark:hover:text-blue-400"
+              >
+                {thread.title}
+                <ExternalLink className="mt-0.5 size-3.5 shrink-0 opacity-50 group-hover:opacity-100" />
+              </a>
+            </CardTitle>
+            {!expanded ? (
+              <p className="text-muted-foreground text-xs">
+                {summarizeThread(thread)}
+              </p>
+            ) : null}
+          </div>
+        </div>
       </CardHeader>
 
+      {expanded ? (
       <CardContent className="space-y-3 px-4">
         {thread.excerpt ? (
           <p className="text-muted-foreground line-clamp-3 text-xs whitespace-pre-wrap">
@@ -869,6 +976,7 @@ function ThreadCard({
           ) : null}
         </div>
       </CardContent>
+      ) : null}
     </Card>
   );
 }

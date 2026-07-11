@@ -19,6 +19,30 @@ export interface ForumTopic {
   publishedAt: Date | null;
 }
 
+/**
+ * A reply item from the feed (a link carrying a #post-N anchor). Unlike a new
+ * topic, a reply may bump a topic that is years old — so we keep the topic's
+ * bare guid/url (anchor stripped, matching {@link ForumTopic.guid} /
+ * SupportThread.guid) plus the reply's own guid and publish date. The watcher
+ * uses these to resurface an old topic that just got a fresh customer reply.
+ */
+export interface ForumReply {
+  /** Topic guid with the #post-N anchor stripped — matches SupportThread.guid. */
+  topicGuid: string;
+  /** Topic URL with the #post-N anchor stripped. */
+  topicUrl: string;
+  /** The reply's own feed guid (anchor kept) — dedupe/debug only. */
+  replyGuid: string;
+  /** The reply's publish date (null when the feed omits/mangles pubDate). */
+  publishedAt: Date | null;
+}
+
+/** Both kinds of feed item: new topics and replies to existing topics. */
+export interface ForumFeedItems {
+  topics: ForumTopic[];
+  replies: ForumReply[];
+}
+
 const FETCH_TIMEOUT_MS = 15_000;
 /** Cap on the excerpt stored per thread. */
 const MAX_EXCERPT_CHARS = 4000;
@@ -69,30 +93,54 @@ export function feedUrlForSlug(wpOrgSlug: string): string {
   return `${base}/${encodeURIComponent(wpOrgSlug)}/feed/`;
 }
 
-/** Parse RSS items; keep only new TOPICS (links without a #post- anchor). */
-export function parseForumFeed(xml: string): ForumTopic[] {
+function parsePubDate(item: string): Date | null {
+  const pubDate = tagContent(item, "pubDate");
+  const parsed = pubDate ? new Date(pubDate) : null;
+  return parsed && !Number.isNaN(parsed.getTime()) ? parsed : null;
+}
+
+/**
+ * Parse RSS items into BOTH new topics (links without a #post- anchor) and
+ * replies (links carrying one). Topics are deduped by topic guid; replies are
+ * deduped by their own guid (a topic may legitimately have several replies —
+ * the watcher collapses those to the newest per topic).
+ */
+export function parseForumFeedItems(xml: string): ForumFeedItems {
   const topics: ForumTopic[] = [];
-  const seen = new Set<string>();
+  const replies: ForumReply[] = [];
+  const seenTopics = new Set<string>();
+  const seenReplies = new Set<string>();
 
   for (const match of xml.matchAll(/<item[\s>][\s\S]*?<\/item>/gi)) {
     const item = match[0];
     const link = tagContent(item, "link");
     const rawGuid = tagContent(item, "guid") ?? link;
-    const title = tagContent(item, "title");
-    if (!link || !rawGuid || !title) continue;
+    if (!link || !rawGuid) continue;
 
-    // Replies carry a #post-NNN fragment — skip them; we only want topics.
-    if (/#post-\d+/.test(link) || /#post-\d+/.test(rawGuid)) continue;
+    // Replies carry a #post-NNN fragment on the link and/or guid.
+    if (/#post-\d+/.test(link) || /#post-\d+/.test(rawGuid)) {
+      const replyGuid = rawGuid;
+      if (seenReplies.has(replyGuid)) continue;
+      seenReplies.add(replyGuid);
+      replies.push({
+        topicGuid: rawGuid.split("#")[0],
+        topicUrl: link.split("#")[0],
+        replyGuid,
+        publishedAt: parsePubDate(item),
+      });
+      continue;
+    }
+
+    const title = tagContent(item, "title");
+    if (!title) continue;
 
     const url = link.split("#")[0];
     const guid = rawGuid.split("#")[0];
-    if (seen.has(guid)) continue;
-    seen.add(guid);
+    if (seenTopics.has(guid)) continue;
+    seenTopics.add(guid);
 
     const description =
       tagContent(item, "content:encoded") ?? tagContent(item, "description") ?? "";
-    const pubDate = tagContent(item, "pubDate");
-    const publishedAt = pubDate ? new Date(pubDate) : null;
 
     topics.push({
       guid,
@@ -102,15 +150,18 @@ export function parseForumFeed(xml: string): ForumTopic[] {
         ? stripHtml(tagContent(item, "dc:creator")!)
         : null,
       excerpt: stripHtml(description).slice(0, MAX_EXCERPT_CHARS),
-      publishedAt:
-        publishedAt && !Number.isNaN(publishedAt.getTime()) ? publishedAt : null,
+      publishedAt: parsePubDate(item),
     });
   }
-  return topics;
+  return { topics, replies };
 }
 
-/** Fetch and parse a plugin's forum feed. Throws on HTTP/network failure. */
-export async function fetchForumTopics(wpOrgSlug: string): Promise<ForumTopic[]> {
+/** Parse RSS items; keep only new TOPICS (back-compat topic-only view). */
+export function parseForumFeed(xml: string): ForumTopic[] {
+  return parseForumFeedItems(xml).topics;
+}
+
+async function fetchFeedXml(wpOrgSlug: string): Promise<string> {
   const url = feedUrlForSlug(wpOrgSlug);
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
@@ -127,8 +178,26 @@ export async function fetchForumTopics(wpOrgSlug: string): Promise<ForumTopic[]>
     if (!response.ok) {
       throw new Error(`Feed request failed: HTTP ${response.status} for ${url}`);
     }
-    return parseForumFeed(await response.text());
+    return response.text();
   } finally {
     clearTimeout(timer);
   }
+}
+
+/**
+ * Fetch and parse a plugin's forum feed into topics AND replies. Throws on
+ * HTTP/network failure.
+ */
+export async function fetchForumFeed(
+  wpOrgSlug: string
+): Promise<ForumFeedItems> {
+  return parseForumFeedItems(await fetchFeedXml(wpOrgSlug));
+}
+
+/**
+ * Fetch and parse a plugin's forum feed (topics only). Throws on HTTP/network
+ * failure. Kept for back-compat with topic-only consumers.
+ */
+export async function fetchForumTopics(wpOrgSlug: string): Promise<ForumTopic[]> {
+  return parseForumFeed(await fetchFeedXml(wpOrgSlug));
 }

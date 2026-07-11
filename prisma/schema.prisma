@@ -91,12 +91,24 @@ model SupportThread {
   // context:[...], skipped?: "no_replies" | "fetch_failed"}.
   followupJson Json?
   suggestError String?
+  // Resurfacing: set when a customer posts a fresh reply on an otherwise old
+  // topic (the feed carries reply items too). hasNewReply drives the "New
+  // reply" badge and is cleared when the thread is regenerated or its status
+  // changes. lastReplyAt is the newest reply date the watcher has processed
+  // (used to cheaply dedupe reply items across checks — including support-team
+  // replies, which set lastReplyAt without flagging). lastActivityAt is the
+  // sort key for the "Recent" tab: publishedAt for fresh topics, bumped to the
+  // reply date when a customer resurfaces an old one.
+  hasNewReply    Boolean   @default(false)
+  lastReplyAt    DateTime?
+  lastActivityAt DateTime?
   fetchedAt    DateTime  @default(now())
   updatedAt    DateTime  @updatedAt
 
   @@unique([pluginId, guid])
   @@index([status])
   @@index([publishedAt])
+  @@index([lastActivityAt])
 }
 
 // A crawlable documentation source for a plugin (site URL or sitemap.xml).
@@ -296,6 +308,9 @@ model ForumCheckLog {
   newThreads     Int       @default(0)
   drafted        Int       @default(0)
   skippedOld     Int       @default(0)
+  // Old topics resurfaced this run: an existing thread flagged with a fresh
+  // customer reply, or a thread created for a customer-last old topic.
+  resurfaced     Int       @default(0)
   // Highest 1-based plugin index (alphabetical order) fully processed — the
   // resume point after a graceful Pause/Stop between plugins.
   lastIndex      Int?

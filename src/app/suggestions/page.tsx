@@ -24,6 +24,19 @@ export default async function SuggestionsPage({
   const status = first(sp.status);
   const pluginId = first(sp.pluginId);
 
+  // Per-tab ordering: the no-filter "Recent" tab floats topics with fresh
+  // activity (new replies) to the top via lastActivityAt; every status tab
+  // (including "New") keeps the publish-date ordering it had before.
+  const orderBy = status
+    ? [
+        { publishedAt: { sort: "desc" as const, nulls: "last" as const } },
+        { fetchedAt: "desc" as const },
+      ]
+    : [
+        { lastActivityAt: { sort: "desc" as const, nulls: "last" as const } },
+        { fetchedAt: "desc" as const },
+      ];
+
   const [threads, plugins, lastCheckLog, resumeRuns] = await Promise.all([
     prisma.supportThread.findMany({
       where: {
@@ -31,10 +44,7 @@ export default async function SuggestionsPage({
         ...(pluginId ? { pluginId } : {}),
       },
       include: { plugin: { select: { id: true, name: true, wpOrgSlug: true } } },
-      orderBy: [
-        { publishedAt: { sort: "desc", nulls: "last" } },
-        { fetchedAt: "desc" },
-      ],
+      orderBy,
       take: 50,
     }),
     prisma.plugin.findMany({
@@ -68,6 +78,7 @@ export default async function SuggestionsPage({
         newThreads: lastCheckLog.newThreads,
         drafted: lastCheckLog.drafted,
         skippedOld: lastCheckLog.skippedOld,
+        resurfaced: lastCheckLog.resurfaced,
         lastIndex: lastCheckLog.lastIndex,
         errors: lastCheckLog.errors,
       }
@@ -128,6 +139,7 @@ export default async function SuggestionsPage({
       contextChunks:
         (thread.contextJson as unknown as ContextChunkSummary[]) ?? [],
       followup,
+      hasNewReply: thread.hasNewReply,
       publishedAt: thread.publishedAt?.toISOString() ?? null,
       fetchedAt: thread.fetchedAt.toISOString(),
       plugin: { id: thread.plugin.id, name: thread.plugin.name },

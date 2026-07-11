@@ -31,6 +31,8 @@ export interface CheckProgress {
   /** Threads processed in the drafting phase (denominator is newThreads). */
   draftsDone: number;
   skippedOld: number;
+  /** Old topics resurfaced by a fresh customer reply this run. */
+  resurfaced: number;
   startedAt: string | null;
   cancelRequested: boolean;
   /** Whether an in-flight halt records the run as paused vs cancelled. */
@@ -51,6 +53,7 @@ function freshProgress(): CheckProgress {
     drafted: 0,
     draftsDone: 0,
     skippedOld: 0,
+    resurfaced: 0,
     startedAt: null,
     cancelRequested: false,
     cancelReason: "cancelled",

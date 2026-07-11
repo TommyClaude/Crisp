@@ -10,7 +10,7 @@ import {
 } from "lucide-react";
 
 import { KnowledgeCoveragePanel } from "@/components/dashboard/knowledge-coverage";
-import { ThreadStatusBadge } from "@/components/state-badge";
+import { NewReplyBadge, ThreadStatusBadge } from "@/components/state-badge";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
@@ -155,7 +155,10 @@ export default async function GlobalDashboardPage() {
                           ) : null}
                         </p>
                       </div>
-                      <ThreadStatusBadge status={thread.status} />
+                      <div className="flex shrink-0 items-center gap-1.5">
+                        {thread.hasNewReply ? <NewReplyBadge /> : null}
+                        <ThreadStatusBadge status={thread.status} />
+                      </div>
                     </Link>
                   </li>
                 ))}
