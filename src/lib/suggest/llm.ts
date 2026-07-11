@@ -22,20 +22,28 @@ const MAX_RETRIES = 2;
 const MAX_DRAFT_TOKENS = 1500;
 
 export function resolveProvider(): SuggesterProvider | null {
+  return availableProviders()[0] ?? null;
+}
+
+/**
+ * Every provider that should draft a reply, in display order. With
+ * SUGGESTER_PROVIDER="auto" (default) this is every provider that has an API
+ * key — so both Anthropic and OpenAI draft when both keys are set. An explicit
+ * "anthropic"/"openai" preference pins it to that single provider.
+ */
+export function availableProviders(): SuggesterProvider[] {
   const env = getEnv();
   const preference = env.SUGGESTER_PROVIDER;
-  const hasAnthropic = Boolean(env.ANTHROPIC_API_KEY);
-  const hasOpenAI = Boolean(env.OPENAI_API_KEY);
-
-  if (preference === "anthropic") return hasAnthropic ? "anthropic" : null;
-  if (preference === "openai") return hasOpenAI ? "openai" : null;
-  if (hasAnthropic) return "anthropic";
-  if (hasOpenAI) return "openai";
-  return null;
+  const all: SuggesterProvider[] = [];
+  if (env.ANTHROPIC_API_KEY) all.push("anthropic");
+  if (env.OPENAI_API_KEY) all.push("openai");
+  if (preference === "anthropic") return all.filter((p) => p === "anthropic");
+  if (preference === "openai") return all.filter((p) => p === "openai");
+  return all;
 }
 
 export function suggesterConfigured(): boolean {
-  return resolveProvider() !== null;
+  return availableProviders().length > 0;
 }
 
 async function postJson(
@@ -131,7 +139,18 @@ async function draftWithOpenAI(
   return { text, model: body.model ?? model };
 }
 
-/** Generate a draft with whichever provider is configured. */
+/** Generate a draft from a specific provider. */
+export function generateDraftFor(
+  provider: SuggesterProvider,
+  system: string,
+  userPrompt: string
+): Promise<DraftResult> {
+  return provider === "anthropic"
+    ? draftWithAnthropic(system, userPrompt)
+    : draftWithOpenAI(system, userPrompt);
+}
+
+/** Generate a draft with whichever provider is configured (first available). */
 export async function generateDraft(
   system: string,
   userPrompt: string
@@ -142,7 +161,5 @@ export async function generateDraft(
       "No LLM provider configured — set ANTHROPIC_API_KEY or OPENAI_API_KEY (see SUGGESTER_PROVIDER)"
     );
   }
-  return provider === "anthropic"
-    ? draftWithAnthropic(system, userPrompt)
-    : draftWithOpenAI(system, userPrompt);
+  return generateDraftFor(provider, system, userPrompt);
 }

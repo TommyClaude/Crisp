@@ -1,6 +1,10 @@
 import { prisma } from "@/lib/db";
 import { ragSearch, type RagSearchResult } from "@/lib/rag/search";
-import { generateDraft, suggesterConfigured } from "./llm";
+import {
+  availableProviders,
+  generateDraftFor,
+  type SuggesterProvider,
+} from "./llm";
 
 /**
  * Answer suggester: for a wp.org support thread, retrieve the most relevant
@@ -18,11 +22,20 @@ export interface ContextChunkSummary {
   product: string | null;
 }
 
+/** One provider's draft (or its error) for a thread. */
+export interface DraftItem {
+  provider: SuggesterProvider;
+  model: string | null;
+  text: string | null;
+  error: string | null;
+}
+
 export interface SuggestionResult {
   threadId: string;
   status: string;
   draftAnswer: string | null;
   draftModel: string | null;
+  drafts: DraftItem[];
   contextChunks: ContextChunkSummary[];
 }
 
@@ -123,22 +136,47 @@ export async function generateSuggestionForThread(
   const context = await retrieveContext(query, thread.plugin.id);
   const contextChunks = context.map(toContextSummary);
 
-  let draftAnswer: string | null = null;
-  let draftModel: string | null = null;
   let status = "drafted";
   let suggestError: string | null = null;
 
-  if (suggesterConfigured()) {
-    try {
-      const prompt = buildPrompt(thread, thread.plugin.name, context);
-      const draft = await generateDraft(prompt.system, prompt.user);
-      draftAnswer = draft.text;
-      draftModel = draft.model;
-    } catch (error) {
-      status = "failed";
-      suggestError = error instanceof Error ? error.message : String(error);
-      console.error(`Draft generation failed for thread ${threadId}:`, error);
-    }
+  // Draft from every configured provider in parallel — one card per provider.
+  const providers = availableProviders();
+  const prompt =
+    providers.length > 0
+      ? buildPrompt(thread, thread.plugin.name, context)
+      : null;
+  const drafts: DraftItem[] = prompt
+    ? await Promise.all(
+        providers.map(async (provider): Promise<DraftItem> => {
+          try {
+            const draft = await generateDraftFor(
+              provider,
+              prompt.system,
+              prompt.user
+            );
+            return { provider, model: draft.model, text: draft.text, error: null };
+          } catch (error) {
+            const message = error instanceof Error ? error.message : String(error);
+            console.error(
+              `Draft (${provider}) failed for thread ${threadId}:`,
+              error
+            );
+            return { provider, model: null, text: null, error: message };
+          }
+        })
+      )
+    : [];
+
+  // Primary draft = the first provider that produced text (back-compat + the
+  // forum watcher's drafted counter). All providers failing => status "failed".
+  const firstOk = drafts.find((draft) => draft.text);
+  const draftAnswer = firstOk?.text ?? null;
+  const draftModel = firstOk?.model ?? null;
+  if (providers.length > 0 && !firstOk) {
+    status = "failed";
+    suggestError = drafts
+      .map((draft) => `${draft.provider}: ${draft.error ?? "empty"}`)
+      .join("; ");
   }
   // No LLM configured → status stays "drafted" with context only; the UI
   // shows the retrieved chunks so a human can compose the reply.
@@ -149,10 +187,11 @@ export async function generateSuggestionForThread(
       status,
       draftAnswer,
       draftModel,
+      draftsJson: drafts as object[],
       contextJson: contextChunks as object[],
       suggestError,
     },
   });
 
-  return { threadId, status, draftAnswer, draftModel, contextChunks };
+  return { threadId, status, draftAnswer, draftModel, drafts, contextChunks };
 }

@@ -36,6 +36,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
+import { cn } from "@/lib/utils";
 
 export interface ContextChunkItem {
   source: "crisp_chat" | "plugin_docs" | "wporg_forum";
@@ -46,6 +47,14 @@ export interface ContextChunkItem {
   product: string | null;
 }
 
+/** One provider's draft for the UI (provider null = legacy single draft). */
+export interface DraftItemView {
+  provider: "anthropic" | "openai" | null;
+  model: string | null;
+  text: string | null;
+  error: string | null;
+}
+
 export interface SuggestionThreadItem {
   id: string;
   title: string;
@@ -53,8 +62,7 @@ export interface SuggestionThreadItem {
   author: string | null;
   excerpt: string;
   status: string;
-  draftAnswer: string | null;
-  draftModel: string | null;
+  drafts: DraftItemView[];
   suggestError: string | null;
   contextChunks: ContextChunkItem[];
   publishedAt: string | null;
@@ -178,10 +186,17 @@ export function SuggestionsManager({
   );
 }
 
+const PROVIDER_LABELS: Record<string, string> = {
+  anthropic: "Anthropic",
+  openai: "OpenAI",
+};
+
 function ThreadCard({ thread }: { thread: SuggestionThreadItem }) {
   const router = useRouter();
   const [busy, setBusy] = React.useState<string | null>(null);
-  const [copied, setCopied] = React.useState(false);
+  const [copiedKey, setCopiedKey] = React.useState<string | null>(null);
+
+  const draftsWithText = thread.drafts.filter((draft) => draft.text);
 
   const call = async (
     key: string,
@@ -217,12 +232,11 @@ function ThreadCard({ thread }: { thread: SuggestionThreadItem }) {
       message
     );
 
-  const copyDraft = async () => {
-    if (!thread.draftAnswer) return;
-    await navigator.clipboard.writeText(thread.draftAnswer);
-    setCopied(true);
+  const copyDraft = async (key: string, text: string) => {
+    await navigator.clipboard.writeText(text);
+    setCopiedKey(key);
     toast.success("Draft copied to clipboard");
-    setTimeout(() => setCopied(false), 2000);
+    setTimeout(() => setCopiedKey((k) => (k === key ? null : k)), 2000);
   };
 
   return (
@@ -260,29 +274,52 @@ function ThreadCard({ thread }: { thread: SuggestionThreadItem }) {
           </p>
         ) : null}
 
-        {thread.draftAnswer ? (
-          <div className="rounded-md border border-violet-200 bg-violet-50/50 p-3 dark:border-violet-500/25 dark:bg-violet-500/5">
-            <div className="mb-1.5 flex items-center gap-2">
-              <Sparkles className="size-3.5 text-violet-600 dark:text-violet-400" />
-              <span className="text-xs font-medium text-violet-700 dark:text-violet-400">
-                Suggested reply
-              </span>
-              {thread.draftModel ? (
-                <span className="text-muted-foreground font-mono text-[11px]">
-                  {thread.draftModel}
-                </span>
-              ) : null}
-              <Button
-                variant="ghost"
-                size="sm"
-                className="ml-auto h-6 px-2 text-xs"
-                onClick={copyDraft}
-              >
-                {copied ? <Check className="size-3" /> : <Copy className="size-3" />}
-                Copy
-              </Button>
-            </div>
-            <p className="text-sm whitespace-pre-wrap">{thread.draftAnswer}</p>
+        {draftsWithText.length > 0 ? (
+          <div
+            className={cn(
+              "grid gap-3",
+              draftsWithText.length > 1 ? "md:grid-cols-2" : "grid-cols-1"
+            )}
+          >
+            {thread.drafts.map((draft, index) => {
+              if (!draft.text) return null;
+              const key = `${draft.provider ?? "draft"}-${index}`;
+              const label = draft.provider
+                ? PROVIDER_LABELS[draft.provider] ?? draft.provider
+                : "Suggested reply";
+              return (
+                <div
+                  key={key}
+                  className="flex flex-col rounded-md border border-violet-200 bg-violet-50/50 p-3 dark:border-violet-500/25 dark:bg-violet-500/5"
+                >
+                  <div className="mb-1.5 flex items-center gap-2">
+                    <Sparkles className="size-3.5 shrink-0 text-violet-600 dark:text-violet-400" />
+                    <span className="text-xs font-medium text-violet-700 dark:text-violet-400">
+                      {label}
+                    </span>
+                    {draft.model ? (
+                      <span className="text-muted-foreground truncate font-mono text-[11px]">
+                        {draft.model}
+                      </span>
+                    ) : null}
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      className="ml-auto h-6 shrink-0 px-2 text-xs"
+                      onClick={() => copyDraft(key, draft.text!)}
+                    >
+                      {copiedKey === key ? (
+                        <Check className="size-3" />
+                      ) : (
+                        <Copy className="size-3" />
+                      )}
+                      Copy
+                    </Button>
+                  </div>
+                  <p className="text-sm whitespace-pre-wrap">{draft.text}</p>
+                </div>
+              );
+            })}
           </div>
         ) : thread.suggestError ? (
           <p className="text-destructive text-xs">
@@ -294,6 +331,27 @@ function ThreadCard({ thread }: { thread: SuggestionThreadItem }) {
             compose a reply (set ANTHROPIC_API_KEY or OPENAI_API_KEY to enable
             drafts).
           </p>
+        ) : null}
+
+        {/* When some providers succeeded and others errored, surface the
+            per-provider failures below the drafts that did land. */}
+        {draftsWithText.length > 0 &&
+        thread.drafts.some((draft) => !draft.text && draft.error) ? (
+          <div className="space-y-0.5">
+            {thread.drafts
+              .filter((draft) => !draft.text && draft.error)
+              .map((draft, index) => (
+                <p
+                  key={`err-${draft.provider ?? index}`}
+                  className="text-destructive text-xs"
+                >
+                  {draft.provider
+                    ? PROVIDER_LABELS[draft.provider] ?? draft.provider
+                    : "Draft"}{" "}
+                  failed: {draft.error}
+                </p>
+              ))}
+          </div>
         ) : null}
 
         {thread.contextChunks.length > 0 ? (
@@ -372,7 +430,7 @@ function ThreadCard({ thread }: { thread: SuggestionThreadItem }) {
             ) : (
               <Sparkles className="size-3.5" />
             )}
-            {thread.draftAnswer ? "Regenerate draft" : "Generate draft"}
+            {draftsWithText.length > 0 ? "Regenerate drafts" : "Generate drafts"}
           </Button>
           {thread.status !== "reviewed" ? (
             <Button

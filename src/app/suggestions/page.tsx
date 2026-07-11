@@ -1,9 +1,10 @@
 import { prisma } from "@/lib/db";
 import {
   SuggestionsManager,
+  type DraftItemView,
   type SuggestionThreadItem,
 } from "@/components/suggestions/suggestions-manager";
-import type { ContextChunkSummary } from "@/lib/suggest/suggester";
+import type { ContextChunkSummary, DraftItem } from "@/lib/suggest/suggester";
 
 export const dynamic = "force-dynamic";
 
@@ -38,21 +39,46 @@ export default async function SuggestionsPage({
     }),
   ]);
 
-  const items: SuggestionThreadItem[] = threads.map((thread) => ({
-    id: thread.id,
-    title: thread.title,
-    url: thread.url,
-    author: thread.author,
-    excerpt: thread.excerpt,
-    status: thread.status,
-    draftAnswer: thread.draftAnswer,
-    draftModel: thread.draftModel,
-    suggestError: thread.suggestError,
-    contextChunks: (thread.contextJson as unknown as ContextChunkSummary[]) ?? [],
-    publishedAt: thread.publishedAt?.toISOString() ?? null,
-    fetchedAt: thread.fetchedAt.toISOString(),
-    plugin: { id: thread.plugin.id, name: thread.plugin.name },
-  }));
+  const items: SuggestionThreadItem[] = threads.map((thread) => {
+    // New rows carry per-provider drafts in draftsJson; older rows only have
+    // the single draftAnswer/draftModel — synthesize a one-item list for them
+    // so both render through the same path.
+    const stored = (thread.draftsJson as unknown as DraftItem[] | null) ?? null;
+    const drafts: DraftItemView[] =
+      stored && stored.length > 0
+        ? stored.map((draft) => ({
+            provider: draft.provider,
+            model: draft.model,
+            text: draft.text,
+            error: draft.error,
+          }))
+        : thread.draftAnswer
+          ? [
+              {
+                provider: null,
+                model: thread.draftModel,
+                text: thread.draftAnswer,
+                error: null,
+              },
+            ]
+          : [];
+
+    return {
+      id: thread.id,
+      title: thread.title,
+      url: thread.url,
+      author: thread.author,
+      excerpt: thread.excerpt,
+      status: thread.status,
+      drafts,
+      suggestError: thread.suggestError,
+      contextChunks:
+        (thread.contextJson as unknown as ContextChunkSummary[]) ?? [],
+      publishedAt: thread.publishedAt?.toISOString() ?? null,
+      fetchedAt: thread.fetchedAt.toISOString(),
+      plugin: { id: thread.plugin.id, name: thread.plugin.name },
+    };
+  });
 
   return (
     <div className="mx-auto max-w-4xl space-y-6 p-6">

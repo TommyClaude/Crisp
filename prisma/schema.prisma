@@ -72,8 +72,12 @@ model SupportThread {
   excerpt      String // topic body text from the feed
   publishedAt  DateTime?
   status       String    @default("new") // new | drafted | failed | reviewed | dismissed
+  // Primary draft = the first provider that succeeded (back-compat + watcher).
   draftAnswer  String?
   draftModel   String?
+  // One draft per configured LLM provider (Anthropic + OpenAI), so the UI can
+  // show both side by side: [{provider, model, text, error}]
+  draftsJson   Json?
   // Retrieved chat/docs chunks the draft was grounded on:
   // [{source, similarity, title, link, excerpt, product}]
   contextJson  Json?
