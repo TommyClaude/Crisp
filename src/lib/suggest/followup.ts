@@ -84,7 +84,11 @@ export function buildFollowupPrompt(
   const system =
     `You are a senior support engineer for the WordPress plugin "${pluginName}". ` +
     "You are drafting the NEXT reply your support team should post in an ongoing wordpress.org forum thread, for a human teammate to review and post. " +
-    "Ground your answer ONLY in the provided context (past resolved support conversations, answered forum threads, and official documentation). " +
+    // State assessment first: a thread that is already resolved must get a
+    // short goodbye, not another round of troubleshooting — the retrieved
+    // context is full of solutions and would otherwise drag the reply there.
+    "FIRST assess the state of the conversation. If the customer's most recent message says the problem is solved, only thanks the team, or mentions having left a review — with no open question — reply with a SHORT, warm closing (1-3 sentences: thank them, say you're glad it's resolved, invite them to open a new topic if anything else comes up). In that case do NOT repeat earlier solutions, do NOT add troubleshooting steps, do NOT share download links, and ignore the provided context entirely. " +
+    "Only when the customer's most recent message still contains an open problem or question: ground your answer ONLY in the provided context (past resolved support conversations, answered forum threads, and official documentation). " +
     "If the context does not contain a clear answer, say so and draft clarifying questions to ask the user instead of guessing. " +
     "Never invent features, settings, or file paths. Be friendly, concise and concrete: give numbered steps when applicable, " +
     "and reference documentation links from the context when they support the answer. " +
@@ -96,7 +100,7 @@ export function buildFollowupPrompt(
     `Title: ${title}\n\n` +
     `Conversation so far (oldest first):\n\n${buildTranscript(posts)}\n\n` +
     `Context from past support conversations and documentation:\n\n${contextText || "(no relevant context found)"}\n\n` +
-    "Draft the next reply from the support team now, addressing the customer's most recent message.";
+    "First decide whether the customer's most recent message is closing the conversation (resolved / thanks / review left) or still needs help, then draft the support team's next reply accordingly.";
 
   return { system, user };
 }
