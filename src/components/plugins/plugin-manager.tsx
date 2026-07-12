@@ -326,8 +326,22 @@ function PluginCard({ plugin }: { plugin: PluginItem }) {
           <CardTitle className="text-base">{plugin.name}</CardTitle>
           <Badge variant="secondary">{plugin.brand.name}</Badge>
           {plugin.wpOrgSlug ? (
-            <Badge variant="outline" className="font-mono text-[11px]">
-              wp.org/{plugin.wpOrgSlug}
+            // The wp.org slug, not a URL — a "wp.org/…" prefix read as a
+            // (broken) link, so show it as a bare slug with the real plugin
+            // page one click away.
+            <Badge
+              variant="outline"
+              className="font-mono text-[11px]"
+              title={`wordpress.org/plugins/${plugin.wpOrgSlug}`}
+            >
+              <a
+                href={`https://wordpress.org/plugins/${plugin.wpOrgSlug}/`}
+                target="_blank"
+                rel="noreferrer"
+                className="hover:underline"
+              >
+                /{plugin.wpOrgSlug}
+              </a>
             </Badge>
           ) : null}
           <span className="text-muted-foreground ml-auto text-xs tabular-nums">
