@@ -6,6 +6,7 @@ import {
   type ConversationRowItem,
 } from "@/components/conversations/conversation-row";
 import { ConversationFilters } from "@/components/conversations/filters";
+import { JunkScanControl } from "@/components/conversations/junk-scan-control";
 import { ListPagination } from "@/components/conversations/list-pagination";
 import { CrispTabs } from "@/components/crisp/crisp-tabs";
 import { getFilterOptions, listConversations } from "@/lib/conversations";
@@ -48,6 +49,9 @@ export default async function ConversationsPage({
       dateTo: parseDate(first(sp.dateTo)),
       search: first(sp.search),
       preview: first(sp.preview),
+      junk: first(sp.junk) === "hide" || first(sp.junk) === "only"
+        ? (first(sp.junk) as "hide" | "only")
+        : undefined,
     }),
     getFilterOptions(),
   ]);
@@ -66,6 +70,8 @@ export default async function ConversationsPage({
     lastMessagePreview: c.lastMessagePreview,
     updatedAtCrisp: c.updatedAtCrisp?.toISOString() ?? null,
     createdAtCrisp: c.createdAtCrisp?.toISOString() ?? null,
+    isJunk: c.isJunk,
+    junkReason: c.junkReason,
     assignedOperator: c.assignedOperator,
     _count: c._count,
   }));
@@ -84,7 +90,8 @@ export default async function ConversationsPage({
       </header>
 
       <div className="flex flex-col gap-6 md:flex-row md:items-start">
-        <aside className="w-full shrink-0 md:w-64">
+        <aside className="w-full shrink-0 space-y-4 md:w-64">
+          <JunkScanControl />
           <ConversationFilters
             states={options.states}
             tags={options.tags}

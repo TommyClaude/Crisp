@@ -29,6 +29,7 @@ const FILTER_KEYS = [
   "dateFrom",
   "dateTo",
   "preview",
+  "junk",
 ] as const;
 
 /** Radix Select forbids empty-string item values, so "All" uses a sentinel. */
@@ -138,6 +139,31 @@ export function ConversationFilters({
                 {state}
               </SelectItem>
             ))}
+          </SelectContent>
+        </Select>
+      </div>
+
+      <div className="space-y-1.5">
+        <div className="flex items-center gap-1">
+          <Label htmlFor="filter-junk" className="text-muted-foreground text-xs">
+            Junk
+          </Label>
+          <HelpTip subject="junk filter">
+            The system flags automated noise — no-reply notification emails
+            (e.g. &quot;[WordPress Plugin] …&quot;) no operator ever answered —
+            as junk, with the reason shown on each conversation, and keeps it
+            out of the AI&rsquo;s knowledge. Your manual mark/unmark on a
+            conversation always wins and is never overwritten by a re-scan.
+          </HelpTip>
+        </div>
+        <Select value={selectValue("junk")} onValueChange={onSelectChange("junk")}>
+          <SelectTrigger id="filter-junk" size="sm" className="w-full">
+            <SelectValue placeholder="All" />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem value={ALL}>All</SelectItem>
+            <SelectItem value="hide">Hide junk</SelectItem>
+            <SelectItem value="only">Junk only</SelectItem>
           </SelectContent>
         </Select>
       </div>

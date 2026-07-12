@@ -2,6 +2,7 @@ import { prisma } from "@/lib/db";
 import { getEnv } from "@/env";
 import { CrispApiError, CrispClient } from "@/lib/crisp/client";
 import type { CrispConversation, CrispMessage } from "@/lib/crisp/types";
+import { classifyJunk } from "@/lib/crisp/junk";
 import { rebuildChunksForConversation } from "@/lib/rag/rebuild";
 import {
   conversationToColumns,
@@ -156,7 +157,7 @@ export async function syncConversationPayload(
   conversation: CrispConversation,
   messages: CrispMessage[],
   target?: Pick<SyncTarget, "brandId" | "websiteId">
-): Promise<{ conversationId: string; messageCount: number }> {
+): Promise<{ conversationId: string; messageCount: number; isJunk: boolean }> {
   const sessionId = conversation.session_id;
   if (!sessionId) throw new Error("Conversation payload missing session_id");
 
@@ -262,7 +263,55 @@ export async function syncConversationPayload(
       : []),
   ]);
 
-  return { conversationId: dbConversation.id, messageCount: messages.length };
+  // Junk classification (see src/lib/crisp/junk.ts). Runs on every sync so
+  // automated noise never reaches the conversations list or the RAG index —
+  // UNLESS a human has vetoed it (junkOverride), in which case the
+  // auto-classifier stays out of the way entirely. Operator/customer counts
+  // are derived from the payload we already hold (no extra query).
+  let isJunk = dbConversation.isJunk;
+  if (!dbConversation.junkOverride) {
+    let operatorMessageCount = 0;
+    let userMessageCount = 0;
+    for (const message of messages) {
+      // Private notes and events are not replies — same convention as the
+      // chunker's isChunkableConversation. A junk notification an operator
+      // merely annotated ("spam, ignore") must still count as never answered.
+      if (message.type === "note" || message.type === "event") continue;
+      if ((message.from ?? "user") === "operator") operatorMessageCount += 1;
+      else userMessageCount += 1;
+    }
+    const classification = classifyJunk({
+      visitorEmail: columns.visitorEmail ?? null,
+      lastMessagePreview: columns.lastMessagePreview ?? null,
+      operatorMessageCount,
+      userMessageCount,
+    });
+    isJunk = classification.junk;
+    if (
+      classification.junk !== dbConversation.isJunk ||
+      classification.reason !== dbConversation.junkReason
+    ) {
+      await prisma.conversation.update({
+        where: { id: dbConversation.id },
+        data: { isJunk: classification.junk, junkReason: classification.reason },
+      });
+      // Newly flagged junk → purge any chunks immediately so the AI stops
+      // learning from it. Flipping to NOT junk never auto-rebuilds here — the
+      // next rebuild/sync pass re-chunks it (a resolved conversation is
+      // rebuilt below on this very run).
+      if (classification.junk && !dbConversation.isJunk) {
+        await prisma.embeddingChunk.deleteMany({
+          where: { conversationId: dbConversation.id },
+        });
+      }
+    }
+  }
+
+  return {
+    conversationId: dbConversation.id,
+    messageCount: messages.length,
+    isJunk,
+  };
 }
 
 /** Fetch + sync one conversation by session id (used by resync endpoint). */
@@ -614,7 +663,10 @@ async function runSync(options: RunSyncOptions): Promise<SyncRunResult> {
             state.conversationsSynced += 1;
             state.messagesSynced += result.messageCount;
 
-            if (conversation.state === "resolved") {
+            // Junk conversations are excluded from chunk rebuilding — they
+            // were already purged from the index above (if they just flipped
+            // to junk) and must never re-enter it.
+            if (conversation.state === "resolved" && !result.isJunk) {
               try {
                 await rebuildChunksForConversation(result.conversationId);
               } catch (error) {
@@ -680,7 +732,8 @@ async function runSync(options: RunSyncOptions): Promise<SyncRunResult> {
           );
           state.conversationsSynced += 1;
           state.messagesSynced += result.messageCount;
-          if (conversation.state === "resolved") {
+          // Junk conversations never re-enter the RAG index (see the main loop).
+          if (conversation.state === "resolved" && !result.isJunk) {
             try {
               await rebuildChunksForConversation(result.conversationId);
             } catch (error) {

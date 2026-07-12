@@ -196,6 +196,20 @@ model Conversation {
   tags               String[]  @default([])
   assignedOperatorId String? // Crisp user_id of the assigned operator
   assignedOperator   Operator? @relation(fields: [assignedOperatorId], references: [crispUserId])
+  // Junk detection — keep automated noise (no-reply notification emails, e.g.
+  // "[WordPress Plugin] Review pending", never answered by an operator) out of
+  // the conversations list AND out of the RAG index the AI learns from. Set
+  // transparently by the heuristic classifier (src/lib/crisp/junk.ts) at sync
+  // and by the backfill scan, with junkReason recording WHY.
+  isJunk       Boolean @default(false)
+  // Human-readable reason the classifier (or a manual mark) set this junk —
+  // e.g. "automated sender", "bracketed notification subject, never answered",
+  // or "marked manually". NULL whenever the conversation is not junk.
+  junkReason   String?
+  // True once a human manually marked or cleared junk on this row. The
+  // auto-classifier (sync + scan) NEVER touches a row with junkOverride set —
+  // a human's veto always wins and is never overwritten by a re-scan.
+  junkOverride Boolean @default(false)
   rawJson            Json
   createdAt          DateTime  @default(now())
   updatedAt          DateTime  @updatedAt
@@ -211,6 +225,7 @@ model Conversation {
   @@index([updatedAtCrisp])
   @@index([lastMessageAt])
   @@index([assignedOperatorId])
+  @@index([isJunk])
   @@index([tags], type: Gin)
 }
 

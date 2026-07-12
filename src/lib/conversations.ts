@@ -22,6 +22,10 @@ export interface ConversationListFilters {
    * (e.g. "[WordPress Plugin] ...") that full-text search would otherwise
    * blend in with legitimate conversations mentioning the same words. */
   preview?: string;
+  /** System-classified junk filter (see src/lib/crisp/junk.ts): "hide"
+   * excludes junk rows (isJunk = false), "only" shows just them; unset keeps
+   * the default all-inclusive behavior. */
+  junk?: "hide" | "only";
 }
 
 export const conversationListItemSelect = {
@@ -38,6 +42,8 @@ export const conversationListItemSelect = {
   lastMessagePreview: true,
   updatedAtCrisp: true,
   createdAtCrisp: true,
+  isJunk: true,
+  junkReason: true,
   assignedOperator: { select: { crispUserId: true, name: true, avatar: true } },
   _count: { select: { messages: true, files: true } },
 } satisfies Prisma.ConversationSelect;
@@ -87,6 +93,8 @@ export async function listConversations(
   }
   if (filters.operatorId) where.assignedOperatorId = filters.operatorId;
   if (filters.hasAttachment) where.files = { some: {} };
+  if (filters.junk === "hide") where.isJunk = false;
+  else if (filters.junk === "only") where.isJunk = true;
   const preview = filters.preview?.trim();
   if (preview) {
     where.lastMessagePreview = { contains: preview, mode: "insensitive" };

@@ -14,6 +14,7 @@ import {
   VisitorPanel,
   type VisitorPanelData,
 } from "@/components/conversation/visitor-panel";
+import { JunkBadge } from "@/components/state-badge";
 import { getConversationDetail } from "@/lib/conversations";
 
 export const dynamic = "force-dynamic";
@@ -143,6 +144,9 @@ export default async function ConversationDetailPage({
           <div className="flex min-w-0 flex-1 items-center gap-2">
             <h1 className="truncate text-sm font-semibold">{visitorName}</h1>
             <StateBadge state={conversation.state} />
+            {conversation.isJunk ? (
+              <JunkBadge reason={conversation.junkReason} showReason />
+            ) : null}
             <span
               className="text-muted-foreground hidden max-w-48 truncate font-mono text-xs md:inline"
               title={conversation.sessionId}
@@ -153,6 +157,7 @@ export default async function ConversationDetailPage({
           <DetailActions
             sessionId={conversation.sessionId}
             websiteId={conversation.websiteId}
+            isJunk={conversation.isJunk}
           />
         </div>
       </header>

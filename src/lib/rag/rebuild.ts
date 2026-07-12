@@ -117,6 +117,12 @@ function parseVectorLiteral(text: string | null): number[] | null {
  * first message matching a known automated-noise pattern) produce zero
  * chunks — any existing chunks are deleted so a conversation that has become
  * ineligible is purged from the index.
+ *
+ * A conversation flagged junk (isJunk — set by the heuristic classifier at
+ * sync, the backfill scan, or a human's manual mark) is kept out of the index
+ * entirely: its existing chunks are deleted and none are rebuilt, returned as
+ * `skipped` just like the chunkability gate. This gate runs BEFORE the
+ * embedding snapshot/reuse path, so it never interferes with it.
  */
 export async function rebuildChunksForConversation(
   conversationId: string,
@@ -126,6 +132,19 @@ export async function rebuildChunksForConversation(
     where: { id: conversationId },
     include: { messages: true },
   });
+
+  if (conversation.isJunk) {
+    await prisma.embeddingChunk.deleteMany({ where: { conversationId } });
+    return {
+      conversationId,
+      sessionId: conversation.sessionId,
+      chunksCreated: 0,
+      embedded: false,
+      embeddedCount: 0,
+      reusedCount: 0,
+      skipped: true,
+    };
+  }
 
   const eligible = isChunkableConversation(conversation.messages);
   const chunks = eligible
@@ -239,7 +258,11 @@ export async function rebuildAllChunks(options?: {
   const progress = beginRebuildProgress();
   try {
     const onlyResolved = options?.onlyResolved ?? true;
-    const where = onlyResolved ? { state: "resolved" } : {};
+    // Junk conversations are never chunked — exclude them from the work list
+    // (they are purged separately below so any chunks they still hold go away).
+    const where = onlyResolved
+      ? { isJunk: false, state: "resolved" }
+      : { isJunk: false };
     const conversations = await prisma.conversation.findMany({
       where,
       select: { id: true, sessionId: true },
@@ -254,11 +277,33 @@ export async function rebuildAllChunks(options?: {
 
     const errors: string[] = [];
 
-    // Widen past the state filter first: conversations that hold chunks but are
+    let purged = 0;
+
+    // Junk conversations are excluded from the work list AND the holder sweep
+    // below, so purge any chunks they still hold here (a conversation marked
+    // junk after it was last chunked). Runs regardless of onlyResolved, and
+    // honours a graceful Stop like the sweep below.
+    const junkHolders = await prisma.conversation.findMany({
+      where: { isJunk: true, chunks: { some: {} } },
+      select: { id: true, sessionId: true },
+    });
+    for (const holder of junkHolders) {
+      if (progress.cancelRequested) break;
+      try {
+        await prisma.embeddingChunk.deleteMany({
+          where: { conversationId: holder.id },
+        });
+        purged += 1;
+        progress.purged = purged;
+      } catch (error) {
+        errors.push(`${holder.sessionId}: ${String(error)}`);
+      }
+    }
+
+    // Widen past the state filter next: conversations that hold chunks but are
     // not in the work list above must not keep stale chunks when they are no
     // longer eligible. Eligible ones (e.g. deliberately chunked via a
     // per-conversation rebuild while unresolved) are left untouched.
-    let purged = 0;
     if (onlyResolved) {
       const iterated = new Set(conversations.map((c) => c.id));
       const holders = await prisma.conversation.findMany({

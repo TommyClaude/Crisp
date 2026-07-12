@@ -38,6 +38,35 @@ export function StateBadge({
 }
 
 /**
+ * Muted "Junk" badge for a conversation the system (or a human) flagged as
+ * automated noise (Conversation.isJunk). Zinc-toned so it reads as
+ * de-emphasized — junk conversations are kept out of the AI's RAG index. The
+ * reason (e.g. "automated sender") shows in the tooltip on the list, and
+ * inline as "Junk · {reason}" on the detail page (showReason).
+ */
+export function JunkBadge({
+  reason,
+  showReason = false,
+  className,
+}: {
+  reason?: string | null;
+  showReason?: boolean;
+  className?: string;
+}) {
+  return (
+    <Badge
+      title={reason ? `Junk — ${reason}` : "Marked as junk"}
+      className={cn(
+        "border-transparent bg-zinc-100 text-zinc-500 dark:bg-zinc-500/15 dark:text-zinc-400",
+        className
+      )}
+    >
+      {showReason && reason ? `Junk · ${reason}` : "Junk"}
+    </Badge>
+  );
+}
+
+/**
  * Single source of truth for support-thread / suggestion statuses
  * (used on the global dashboard and the Suggestions page).
  */

@@ -2,7 +2,14 @@
 
 import * as React from "react";
 import { useRouter } from "next/navigation";
-import { ExternalLink, LoaderCircle, RefreshCw, Sparkles } from "lucide-react";
+import {
+  ExternalLink,
+  LoaderCircle,
+  RefreshCw,
+  Sparkles,
+  Trash2,
+  Undo2,
+} from "lucide-react";
 import { toast } from "sonner";
 
 import { Button } from "@/components/ui/button";
@@ -18,20 +25,71 @@ async function readErrorMessage(res: Response): Promise<string> {
   return `Request failed (${res.status})`;
 }
 
-/** Header action bar: open in Crisp, resync from Crisp, rebuild RAG chunks. */
+/**
+ * Header action bar: open in Crisp, resync from Crisp, rebuild RAG chunks, and
+ * the manual junk veto (mark/unmark). Marking junk deletes the conversation's
+ * RAG chunks and — like every manual mark — pins the decision so no future sync
+ * or scan overwrites it (junkOverride).
+ */
 export function DetailActions({
   sessionId,
   websiteId,
+  isJunk,
 }: {
   sessionId: string;
   websiteId: string;
+  isJunk: boolean;
 }) {
   const router = useRouter();
   const [resyncing, setResyncing] = React.useState(false);
   const [rebuilding, setRebuilding] = React.useState(false);
-  const busy = resyncing || rebuilding;
+  const [markingJunk, setMarkingJunk] = React.useState(false);
+  const busy = resyncing || rebuilding || markingJunk;
 
   const crispUrl = `https://app.crisp.chat/website/${websiteId}/inbox/${sessionId}/`;
+
+  const toggleJunk = async () => {
+    const nextJunk = !isJunk;
+    setMarkingJunk(true);
+    try {
+      const res = await fetch(
+        `/api/conversations/${encodeURIComponent(sessionId)}`,
+        {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ junk: nextJunk }),
+        }
+      );
+      if (!res.ok) {
+        toast.error("Failed to update junk status", {
+          description: await readErrorMessage(res),
+        });
+        return;
+      }
+      const data = (await res.json()) as { cleaned?: number };
+      if (nextJunk) {
+        toast.success("Marked as junk", {
+          description:
+            (data.cleaned ?? 0) > 0
+              ? `Removed from the AI's knowledge (${data.cleaned} ${
+                  data.cleaned === 1 ? "chunk" : "chunks"
+                } deleted). A re-scan won't change this back.`
+              : "Kept out of the AI's knowledge. A re-scan won't change this back.",
+        });
+      } else {
+        toast.success("Unmarked as junk", {
+          description: "It can be chunked again on the next rebuild or sync.",
+        });
+      }
+      router.refresh();
+    } catch {
+      toast.error("Failed to update junk status", {
+        description: "Network error",
+      });
+    } finally {
+      setMarkingJunk(false);
+    }
+  };
 
   const resync = async () => {
     setResyncing(true);
@@ -116,6 +174,36 @@ export function DetailActions({
         )}
         <span className="max-sm:hidden">Rebuild chunks</span>
       </Button>
+      {isJunk ? (
+        <Button
+          variant="outline"
+          size="sm"
+          onClick={toggleJunk}
+          disabled={busy}
+        >
+          {markingJunk ? (
+            <LoaderCircle className="size-3.5 animate-spin" />
+          ) : (
+            <Undo2 className="size-3.5" />
+          )}
+          <span className="max-sm:hidden">Not junk</span>
+        </Button>
+      ) : (
+        <Button
+          variant="outline"
+          size="sm"
+          onClick={toggleJunk}
+          disabled={busy}
+          className="border-red-200 text-red-600 hover:bg-red-50 hover:text-red-700 dark:border-red-500/30 dark:text-red-400 dark:hover:bg-red-500/10"
+        >
+          {markingJunk ? (
+            <LoaderCircle className="size-3.5 animate-spin" />
+          ) : (
+            <Trash2 className="size-3.5" />
+          )}
+          <span className="max-sm:hidden">Mark as junk</span>
+        </Button>
+      )}
     </div>
   );
 }

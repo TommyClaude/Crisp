@@ -2,7 +2,7 @@ import Link from "next/link";
 import { formatDistanceToNow } from "date-fns";
 import { MessageSquare, Paperclip } from "lucide-react";
 
-import { StateBadge, initialsOf } from "@/components/state-badge";
+import { JunkBadge, StateBadge, initialsOf } from "@/components/state-badge";
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
 import { Badge } from "@/components/ui/badge";
 
@@ -21,6 +21,8 @@ export interface ConversationRowItem {
   lastMessagePreview: string | null;
   updatedAtCrisp: string | null;
   createdAtCrisp: string | null;
+  isJunk: boolean;
+  junkReason: string | null;
   assignedOperator: {
     crispUserId: string;
     name: string | null;
@@ -54,6 +56,7 @@ export function ConversationRow({ item }: { item: ConversationRowItem }) {
         <div className="flex items-center gap-2">
           <span className="truncate text-sm font-medium">{name}</span>
           <StateBadge state={item.state} />
+          {item.isJunk ? <JunkBadge reason={item.junkReason} /> : null}
         </div>
 
         {item.lastMessagePreview ? (
