@@ -10,6 +10,8 @@ import type { Prisma } from "@prisma/client";
 
 /** URL `?status=` value for the default work-queue tab. */
 export const NEEDS_REPLY = "needs-reply";
+/** URL `?status=` value for the "can probably be closed" tab (silent topics). */
+export const NEEDS_RESOLVED = "needs-resolved";
 /** URL `?status=` value for the browse-all tab (no status filter). */
 export const RECENT = "recent";
 /** The tab shown when `?status=` is absent. */
@@ -38,6 +40,7 @@ export interface SuggestionTab {
  */
 export const SUGGESTION_TABS: SuggestionTab[] = [
   { value: NEEDS_REPLY, label: "Needs reply" },
+  { value: NEEDS_RESOLVED, label: "Needs resolved" },
   { value: RECENT, label: "Recent" },
   { value: "new", label: "No draft" },
   { value: "failed", label: "Failed" },
@@ -49,18 +52,20 @@ export const SUGGESTION_TABS: SuggestionTab[] = [
 export const ONBOARDING_EMPTY =
   'No forum topics yet — set a wp.org slug on your plugins, then click "Check forums now".';
 
-/** How a raw `?status=` param maps onto the three query shapes. */
+/** How a raw `?status=` param maps onto the query shapes. */
 export type ResolvedTab =
   | { kind: "needs-reply" }
+  | { kind: "needs-resolved" }
   | { kind: "recent" }
   | { kind: "status"; status: string };
 
 /**
  * Interpret the `?status=` param. Absent, NEEDS_REPLY, or anything unknown all
- * resolve to the default Needs-reply queue; RECENT is browse-all; a known real
- * status is a plain status filter.
+ * resolve to the default Needs-reply queue; NEEDS_RESOLVED is the silent-topics
+ * tab; RECENT is browse-all; a known real status is a plain status filter.
  */
 export function resolveTab(statusParam: string | undefined | null): ResolvedTab {
+  if (statusParam === NEEDS_RESOLVED) return { kind: "needs-resolved" };
   if (statusParam === RECENT) return { kind: "recent" };
   if (statusParam && REAL_STATUSES.has(statusParam)) {
     return { kind: "status", status: statusParam };
@@ -72,6 +77,7 @@ export function resolveTab(statusParam: string | undefined | null): ResolvedTab 
 export function activeTabValue(statusParam: string | undefined | null): string {
   const resolved = resolveTab(statusParam);
   if (resolved.kind === "needs-reply") return NEEDS_REPLY;
+  if (resolved.kind === "needs-resolved") return NEEDS_RESOLVED;
   if (resolved.kind === "recent") return RECENT;
   return resolved.status;
 }
@@ -82,7 +88,10 @@ export function activeTabValue(statusParam: string | undefined | null): string {
  * already reviewed — a fresh customer reply (hasNewReply) or an overdue support
  * promise (followupPromisedAt at/older than the cutoff). Dismissed topics are
  * excluded unconditionally (a human deliberately discarded them), and reviewed
- * topics with no flag drop out. `promiseCutoff` is `now - grace period`.
+ * topics with no flag drop out. Topics waiting on the customer (the support
+ * team replied last with no promise → waitingSince set) leave the plain backlog
+ * — they belong in "Needs resolved", not this queue. `promiseCutoff` is
+ * `now - grace period`.
  */
 export function needsReplyWhere(
   promiseCutoff: Date
@@ -92,7 +101,13 @@ export function needsReplyWhere(
       { status: { not: "dismissed" } },
       {
         OR: [
-          { status: { in: ["new", "drafted", "failed"] } },
+          // Backlog: unhandled AND not waiting on the customer.
+          {
+            AND: [
+              { status: { in: ["new", "drafted", "failed"] } },
+              { waitingSince: null },
+            ],
+          },
           { hasNewReply: true },
           // `<= cutoff` on a nullable column excludes NULLs in SQL, so an
           // unarmed promise never matches.
@@ -134,12 +149,39 @@ export function needsReplyBacklogWhere(
     AND: [
       { status: { in: ["new", "drafted", "failed"] } },
       { hasNewReply: false },
+      // Waiting on the customer (support replied last, no promise) — the topic
+      // leaves the work queue for "Needs resolved" / Recent. `null` here keeps
+      // this half disjoint from the flagged half and from "Needs resolved".
+      { waitingSince: null },
       {
         OR: [
           { followupPromisedAt: null },
           { followupPromisedAt: { gt: promiseCutoff } },
         ],
       },
+    ],
+  };
+}
+
+/**
+ * The "Needs resolved" tab: topics waiting on the customer whose silence has
+ * passed the nudge threshold — the support team replied last with no follow-up
+ * promise (waitingSince set), and the customer hasn't responded for
+ * WPORG_SILENCE_NUDGE_DAYS. These can probably be closed. `silenceCutoff` is
+ * `now - nudge period`; `<= cutoff` on the nullable waitingSince column excludes
+ * NULLs in SQL, so a non-waiting or still-recent topic never matches. Dismissed
+ * topics are excluded (a human already discarded them), and so are topics
+ * already marked resolved on wordpress.org (wpResolved) — no point asking
+ * permission to close a matter the forum already considers closed.
+ */
+export function needsResolvedWhere(
+  silenceCutoff: Date
+): Prisma.SupportThreadWhereInput {
+  return {
+    AND: [
+      { status: { not: "dismissed" } },
+      { wpResolved: false },
+      { waitingSince: { lte: silenceCutoff } },
     ],
   };
 }
@@ -161,6 +203,8 @@ export function emptyStateMessage(params: {
   switch (tab) {
     case NEEDS_REPLY:
       return "All caught up — nothing is waiting on your team.";
+    case NEEDS_RESOLVED:
+      return "No silent topics — every conversation is still active or closed.";
     case "new":
       return "Every topic has a draft.";
     case "failed":

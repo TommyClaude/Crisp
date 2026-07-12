@@ -12,14 +12,18 @@ import type { FollowupResult } from "@/lib/suggest/followup";
 import { suggesterConfigured } from "@/lib/suggest/llm";
 import {
   daysSincePromise,
+  daysSinceWaiting,
   isPromiseDue,
+  isSilenceNudgeDue,
   promiseDueCutoff,
+  silenceNudgeCutoff,
   sortNeedsReplyRows,
 } from "@/lib/suggest/promise";
 import type { ContextChunkSummary, DraftItem } from "@/lib/suggest/suggester";
 import {
   needsReplyBacklogWhere,
   needsReplyFlaggedWhere,
+  needsResolvedWhere,
   resolveTab,
 } from "@/lib/suggest/suggestions-view";
 import { computeResumeIndex, getCheckProgress } from "@/lib/wporg/check-state";
@@ -37,9 +41,12 @@ export default async function SuggestionsPage({
   const pluginId = first(sp.pluginId);
   const tab = resolveTab(first(sp.status));
 
-  const reminderDays = getEnv().WPORG_PROMISE_REMINDER_DAYS;
+  const env = getEnv();
+  const reminderDays = env.WPORG_PROMISE_REMINDER_DAYS;
+  const nudgeDays = env.WPORG_SILENCE_NUDGE_DAYS;
   const now = new Date();
   const promiseCutoff = promiseDueCutoff(reminderDays, now);
+  const silenceCutoff = silenceNudgeCutoff(nudgeDays, now);
   const pluginWhere: Prisma.SupportThreadWhereInput = pluginId
     ? { pluginId }
     : {};
@@ -58,6 +65,8 @@ export default async function SuggestionsPage({
   //    an old lastActivityAt must survive any number of fresher backlog rows
   //    (with one capped query it silently vanished past 50 rows). The JS pass
   //    below finishes the flagged-first ordering.
+  //  - "needs-resolved": silent topics waiting on the customer past the nudge
+  //    threshold, longest-waiting first (waitingSince asc).
   //  - "recent": browse-all, floated by fresh activity (lastActivityAt).
   //  - a real status: that status only, keeping the publish-date ordering.
   const fetchThreads =
@@ -76,22 +85,30 @@ export default async function SuggestionsPage({
             take: 50,
           }),
         ]).then(([flagged, backlog]) => [...flagged, ...backlog])
-      : tab.kind === "recent"
+      : tab.kind === "needs-resolved"
         ? prisma.supportThread.findMany({
-            where: pluginWhere,
+            where: { ...needsResolvedWhere(silenceCutoff), ...pluginWhere },
             include: threadInclude,
-            orderBy: activityOrder,
+            // Longest-waiting first — the topics most overdue for a close.
+            orderBy: [{ waitingSince: { sort: "asc", nulls: "last" } }],
             take: 50,
           })
-        : prisma.supportThread.findMany({
-            where: { status: tab.status, ...pluginWhere },
-            include: threadInclude,
-            orderBy: [
-              { publishedAt: { sort: "desc", nulls: "last" } },
-              { fetchedAt: "desc" },
-            ],
-            take: 50,
-          });
+        : tab.kind === "recent"
+          ? prisma.supportThread.findMany({
+              where: pluginWhere,
+              include: threadInclude,
+              orderBy: activityOrder,
+              take: 50,
+            })
+          : prisma.supportThread.findMany({
+              where: { status: tab.status, ...pluginWhere },
+              include: threadInclude,
+              orderBy: [
+                { publishedAt: { sort: "desc", nulls: "last" } },
+                { fetchedAt: "desc" },
+              ],
+              take: 50,
+            });
 
   const [threads, plugins, lastCheckLog, resumeRuns, totalThreadCount] =
     await Promise.all([
@@ -178,6 +195,7 @@ export default async function SuggestionsPage({
       ? {
           postCount: storedFollowup.postCount,
           skipped: storedFollowup.skipped ?? null,
+          mode: storedFollowup.mode ?? null,
           drafts: (storedFollowup.drafts ?? []).map((draft) => ({
             provider: draft.provider,
             model: draft.model,
@@ -205,6 +223,18 @@ export default async function SuggestionsPage({
       promiseDueDays: isPromiseDue(thread.followupPromisedAt, reminderDays, now)
         ? daysSincePromise(thread.followupPromisedAt!, now)
         : null,
+      // Waiting on the customer (support replied last, no promise). waitingDays
+      // is null when not waiting; otherwise it's whole days since the clock
+      // started and drives a badge — amber "No response · Nd" once past the
+      // nudge threshold, muted "Waiting on customer" while still under it.
+      waitingDays: thread.waitingSince
+        ? daysSinceWaiting(thread.waitingSince, now)
+        : null,
+      silenceOverThreshold: isSilenceNudgeDue(
+        thread.waitingSince,
+        nudgeDays,
+        now
+      ),
       publishedAt: thread.publishedAt?.toISOString() ?? null,
       fetchedAt: thread.fetchedAt.toISOString(),
       plugin: { id: thread.plugin.id, name: thread.plugin.name },

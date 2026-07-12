@@ -164,6 +164,9 @@ export interface FollowupView {
   postCount: number;
   drafts: DraftItemView[];
   skipped: "no_replies" | "fetch_failed" | "support_last" | null;
+  /** "gentle_close" when the drafts are a polite closing reply (support posted
+   *  last and the customer went silent past the nudge threshold). */
+  mode: "gentle_close" | null;
 }
 
 /**
@@ -178,11 +181,15 @@ export interface FollowupView {
  */
 export function FollowupSection({
   followup,
+  noResponseDays,
   onDraftAnyway,
   draftAnywayLoading,
   draftAnywayDisabled,
 }: {
   followup: FollowupView;
+  /** Days of customer silence, for the gentle-close header ("no response for
+   *  {n} days"). Only used when followup.mode === "gentle_close". */
+  noResponseDays?: number | null;
   /** When provided, renders a "Draft anyway" button on the support_last skip. */
   onDraftAnyway?: () => void;
   /** Spinner state for the "Draft anyway" button (this action is in flight). */
@@ -191,13 +198,17 @@ export function FollowupSection({
   draftAnywayDisabled?: boolean;
 }) {
   const hasDrafts = followup.drafts.some((draft) => draft.text);
+  const isGentleClose = followup.mode === "gentle_close";
   return (
     <div className="space-y-2 rounded-md border border-amber-300/70 bg-amber-50/30 p-3 dark:border-amber-500/25 dark:bg-amber-500/[0.04]">
       <div className="flex items-center gap-2">
         <CornerDownRight className="size-3.5 shrink-0 text-amber-600 dark:text-amber-400" />
         <span className="text-xs font-semibold tracking-wide text-amber-700 dark:text-amber-500">
-          Follow-up reply — based on the current thread ({followup.postCount}{" "}
-          {followup.postCount === 1 ? "post" : "posts"})
+          {isGentleClose
+            ? noResponseDays != null
+              ? `Closing reply — no response for ${noResponseDays} day${noResponseDays === 1 ? "" : "s"}`
+              : "Closing reply — no response from the customer"
+            : `Follow-up reply — based on the current thread (${followup.postCount} ${followup.postCount === 1 ? "post" : "posts"})`}
         </span>
       </div>
       {followup.skipped === "no_replies" ? (

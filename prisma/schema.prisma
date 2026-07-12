@@ -89,7 +89,8 @@ model SupportThread {
   // (not the watcher/bulk paths, for cost control). These answer the LATEST
   // customer message in the whole live wp.org thread rather than the opening
   // post: {generatedAt, postCount, drafts:[{provider,model,text,error}],
-  // context:[...], skipped?: "no_replies" | "fetch_failed"}.
+  // context:[...], skipped?: "no_replies" | "fetch_failed" | "support_last",
+  // mode?: "gentle_close" (a permission-to-close reply for a silent thread)}.
   followupJson Json?
   suggestError String?
   // Resurfacing: set when a customer posts a fresh reply on an otherwise old
@@ -111,6 +112,21 @@ model SupportThread {
   // than WPORG_PROMISE_REMINDER_DAYS it drives the amber "Follow-up due" badge
   // and pulls the topic into the "Needs reply" work queue.
   followupPromisedAt DateTime?
+  // Set when the watcher sees a support-team reply as the newest post WITHOUT a
+  // follow-up promise — the ball is with the customer. Cleared when the customer
+  // replies (hasNewReply), the thread's status changes (reviewed/dismissed/…),
+  // or a promise supersedes it. Drives the "Waiting on customer" state (the
+  // topic leaves the "Needs reply" queue), and once it is older than
+  // WPORG_SILENCE_NUDGE_DAYS it pulls the topic into the "Needs resolved" tab
+  // (topics that can probably be closed) with a "No response" badge.
+  waitingSince DateTime?
+  // The topic's resolution flag as shown on wordpress.org, refreshed whenever we
+  // fetch the live topic page (the watcher's resurface + silent-topic passes and
+  // the follow-up Regenerate fetch). false when unknown — we bias toward
+  // surfacing, since hiding an unresolved topic defeats the "Needs resolved" tab
+  // while showing a resolved one is only minor noise. A topic marked resolved on
+  // wp.org is excluded from "Needs resolved" (no point asking to close it).
+  wpResolved   Boolean   @default(false)
   fetchedAt    DateTime  @default(now())
   updatedAt    DateTime  @updatedAt
 
@@ -119,6 +135,7 @@ model SupportThread {
   @@index([publishedAt])
   @@index([lastActivityAt])
   @@index([followupPromisedAt])
+  @@index([waitingSince])
 }
 
 // A crawlable documentation source for a plugin (site URL or sitemap.xml).

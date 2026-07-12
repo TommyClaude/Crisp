@@ -94,6 +94,44 @@ export function daysSincePromise(promisedAt: Date, now: Date = new Date()): numb
   return Math.floor((now.getTime() - promisedAt.getTime()) / MS_PER_DAY);
 }
 
+/**
+ * Customer-silence date-gating for the "Needs resolved" tab. When the support
+ * team posts the last reply WITHOUT promising more (see the watcher's resurface
+ * path), the topic starts waiting on the customer (SupportThread.waitingSince).
+ * These pure gates mirror the promise ones above: {@link silenceNudgeCutoff}
+ * is the instant a waiting clock must predate to count as "silent long enough",
+ * {@link isSilenceNudgeDue} applies it to a nullable column, and
+ * {@link daysSinceWaiting} is the N in the "No response · Nd" badge.
+ */
+
+/** The instant at/before which a waiting topic's silence is long enough to
+ *  surface in "Needs resolved": `now` minus the nudge period. */
+export function silenceNudgeCutoff(
+  nudgeDays: number,
+  now: Date = new Date()
+): Date {
+  return new Date(now.getTime() - nudgeDays * MS_PER_DAY);
+}
+
+/**
+ * Pure date gate for the "Needs resolved" tab and the "No response" badge: a
+ * topic counts as silent only when waitingSince is set AND older than the nudge
+ * period (right after the team's reply, nothing is due yet). Side-effect-free.
+ */
+export function isSilenceNudgeDue(
+  waitingSince: Date | null | undefined,
+  nudgeDays: number,
+  now: Date = new Date()
+): boolean {
+  if (!waitingSince) return false;
+  return waitingSince.getTime() <= silenceNudgeCutoff(nudgeDays, now).getTime();
+}
+
+/** Whole days elapsed since the waiting clock started — the N in the badge. */
+export function daysSinceWaiting(waitingSince: Date, now: Date = new Date()): number {
+  return Math.floor((now.getTime() - waitingSince.getTime()) / MS_PER_DAY);
+}
+
 /** Minimal row shape the Needs-reply ordering needs. */
 export interface NeedsReplySortRow {
   hasNewReply: boolean;

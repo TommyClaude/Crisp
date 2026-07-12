@@ -42,6 +42,14 @@ const envSchema = z.object({
   // PromisedAt; the "Follow-up due" badge and the "Needs reply" queue only
   // surface it once it's older than this many days.
   WPORG_PROMISE_REMINDER_DAYS: z.coerce.number().int().positive().default(3),
+  // Days of customer silence after a support-team reply (with no follow-up
+  // promise) before the topic surfaces in the "Needs resolved" tab — topics
+  // that can probably be closed. The watcher stamps SupportThread.waitingSince
+  // on that reply; once it is older than this many days the topic appears in
+  // "Needs resolved" with a "No response" badge, and its follow-up box offers a
+  // gentle-close draft. Under the threshold the topic just shows a muted
+  // "Waiting on customer" badge in Recent.
+  WPORG_SILENCE_NUDGE_DAYS: z.coerce.number().int().positive().default(3),
   BASIC_AUTH_USER: z.string().optional(),
   BASIC_AUTH_PASSWORD: z.string().optional(),
   CRISP_REQUEST_INTERVAL_MS: z.coerce.number().int().positive().default(150),

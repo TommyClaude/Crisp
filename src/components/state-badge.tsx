@@ -118,6 +118,53 @@ export function FollowupDueBadge({
   );
 }
 
+/**
+ * Muted "Waiting on customer" badge: the support team posted the last reply
+ * with no follow-up promise, and the customer has been silent for less than
+ * WPORG_SILENCE_NUDGE_DAYS (SupportThread.waitingSince). The ball is with the
+ * customer but it's too soon to nudge a close, so this reads as neutral —
+ * distinct from the amber "No response" badge that follows the threshold.
+ */
+export function WaitingOnCustomerBadge({ className }: { className?: string }) {
+  return (
+    <Badge
+      title="Your team posted the latest reply — waiting on the customer to respond."
+      className={cn(
+        "border-transparent bg-zinc-100 text-zinc-600 dark:bg-zinc-500/15 dark:text-zinc-400",
+        className
+      )}
+    >
+      Waiting on customer
+    </Badge>
+  );
+}
+
+/**
+ * Amber "No response · Nd" badge: a waiting topic whose customer silence has
+ * passed WPORG_SILENCE_NUDGE_DAYS (that gating is computed server-side; this
+ * component just renders). It reads as "probably closeable" — the topic shows
+ * in the "Needs resolved" tab and its follow-up box offers a gentle-close draft.
+ */
+export function NoResponseBadge({
+  days,
+  className,
+}: {
+  days: number;
+  className?: string;
+}) {
+  return (
+    <Badge
+      title={`No customer response for ${days} day${days === 1 ? "" : "s"} since your team's last reply — this topic can probably be closed.`}
+      className={cn(
+        "border-transparent bg-amber-100 text-amber-700 dark:bg-amber-500/15 dark:text-amber-400",
+        className
+      )}
+    >
+      No response · {days}d
+    </Badge>
+  );
+}
+
 /** Avatar-fallback initials derived from a nickname or email. */
 export function initialsOf(
   nickname: string | null | undefined,

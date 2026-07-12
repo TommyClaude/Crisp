@@ -27,7 +27,9 @@ import { HelpTip } from "@/components/help-tip";
 import {
   FollowupDueBadge,
   NewReplyBadge,
+  NoResponseBadge,
   ThreadStatusBadge,
+  WaitingOnCustomerBadge,
 } from "@/components/state-badge";
 import {
   ContextChunkList,
@@ -66,6 +68,7 @@ import {
   DEFAULT_TAB,
   emptyStateMessage,
   NEEDS_REPLY,
+  NEEDS_RESOLVED,
   SUGGESTION_TABS,
 } from "@/lib/suggest/suggestions-view";
 
@@ -93,6 +96,14 @@ export interface SuggestionThreadItem {
   // promise, or it is still within the grace period) — drives the amber
   // "Follow-up due" badge. Gating is computed server-side.
   promiseDueDays: number | null;
+  // Whole days the topic has been waiting on the customer (support replied last,
+  // no promise), or null when not waiting. Drives the waiting badge; whether it
+  // reads amber or muted is decided by silenceOverThreshold.
+  waitingDays: number | null;
+  // True once waitingDays has passed WPORG_SILENCE_NUDGE_DAYS — the topic is in
+  // "Needs resolved" and shows the amber "No response · Nd" badge; false shows
+  // the muted "Waiting on customer" badge. Computed server-side.
+  silenceOverThreshold: boolean;
   publishedAt: string | null;
   fetchedAt: string;
   plugin: { id: string; name: string };
@@ -482,7 +493,15 @@ export function SuggestionsManager({
                   draft yet, a draft to review, or a failed draft — plus anything
                   flagged for attention even after review: a fresh customer
                   reply, or a support follow-up your team promised and hasn&rsquo;t
-                  posted. Dismissed topics never appear here.
+                  posted. Topics waiting on the customer and dismissed topics
+                  never appear here.
+                </HelpTip>
+              ) : tab.value === NEEDS_RESOLVED ? (
+                <HelpTip subject="the Needs resolved tab" className="mr-1">
+                  Topics where your team posted the last reply and the customer
+                  has gone quiet for several days. They can probably be closed —
+                  open one and use Regenerate to draft a gentle closing reply
+                  that still invites them to reopen if anything is unresolved.
                 </HelpTip>
               ) : null}
             </React.Fragment>
@@ -901,6 +920,13 @@ function ThreadCard({
               {thread.promiseDueDays != null ? (
                 <FollowupDueBadge days={thread.promiseDueDays} />
               ) : null}
+              {thread.waitingDays != null ? (
+                thread.silenceOverThreshold ? (
+                  <NoResponseBadge days={thread.waitingDays} />
+                ) : (
+                  <WaitingOnCustomerBadge />
+                )
+              ) : null}
               <Badge variant="secondary">{thread.plugin.name}</Badge>
               {thread.publishedAt ? (
                 <span
@@ -972,6 +998,7 @@ function ThreadCard({
         {thread.followup ? (
           <FollowupSection
             followup={thread.followup}
+            noResponseDays={thread.waitingDays}
             onDraftAnyway={() =>
               void call(
                 "draft-anyway",

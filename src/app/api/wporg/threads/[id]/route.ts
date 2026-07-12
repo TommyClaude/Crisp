@@ -39,6 +39,10 @@ export async function PATCH(
         status: parsed.data.status,
         hasNewReply: false,
         followupPromisedAt: null,
+        // Reviewing/dismissing ends the "waiting on the customer" state too, so
+        // the topic drops out of "Needs resolved"; the watcher restarts the
+        // clock if the team replies again later.
+        waitingSince: null,
       },
     });
     return NextResponse.json({ thread });

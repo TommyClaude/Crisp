@@ -127,7 +127,17 @@ export function looksResolved(fragment: string): boolean {
   for (const attr of classAttr) {
     if (/(?:^|[\s"])(?:topic-)?resolved(?:[\s"]|$)/i.test(attr)) return true;
   }
-  return /title="[^"]*(?<!not[\s-])\bresolved\b[^"]*"/i.test(fragment);
+  // Tooltip text: "resolved" counts only when no "not" precedes it anywhere in
+  // the same attribute — an adjacent-only check (lookbehind) missed phrasings
+  // like "has not been resolved yet", and a false positive here silently hides
+  // a still-open topic from the "Needs resolved" tab (the worse direction).
+  const titleAttrs = fragment.match(/title="[^"]*"/gi) ?? [];
+  for (const attr of titleAttrs) {
+    if (!/\bresolved\b/i.test(attr)) continue;
+    if (/\bnot\b[^"]*\bresolved\b/i.test(attr)) continue;
+    return true;
+  }
+  return false;
 }
 
 /**
