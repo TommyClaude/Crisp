@@ -4,10 +4,30 @@
  * this singleton only powers live progress reporting and cancellation.
  */
 
-export type SyncKind = "full" | "incremental" | "single";
+export type SyncKind = "full" | "incremental" | "single" | "range";
 
 /** Terminal status recorded when a run is halted on request. */
 export type CancelReason = "cancelled" | "paused";
+
+/**
+ * Range-run verification, held in memory only (never a schema change). The
+ * first real range run reports in-range counts by BOTH candidate bases so the
+ * owner can tell which timestamp Crisp's date filter actually matches, plus the
+ * requested window and whether the early-stop guard tripped.
+ */
+export interface RangeProgress {
+  /** Requested window (ISO), shown on the running-progress line. */
+  start: string | null;
+  end: string | null;
+  /** Conversations examined on processed pages (the verification denominator). */
+  seen: number;
+  /** In-range by updatedAtCrisp (last activity). */
+  inByUpdated: number;
+  /** In-range by createdAtCrisp. */
+  inByCreated: number;
+  /** The early-stop guard fired: an entire page fell outside the window. */
+  stoppedEarly: boolean;
+}
 
 export interface SyncProgress {
   running: boolean;
@@ -23,6 +43,19 @@ export interface SyncProgress {
   cancelRequested: boolean;
   /** Whether an in-flight halt should record the run as paused vs cancelled. */
   cancelReason: CancelReason;
+  /** Populated only for kind === "range" runs; otherwise all zero/null. */
+  range: RangeProgress;
+}
+
+function freshRange(): RangeProgress {
+  return {
+    start: null,
+    end: null,
+    seen: 0,
+    inByUpdated: 0,
+    inByCreated: 0,
+    stoppedEarly: false,
+  };
 }
 
 function freshProgress(): SyncProgress {
@@ -39,6 +72,7 @@ function freshProgress(): SyncProgress {
     statusMessage: null,
     cancelRequested: false,
     cancelReason: "cancelled",
+    range: freshRange(),
   };
 }
 
@@ -51,7 +85,11 @@ export function getSyncProgress(): SyncProgress {
   return globalForSync.crispSyncProgress;
 }
 
-export function beginSyncProgress(kind: SyncKind, syncLogId: string): SyncProgress {
+export function beginSyncProgress(
+  kind: SyncKind,
+  syncLogId: string,
+  range?: { start: Date; end: Date }
+): SyncProgress {
   const state = getSyncProgress();
   Object.assign(state, freshProgress(), {
     running: true,
@@ -59,6 +97,11 @@ export function beginSyncProgress(kind: SyncKind, syncLogId: string): SyncProgre
     syncLogId,
     startedAt: new Date().toISOString(),
     statusMessage: "starting",
+    range: {
+      ...freshRange(),
+      start: range?.start.toISOString() ?? null,
+      end: range?.end.toISOString() ?? null,
+    },
   });
   return state;
 }

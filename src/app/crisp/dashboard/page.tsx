@@ -8,7 +8,7 @@ import {
 } from "lucide-react";
 
 import { CrispTabs } from "@/components/crisp/crisp-tabs";
-import { SyncPanel } from "@/components/dashboard/sync-panel";
+import { CrispSyncDashboard } from "@/components/dashboard/crisp-sync-dashboard";
 import type { SerializedSyncLog } from "@/components/dashboard/sync-log-table";
 import {
   Card,
@@ -18,6 +18,7 @@ import {
   CardTitle,
 } from "@/components/ui/card";
 import { getDashboardStats } from "@/lib/conversations";
+import { getArchiveCoverage } from "@/lib/sync/coverage-query";
 import { getResumePage } from "@/lib/sync/sync-service";
 
 export const dynamic = "force-dynamic";
@@ -52,9 +53,10 @@ interface StatCard {
 }
 
 export default async function DashboardPage() {
-  const [stats, resumePage] = await Promise.all([
+  const [stats, resumePage, coverage] = await Promise.all([
     getDashboardStats(),
     getResumePage(),
+    getArchiveCoverage(),
   ]);
 
   const lastSync = stats.lastSync
@@ -135,7 +137,8 @@ export default async function DashboardPage() {
         ))}
       </section>
 
-      <SyncPanel
+      <CrispSyncDashboard
+        coverage={coverage}
         lastSync={lastSync}
         recentLogs={recentLogs}
         resumePage={resumePage}

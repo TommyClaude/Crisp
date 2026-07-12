@@ -145,6 +145,17 @@ Only syncs conversations updated since the last successful run, with a 1-hour ov
 
 `/crisp/dashboard` has **Full sync**, **Incremental sync** and **Stop** buttons backed by `POST /api/sync/crisp/start` and `POST /api/sync/crisp/stop`, with live progress from `GET /api/sync/crisp/status`. Only one sync can run at a time (a second start returns `409`). Stop is graceful: the conversation in flight finishes, progress is persisted, and the log is marked `cancelled`.
 
+### Archive coverage & range sync
+
+The **Archive coverage** card on `/crisp/dashboard` is a year × month heatmap of the conversations already in the database, bucketed by **last activity** (the `COVERAGE_BASIS` constant in `src/lib/sync/coverage.ts`). An empty month between active months usually means that period was never synced. Clicking a month prefills the **From / To** date inputs; **Sync range** then walks the Crisp list with `filter_date_start`/`filter_date_end`, so requests are proportional to the window, not the whole archive (runs land in `SyncLog` as kind `range`).
+
+Two safeguards, because Crisp's docs don't spell out which timestamp the filter matches:
+
+- **Early stop** — if an entire page comes back with zero conversations in-range by the basis (and at least one provably out of range), the walk stops instead of degenerating into an unbounded full walk.
+- **First-run verification line** — each range run reports how many fetched conversations fell inside the window by *last activity* vs by *created date* ("In range by last-activity: X/N, by created: Y/N"). If created wins on your workspace, flip `COVERAGE_BASIS` once and the heatmap, the range guard, and the labels all follow.
+
+Range syncs are idempotent upserts — re-running a window never duplicates data.
+
 ### Reliability details
 
 - **Rate limiting** — all Crisp requests are serialized through one process-wide queue with a minimum inter-request delay (`CRISP_REQUEST_INTERVAL_MS`, default 150 ms).
@@ -205,7 +216,7 @@ All routes require Basic auth (see Security). All bodies/queries are Zod-validat
 
 | Method | Path | Description |
 | --- | --- | --- |
-| `POST` | `/api/sync/crisp/start` | Start a background sync. Body `{mode?: "full"\|"incremental", startPage?}`. `202` on start, `409` if one is running |
+| `POST` | `/api/sync/crisp/start` | Start a background sync. Body `{mode?: "full"\|"incremental", startPage?, dateStart?, dateEnd?}` — `dateStart`+`dateEnd` (both, `YYYY-MM-DD`, start ≤ end) run a range sync over that window; `startPage` is for full/incremental only and is rejected alongside a date range (range page numbers index Crisp's filtered list, not the archive). `202` on start, `409` if one is running |
 | `GET` | `/api/sync/crisp/status` | Live sync progress + last completed run + 10 most recent logs |
 | `POST` | `/api/sync/crisp/stop` | Request graceful cancellation of the running sync (`409` if none) |
 | `POST` | `/api/sync/crisp/conversation/{sessionId}` | Re-fetch one conversation from Crisp, upsert it, rebuild its chunks |

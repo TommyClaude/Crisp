@@ -14,6 +14,11 @@ import {
   getSyncProgress,
   type SyncKind,
 } from "./sync-state";
+import {
+  classifyRangePage,
+  COVERAGE_BASIS_LABEL,
+  shouldStopRangeWalk,
+} from "./coverage";
 
 /** Upsert batch size for messages — keeps transactions small and memory flat. */
 const MESSAGE_BATCH_SIZE = 50;
@@ -29,6 +34,18 @@ export interface SyncRunResult {
   messagesSynced: number;
   failedSessions: string[];
   error?: string;
+  /**
+   * Present only for range runs. Verification aid for deciding which timestamp
+   * Crisp's date filter matches: in-range counts by BOTH candidate bases over
+   * the same `seen` conversations, plus whether the early-stop guard fired.
+   */
+  range?: {
+    seen: number;
+    inByUpdated: number;
+    inByCreated: number;
+    stoppedEarly: boolean;
+    note?: string;
+  };
 }
 
 /** One Crisp website to sync — a Brand row, or the legacy env fallback. */
@@ -312,6 +329,12 @@ interface RunSyncOptions {
   startPage?: number;
   /** Only sync conversations updated at/after this time (incremental). */
   updatedSince?: Date | null;
+  /**
+   * Range mode (kind "range"): page-walk with Crisp's date filter applied and
+   * a per-page early-stop guard. Both bounds are required together.
+   */
+  dateStart?: Date;
+  dateEnd?: Date;
 }
 
 /**
@@ -346,11 +369,22 @@ async function runSync(options: RunSyncOptions): Promise<SyncRunResult> {
       pageFrom: options.startPage ?? 1,
     },
   });
-  const state = beginSyncProgress(options.kind, syncLog.id);
+  // Range window: both bounds or neither (callers guarantee this).
+  const rangeWindow =
+    options.dateStart && options.dateEnd
+      ? { start: options.dateStart, end: options.dateEnd }
+      : null;
+  const state = beginSyncProgress(
+    options.kind,
+    syncLog.id,
+    rangeWindow ?? undefined
+  );
 
   const updatedSinceMs = options.updatedSince?.getTime() ?? null;
   let status: SyncRunResult["status"] = "completed";
   let errorMessage: string | undefined;
+  // Human note when the early-stop guard trips (surfaced in the result).
+  let rangeStoppedNote: string | undefined;
 
   try {
     const targets = await getSyncTargets();
@@ -409,9 +443,35 @@ async function runSync(options: RunSyncOptions): Promise<SyncRunResult> {
         state.statusMessage = `[${target.name}] fetching page ${page}`;
         const conversations = await client.listConversations(
           target.websiteId,
-          page
+          page,
+          rangeWindow
+            ? { dateStart: rangeWindow.start, dateEnd: rangeWindow.end }
+            : undefined
         );
         if (!conversations || conversations.length === 0) break;
+
+        // Range mode SAFETY GUARD: classify the page by the coverage basis and
+        // stop this target's walk if the WHOLE page landed outside the window —
+        // a wrongly-ignored Crisp filter must never degenerate into a full
+        // walk. Verification counts (by both bases) accumulate only for pages
+        // we actually process, so a bailed-out page's out-of-range noise never
+        // pollutes the "which basis does the filter use?" signal.
+        if (rangeWindow) {
+          const stats = classifyRangePage(conversations, rangeWindow);
+          if (shouldStopRangeWalk(stats)) {
+            state.range.stoppedEarly = true;
+            rangeStoppedNote =
+              `Stopped early on page ${page}: an entire page fell outside the ` +
+              `requested range — Crisp's date filter appears to be ignored or ` +
+              `the range is exhausted. ${stats.basisOut} of ${stats.seen} ` +
+              `conversations were out of range by ${COVERAGE_BASIS_LABEL}, none in.`;
+            state.statusMessage = `[${target.name}] ${rangeStoppedNote}`;
+            break;
+          }
+          state.range.seen += stats.seen;
+          state.range.inByUpdated += stats.inByUpdated;
+          state.range.inByCreated += stats.inByCreated;
+        }
 
         // Incremental mode: the list is roughly newest-activity-first, but
         // Crisp's sort key (activity) is not identical to updated_at, so a
@@ -563,11 +623,23 @@ async function runSync(options: RunSyncOptions): Promise<SyncRunResult> {
     messagesSynced: state.messagesSynced,
     failedSessions: state.failedSessions,
     error: errorMessage,
+    ...(rangeWindow
+      ? {
+          range: {
+            seen: state.range.seen,
+            inByUpdated: state.range.inByUpdated,
+            inByCreated: state.range.inByCreated,
+            stoppedEarly: state.range.stoppedEarly,
+            note: rangeStoppedNote,
+          },
+        }
+      : {}),
   };
 }
 
 /** The subset of SyncLog columns {@link computeResumePage} needs. */
 export interface ResumeCandidate {
+  kind: string;
   pageFrom: number | null;
   pageTo: number | null;
   conversationsSynced: number;
@@ -579,7 +651,11 @@ export interface ResumeCandidate {
  * progress: it synced at least one conversation, or its pageTo advanced past
  * its own pageFrom. Runs that failed at their own starting page with nothing
  * synced are ignored, so a fresh run that dies immediately (e.g. a bad token)
- * can never drag the suggestion backwards. Matches the existing "continue"
+ * can never drag the suggestion backwards. Range runs are excluded entirely:
+ * their page numbers index Crisp's date-FILTERED list — a different numbering
+ * space from the full archive walk — so "page 50" of a range run must never
+ * become the resume suggestion for a full/incremental run (continuing from it
+ * would silently skip real archive pages). Matches the existing "continue"
  * convention of using pageTo directly as the next startPage (the loop in
  * runSync re-processes that page, which is idempotent via upserts) — callers
  * should NOT add 1 to the result. Falls back to 1 when nothing qualifies.
@@ -587,6 +663,7 @@ export interface ResumeCandidate {
 export function computeResumePage(runs: ResumeCandidate[]): number {
   let furthest = 0;
   for (const run of runs) {
+    if (run.kind === "range") continue;
     const pageTo = run.pageTo ?? 0;
     const pageFrom = run.pageFrom ?? 1;
     const madeProgress = run.conversationsSynced > 0 || pageTo > pageFrom;
@@ -600,11 +677,11 @@ export function computeResumePage(runs: ResumeCandidate[]): number {
  * {@link computeResumePage}).
  */
 export async function getResumePage(): Promise<number> {
-  // No pageTo filter here — computeResumePage() null-handles it, and keeping
+  // No pageTo/kind filter here — computeResumePage() handles both, and keeping
   // the progress rules in one place avoids a silent SQL/JS logic split.
   const runs = await prisma.syncLog.findMany({
     where: { status: { not: "running" } },
-    select: { pageFrom: true, pageTo: true, conversationsSynced: true },
+    select: { kind: true, pageFrom: true, pageTo: true, conversationsSynced: true },
   });
   return computeResumePage(runs);
 }
@@ -612,6 +689,26 @@ export async function getResumePage(): Promise<number> {
 /** Full sync of all conversations, oldest data included. Resumable via startPage. */
 export function runFullSync(options?: { startPage?: number }): Promise<SyncRunResult> {
   return runSync({ kind: "full", startPage: options?.startPage });
+}
+
+/**
+ * Range sync: page-walk WITH Crisp's `filter_date_*` params applied, upserting
+ * as usual, guarded so a fully-out-of-range page stops the walk early (see the
+ * guard in {@link runSync}). Lets the owner refill a specific gap the coverage
+ * heatmap surfaced without spending quota on a full backfill. The window is
+ * inclusive and interpreted exactly as passed (callers build a UTC day window).
+ */
+export function runRangeSync(options: {
+  dateStart: Date;
+  dateEnd: Date;
+  startPage?: number;
+}): Promise<SyncRunResult> {
+  return runSync({
+    kind: "range",
+    dateStart: options.dateStart,
+    dateEnd: options.dateEnd,
+    startPage: options.startPage,
+  });
 }
 
 /**

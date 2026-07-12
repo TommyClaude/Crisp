@@ -290,7 +290,7 @@ model EmbeddingChunk {
 
 model SyncLog {
   id                  String    @id @default(cuid())
-  kind                String    @default("full") // full | incremental | single
+  kind                String    @default("full") // full | incremental | single | range
   status              String // running | completed | failed | cancelled
   startedAt           DateTime  @default(now())
   finishedAt          DateTime?

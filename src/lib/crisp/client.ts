@@ -167,13 +167,25 @@ export class CrispClient {
     }
   }
 
-  /** List conversations, most recently active first. Page starts at 1. */
+  /**
+   * List conversations, most recently active first. Page starts at 1.
+   *
+   * Optional `filter.dateStart`/`filter.dateEnd` are sent as Crisp's
+   * `filter_date_start` / `filter_date_end` query params (ISO 8601), scoping
+   * the list to a time window. Call sites that omit `filter` send no params and
+   * behave exactly as before.
+   */
   listConversations(
     websiteId: string,
-    page: number
+    page: number,
+    filter?: { dateStart?: Date; dateEnd?: Date }
   ): Promise<CrispConversation[]> {
     return this.request<CrispConversation[]>(
-      crispEndpoints.listConversations(websiteId, page)
+      crispEndpoints.listConversations(websiteId, page),
+      {
+        filter_date_start: filter?.dateStart?.toISOString(),
+        filter_date_end: filter?.dateEnd?.toISOString(),
+      }
     );
   }
 
