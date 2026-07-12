@@ -10,6 +10,7 @@ import {
 } from "lucide-react";
 
 import { KnowledgeCoveragePanel } from "@/components/dashboard/knowledge-coverage";
+import { MailListenerCard } from "@/components/dashboard/mail-listener-card";
 import {
   FollowupDueBadge,
   NewReplyBadge,
@@ -187,11 +188,14 @@ export default async function GlobalDashboardPage() {
           </CardContent>
         </Card>
 
-        <KnowledgeCoveragePanel
-          coverage={coverage}
-          lastSyncAt={stats.lastSync?.finishedAt ?? null}
-          rebuildAdvice={rebuildAdvice}
-        />
+        <div className="flex flex-col gap-4 lg:col-span-2">
+          <MailListenerCard />
+          <KnowledgeCoveragePanel
+            coverage={coverage}
+            lastSyncAt={stats.lastSync?.finishedAt ?? null}
+            rebuildAdvice={rebuildAdvice}
+          />
+        </div>
       </section>
     </div>
   );

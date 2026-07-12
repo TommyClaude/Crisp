@@ -297,7 +297,7 @@ All routes require Basic auth (see Security). All bodies/queries are Zod-validat
 
 | Page | What it shows |
 | --- | --- |
-| `/dashboard` | Global overview: open topics / drafts ready / reviewed, knowledge-chunk totals, latest forum topics, and the **Knowledge coverage** panel — per-source chunked/embedded accounting with failed-source and crawl-cap warnings plus the active search tier |
+| `/dashboard` | Global overview: open topics / drafts ready / reviewed, knowledge-chunk totals, latest forum topics, a **Mail listener** health card (status, connected/last-activity/last-notification timings, Restart) for the wp.org email-push feature, and the **Knowledge coverage** panel — per-source chunked/embedded accounting with failed-source and crawl-cap warnings plus the active search tier |
 | `/crisp/dashboard` | Crisp tab: conversation/message/brand totals, sync controls with live progress, recent sync log table |
 | `/crisp/conversations` | Crisp tab: filterable, paginated conversation list (state, tag, product, brand, operator, email, attachments, date range, search, **junk**), with junk badges and a **Scan for junk** control |
 | `/crisp/conversations/{sessionId}` | Chat-style message log with attachments, visitor panel (masked PII), resync/rebuild actions, chunk summaries, and a **Mark as junk / Not junk** veto with a junk badge |

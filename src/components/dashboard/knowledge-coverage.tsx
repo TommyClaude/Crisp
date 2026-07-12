@@ -146,7 +146,7 @@ export function KnowledgeCoveragePanel({
       : { label: "hybrid (JSON embeddings)", amber: false };
 
   return (
-    <Card className="lg:col-span-2">
+    <Card>
       <CardHeader>
         <CardTitle className="flex items-center gap-2 text-base">
           <BookOpen className="text-muted-foreground size-4" />
