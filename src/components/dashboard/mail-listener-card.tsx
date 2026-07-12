@@ -239,7 +239,11 @@ export function MailListenerCard() {
                   </div>
                 </dl>
 
-                {isError && status.lastError ? (
+                {status.lastError &&
+                (isError || status.status === "connecting") ? (
+                  // Shown while connecting too: during a reconnect loop the
+                  // status flips error→connecting, and hiding the reason for
+                  // half of every cycle made a stuck loop look mysterious.
                   <p
                     className="truncate rounded-md border border-red-200 bg-red-50 px-2 py-1.5 font-mono text-xs text-red-700 dark:border-red-500/30 dark:bg-red-500/10 dark:text-red-400"
                     title={status.lastError}

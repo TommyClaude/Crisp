@@ -382,6 +382,9 @@ function scheduleReconnect(): void {
 function handleConnectionError(error: unknown): void {
   const state = getState();
   state.lastError = error instanceof Error ? error.message : String(error);
+  // Also log it — without this the only trace of a failed connect lives in
+  // the status route's lastError field, invisible in the server console.
+  console.error(`[wporg-mail] connection error: ${state.lastError}`);
   if (state.stopping) return;
   state.status = "error";
   scheduleReconnect();
