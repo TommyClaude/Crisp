@@ -22,6 +22,10 @@ yarn-error.log*
 .env
 .env.local
 .env*.local
+.env.production
 
 # typescript
 *.tsbuildinfo
+
+# self-hosting kit — local artifacts, never committed
+/backups/

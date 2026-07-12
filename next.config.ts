@@ -1,6 +1,11 @@
 import type { NextConfig } from "next";
 
 const nextConfig: NextConfig = {
+  // Self-hosting kit (docker/): the production image runs the standalone
+  // server (.next/standalone/server.js), which needs `output: "standalone"`.
+  // Gated behind an env flag so plain local `npm run dev` / `npm run build`
+  // (no Docker) keep producing the regular build — see Dockerfile.
+  ...(process.env.BUILD_STANDALONE === "1" ? { output: "standalone" } : {}),
   // imapflow (the wp.org email-push listener's IMAP client) is a Node-only
   // package that pulls in core modules like `stream`/`net`/`tls`. Keep it out
   // of the webpack bundle so those never need polyfilling — it's required at

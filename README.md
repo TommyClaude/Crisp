@@ -45,6 +45,10 @@ npm run dev                  # http://localhost:3000
 
 Then either run a real sync (`npm run sync:crisp`, needs Crisp credentials) or load fake data with `npm run seed:demo` to explore the UI immediately.
 
+## Deploying
+
+The steps above are for local development. To put this in front of your support team over the internet, see **[docs/DEPLOY.md](docs/DEPLOY.md)** — a Docker Compose kit with two paths: a VPS with a domain (Caddy auto-HTTPS) or a Mac mini/home box behind a Cloudflare Tunnel (no public IP needed). Also covers migrating your existing dev database (pgvector embeddings preserved byte-for-byte), backups, and updates.
+
 ## Crisp API token (one, global)
 
 Each brand is a separate Crisp **website**, and a plain Crisp REST API token only reaches the website that created it. YayAssist instead uses a **production token from an approved Crisp Marketplace plugin**, which reaches every workspace the plugin is installed on — so a single `CRISP_IDENTIFIER`/`CRISP_KEY` pair in `.env` covers every brand.

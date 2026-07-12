@@ -1,0 +1,97 @@
+name: yayassist
+
+# Self-hosting kit for YayAssist. Two deployment shapes share this one file
+# (see docs/DEPLOY.md for the full walkthrough):
+#
+#   VPS (public domain, Caddy terminates TLS):
+#     docker compose --profile vps up -d --build
+#
+#   Mac mini / home box (no public inbound port, Cloudflare Tunnel instead):
+#     docker compose up -d --build
+#     (the "caddy" service is skipped — it only starts with --profile vps —
+#     and cloudflared, run as a native launchd service outside Docker, points
+#     at http://localhost:3000, which `app` publishes on the loopback
+#     interface below)
+#
+# All three services read the same .env.production file directly as
+# container environment (via `env_file:`) rather than through Compose's
+# `${VAR}` interpolation — one file, no risk of a forgotten `--env-file`
+# flag silently blanking out a password. Copy .env.production.example to
+# .env.production and fill it in before running either command above.
+
+services:
+  db:
+    image: pgvector/pgvector:pg16
+    restart: unless-stopped
+    env_file:
+      - .env.production
+    volumes:
+      - db_data:/var/lib/postgresql/data
+    healthcheck:
+      # $$ (not $) so Compose leaves the variable for the container's own
+      # shell to expand at runtime from env_file, not Compose's own env at
+      # parse time — see docs/DEPLOY.md troubleshooting section.
+      test: ["CMD-SHELL", "pg_isready -U \"$$POSTGRES_USER\" -d \"$$POSTGRES_DB\""]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    # No host port published by default — only `app` (and `caddy` on a VPS)
+    # need to reach Postgres, over the internal compose network as
+    # `db:5432`. Uncomment to reach it from the host (psql, a GUI client):
+    # ports:
+    #   - "127.0.0.1:5432:5432"
+
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    env_file:
+      - .env.production
+    depends_on:
+      db:
+        condition: service_healthy
+    ports:
+      # Loopback-only — never exposed directly to the internet. On a VPS,
+      # `caddy` reverse-proxies to `app:3000` over the internal compose
+      # network (this published port is just for local debugging, e.g. `curl
+      # 127.0.0.1:3000/api/health` over an SSH tunnel). On a Mac mini, this
+      # loopback port is exactly what Cloudflare Tunnel points at
+      # (http://localhost:3000) — see docs/DEPLOY.md Option 2.
+      - "127.0.0.1:3000:3000"
+    healthcheck:
+      # No curl/wget in the runtime image (see Dockerfile) — Node's global
+      # fetch hits the unauthenticated /api/health route instead.
+      test:
+        [
+          "CMD",
+          "node",
+          "-e",
+          "fetch('http://127.0.0.1:3000/api/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))",
+        ]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+
+  caddy:
+    image: caddy:2
+    restart: unless-stopped
+    profiles: ["vps"]
+    env_file:
+      - .env.production
+    depends_on:
+      - app
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./docker/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+
+volumes:
+  db_data:
+  caddy_data:
+  caddy_config:

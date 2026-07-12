@@ -64,7 +64,14 @@ export function middleware(request: NextRequest): NextResponse {
 }
 
 export const config = {
-  // Protect everything except Next.js internals and static assets
-  // (icon.svg is the app favicon served from src/app/icon.svg).
-  matcher: ["/((?!_next/static|_next/image|favicon.ico|icon.svg|robots.txt).*)"],
+  // Protect everything except Next.js internals, static assets (icon.svg is
+  // the app favicon served from src/app/icon.svg), and /api/health — the
+  // unauthenticated liveness probe used by the Docker healthcheck, the Caddy
+  // reverse proxy and external uptime monitors (see docs/DEPLOY.md).
+  // api/health is ANCHORED (`/?$`): a bare prefix would silently exempt any
+  // future /api/health* sibling route from auth. The other entries are
+  // deliberate prefix matches (they have sub-paths).
+  matcher: [
+    "/((?!_next/static|_next/image|favicon.ico|icon.svg|robots.txt|api/health/?$).*)",
+  ],
 };
