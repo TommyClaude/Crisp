@@ -8,10 +8,34 @@ import { forumUrlForSlug } from "@/lib/wporg/forum-crawler";
 
 export const dynamic = "force-dynamic";
 
+/**
+ * Comma-separated keywords, normalized server-side (never trust the client
+ * alone): trimmed, empties dropped, case-insensitive duplicates collapsed
+ * (first-seen casing kept). Keyword changes alter product-detection rules —
+ * this route always touches product-defs-changed below so the "Rebuild
+ * recommended" staleness banner arms.
+ */
+const detectionKeywordsSchema = z
+  .array(z.string().max(100))
+  .max(50)
+  .transform((keywords) => {
+    const seen = new Set<string>();
+    const deduped: string[] = [];
+    for (const raw of keywords) {
+      const trimmed = raw.trim();
+      if (!trimmed) continue;
+      const key = trimmed.toLowerCase();
+      if (seen.has(key)) continue;
+      seen.add(key);
+      deduped.push(trimmed);
+    }
+    return deduped;
+  });
+
 const patchSchema = z.object({
   name: z.string().min(1).max(100).optional(),
   wpOrgSlug: z.string().max(200).nullable().optional(),
-  detectionKeywords: z.array(z.string().min(1).max(100)).max(50).optional(),
+  detectionKeywords: detectionKeywordsSchema.optional(),
 });
 
 /** PATCH /api/plugins/:id — update name/keywords/wp.org slug. */

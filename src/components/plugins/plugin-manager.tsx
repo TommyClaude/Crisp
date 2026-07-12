@@ -1,16 +1,19 @@
 "use client";
 
 import * as React from "react";
-import { useRouter } from "next/navigation";
+import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import { formatDistanceToNow } from "date-fns";
 import {
   BookOpen,
+  Check,
   Download,
   LifeBuoy,
   LoaderCircle,
   Package,
+  Pencil,
   Plus,
   Trash2,
+  X,
 } from "lucide-react";
 import { toast } from "sonner";
 
@@ -34,7 +37,22 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { Separator } from "@/components/ui/separator";
+import {
+  hasForumSource,
+  isPluginStatusFilter,
+  matchesPluginFilters,
+  type PluginStatusFilter,
+} from "@/lib/plugins/filters";
 import { cn } from "@/lib/utils";
+
+/** Radix Select forbids an empty-string item value, so "All" uses a sentinel. */
+const ALL = "__all__";
+
+const STATUS_FILTER_LABELS: Record<PluginStatusFilter, string> = {
+  missing_docs: "Missing docs source",
+  missing_forum: "Missing forum Q&A",
+  never_ingested: "Never ingested",
+};
 
 export interface DocsSourceItem {
   id: string;
@@ -81,6 +99,10 @@ export function PluginManager({
   plugins: PluginItem[];
 }) {
   const router = useRouter();
+  const pathname = usePathname();
+  const searchParams = useSearchParams();
+  const [showAddCard, setShowAddCard] = React.useState(false);
+
   const anyCrawling = plugins.some((plugin) =>
     plugin.docsSources.some((source) => source.status === "crawling")
   );
@@ -93,23 +115,140 @@ export function PluginManager({
     return () => clearInterval(id);
   }, [anyCrawling, router]);
 
+  const brandFilter = searchParams.get("brandId");
+  const rawStatusFilter = searchParams.get("status");
+  const statusFilter = isPluginStatusFilter(rawStatusFilter)
+    ? rawStatusFilter
+    : null;
+  const hasActiveFilter = Boolean(brandFilter) || Boolean(statusFilter);
+
+  function setFilterParam(key: "brandId" | "status", value: string) {
+    const params = new URLSearchParams(searchParams.toString());
+    if (value === ALL) params.delete(key);
+    else params.set(key, value);
+    const qs = params.toString();
+    router.replace(qs ? `${pathname}?${qs}` : pathname, { scroll: false });
+  }
+
+  function clearFilters() {
+    router.replace(pathname, { scroll: false });
+  }
+
+  const filteredPlugins = plugins.filter((plugin) =>
+    matchesPluginFilters(plugin, { brandId: brandFilter, status: statusFilter })
+  );
+
   return (
     <div className="space-y-6">
-      <AddPluginCard brands={brands} />
+      {!showAddCard ? (
+        <Button onClick={() => setShowAddCard(true)}>
+          <Plus className="size-4" />
+          Add a plugin
+        </Button>
+      ) : null}
+      {showAddCard ? (
+        <AddPluginCard
+          brands={brands}
+          onAdded={() => setShowAddCard(false)}
+          onCancel={() => setShowAddCard(false)}
+        />
+      ) : null}
+
+      {plugins.length > 0 ? (
+        <div className="bg-card flex flex-wrap items-end gap-3 rounded-lg border p-3">
+          <div className="space-y-1.5">
+            <Label htmlFor="plugin-filter-brand" className="text-muted-foreground text-xs">
+              Brand
+            </Label>
+            <Select
+              value={brandFilter ?? ALL}
+              onValueChange={(value) => setFilterParam("brandId", value)}
+            >
+              <SelectTrigger id="plugin-filter-brand" size="sm" className="w-48">
+                <SelectValue placeholder="All brands" />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value={ALL}>All brands</SelectItem>
+                {brands.map((brand) => (
+                  <SelectItem key={brand.id} value={brand.id}>
+                    {brand.name}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          </div>
+          <div className="space-y-1.5">
+            <div className="flex items-center gap-1">
+              <Label htmlFor="plugin-filter-status" className="text-muted-foreground text-xs">
+                Status
+              </Label>
+              <HelpTip subject="status filter">
+                Missing docs source: no crawled documentation URL/sitemap yet.
+                Missing forum Q&amp;A: no wp.org support-forum source yet.
+                Never ingested: has at least one source, but none of them has
+                ever produced a chunk (never successfully crawled).
+              </HelpTip>
+            </div>
+            <Select
+              value={statusFilter ?? ALL}
+              onValueChange={(value) => setFilterParam("status", value)}
+            >
+              <SelectTrigger id="plugin-filter-status" size="sm" className="w-52">
+                <SelectValue placeholder="All statuses" />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value={ALL}>All statuses</SelectItem>
+                {Object.entries(STATUS_FILTER_LABELS).map(([value, label]) => (
+                  <SelectItem key={value} value={value}>
+                    {label}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          </div>
+          {hasActiveFilter ? (
+            <Button
+              variant="ghost"
+              size="sm"
+              className="text-muted-foreground"
+              onClick={clearFilters}
+            >
+              <X className="size-3.5" />
+              Clear filters
+            </Button>
+          ) : null}
+        </div>
+      ) : null}
+
       {plugins.length === 0 ? (
         <div className="text-muted-foreground rounded-lg border border-dashed p-10 text-center text-sm">
           <Package className="mx-auto mb-2 size-6 opacity-60" />
           No plugins yet — add your products (FileBird, YayMail...) so chats
           and docs get tagged correctly.
         </div>
+      ) : filteredPlugins.length === 0 ? (
+        <div className="text-muted-foreground rounded-lg border border-dashed p-10 text-center text-sm">
+          No plugins match these filters.
+        </div>
       ) : (
-        plugins.map((plugin) => <PluginCard key={plugin.id} plugin={plugin} />)
+        filteredPlugins.map((plugin) => (
+          <PluginCard key={plugin.id} plugin={plugin} />
+        ))
       )}
     </div>
   );
 }
 
-function AddPluginCard({ brands }: { brands: Array<{ id: string; name: string }> }) {
+function AddPluginCard({
+  brands,
+  onAdded,
+  onCancel,
+}: {
+  brands: Array<{ id: string; name: string }>;
+  /** Called after a successful create — the caller collapses the card. */
+  onAdded: () => void;
+  onCancel: () => void;
+}) {
   const router = useRouter();
   const [brandId, setBrandId] = React.useState("");
   const [name, setName] = React.useState("");
@@ -144,6 +283,7 @@ function AddPluginCard({ brands }: { brands: Array<{ id: string; name: string }>
       setKeywords("");
       setWpOrgSlug("");
       router.refresh();
+      onAdded();
     } catch {
       toast.error("Failed to create plugin");
     } finally {
@@ -239,7 +379,7 @@ function AddPluginCard({ brands }: { brands: Array<{ id: string; name: string }>
               onChange={(e) => setWpOrgSlug(e.target.value)}
             />
           </div>
-          <div className="flex items-end">
+          <div className="flex items-end gap-2">
             <Button type="submit" disabled={saving || !brandId || !name}>
               {saving ? (
                 <LoaderCircle className="size-4 animate-spin" />
@@ -247,6 +387,14 @@ function AddPluginCard({ brands }: { brands: Array<{ id: string; name: string }>
                 <Plus className="size-4" />
               )}
               Add
+            </Button>
+            <Button
+              type="button"
+              variant="ghost"
+              onClick={onCancel}
+              disabled={saving}
+            >
+              Cancel
             </Button>
           </div>
         </form>
@@ -267,14 +415,13 @@ function PluginCard({ plugin }: { plugin: PluginItem }) {
     "url" | "sitemap" | "wporg_forum"
   >("url");
   const [busy, setBusy] = React.useState<string | null>(null);
-  // Match the forum source by type OR by a wp.org forum listing URL, so a
-  // legacy "url"-typed forum row (healed to "wporg_forum" only on its next
-  // ingest) still hides the "Add forum source" button and avoids a duplicate.
-  const hasForumSource = plugin.docsSources.some(
-    (source) =>
-      source.type === "wporg_forum" ||
-      /\/\/(?:[^/]*\.)?wordpress\.org\/support\/plugin\//i.test(source.url)
-  );
+  const [editingKeywords, setEditingKeywords] = React.useState(false);
+  const [keywordsInput, setKeywordsInput] = React.useState("");
+  // Matches the forum source by type OR by a wp.org forum listing URL (see
+  // lib/plugins/filters), so a legacy "url"-typed forum row (healed to
+  // "wporg_forum" only on its next ingest) still hides the "Add forum
+  // source" button and avoids a duplicate.
+  const pluginHasForumSource = hasForumSource(plugin.docsSources);
 
   const call = async (
     key: string,
@@ -317,6 +464,34 @@ function PluginCard({ plugin }: { plugin: PluginItem }) {
       "Docs source added — click Ingest to crawl it"
     );
     if (ok) setSourceUrl("");
+  };
+
+  const startEditingKeywords = () => {
+    setKeywordsInput(plugin.detectionKeywords.join(", "));
+    setEditingKeywords(true);
+  };
+
+  const cancelEditingKeywords = () => {
+    setEditingKeywords(false);
+  };
+
+  const saveKeywords = async () => {
+    const ok = await call(
+      "edit-keywords",
+      () =>
+        fetch(`/api/plugins/${plugin.id}`, {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            detectionKeywords: keywordsInput
+              .split(",")
+              .map((k) => k.trim())
+              .filter(Boolean),
+          }),
+        }),
+      "Keywords updated"
+    );
+    if (ok) setEditingKeywords(false);
   };
 
   return (
@@ -370,20 +545,79 @@ function PluginCard({ plugin }: { plugin: PluginItem }) {
             <Trash2 className="size-4" />
           </Button>
         </div>
-        {plugin.detectionKeywords.length > 0 ? (
-          <CardDescription className="flex flex-wrap items-center gap-1">
-            <span className="mr-1">Keywords:</span>
-            {plugin.detectionKeywords.map((keyword) => (
-              <Badge
-                key={keyword}
-                variant="outline"
-                className="px-1.5 py-0 text-[11px] font-normal"
+        <CardDescription className="flex flex-wrap items-center gap-1">
+          <span className="mr-1">Keywords:</span>
+          {editingKeywords ? (
+            <div className="flex min-w-56 flex-1 items-center gap-1.5">
+              <Input
+                autoFocus
+                value={keywordsInput}
+                onChange={(e) => setKeywordsInput(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") {
+                    e.preventDefault();
+                    void saveKeywords();
+                  } else if (e.key === "Escape") {
+                    e.preventDefault();
+                    cancelEditingKeywords();
+                  }
+                }}
+                placeholder="file bird, njt-filebird"
+                disabled={busy === "edit-keywords"}
+                className="h-7 max-w-md text-xs"
+              />
+              <Button
+                variant="ghost"
+                size="icon"
+                className="size-6 text-muted-foreground hover:text-foreground"
+                title="Save keywords"
+                disabled={busy === "edit-keywords"}
+                onClick={() => void saveKeywords()}
               >
-                {keyword}
-              </Badge>
-            ))}
-          </CardDescription>
-        ) : null}
+                {busy === "edit-keywords" ? (
+                  <LoaderCircle className="size-3.5 animate-spin" />
+                ) : (
+                  <Check className="size-3.5" />
+                )}
+              </Button>
+              <Button
+                variant="ghost"
+                size="icon"
+                className="size-6 text-muted-foreground hover:text-foreground"
+                title="Cancel"
+                disabled={busy === "edit-keywords"}
+                onClick={cancelEditingKeywords}
+              >
+                <X className="size-3.5" />
+              </Button>
+            </div>
+          ) : (
+            <>
+              {plugin.detectionKeywords.length > 0 ? (
+                plugin.detectionKeywords.map((keyword) => (
+                  <Badge
+                    key={keyword}
+                    variant="outline"
+                    className="px-1.5 py-0 text-[11px] font-normal"
+                  >
+                    {keyword}
+                  </Badge>
+                ))
+              ) : (
+                <span className="text-muted-foreground/70 italic">none</span>
+              )}
+              <Button
+                variant="ghost"
+                size="icon"
+                className="size-5 text-muted-foreground hover:text-foreground"
+                title="Edit keywords"
+                onClick={startEditingKeywords}
+              >
+                <Pencil className="size-3" />
+              </Button>
+            </>
+          )}
+        </CardDescription>
       </CardHeader>
       <CardContent className="space-y-3">
         {plugin.docsSources.length > 0 ? (
@@ -546,7 +780,7 @@ function PluginCard({ plugin }: { plugin: PluginItem }) {
           </Button>
         </form>
 
-        {plugin.wpOrgSlug && !hasForumSource ? (
+        {plugin.wpOrgSlug && !pluginHasForumSource ? (
           <Button
             type="button"
             variant="outline"

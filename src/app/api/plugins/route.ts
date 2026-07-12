@@ -30,11 +30,34 @@ export async function GET() {
   return NextResponse.json({ plugins });
 }
 
+/**
+ * Comma-separated keywords, normalized server-side (never trust the client
+ * alone): trimmed, empties dropped, case-insensitive duplicates collapsed
+ * (first-seen casing kept). Keyword changes alter product-detection rules,
+ * so callers must also touch product-defs-changed — see POST/PATCH below.
+ */
+const detectionKeywordsSchema = z
+  .array(z.string().max(100))
+  .max(50)
+  .transform((keywords) => {
+    const seen = new Set<string>();
+    const deduped: string[] = [];
+    for (const raw of keywords) {
+      const trimmed = raw.trim();
+      if (!trimmed) continue;
+      const key = trimmed.toLowerCase();
+      if (seen.has(key)) continue;
+      seen.add(key);
+      deduped.push(trimmed);
+    }
+    return deduped;
+  });
+
 const createSchema = z.object({
   brandId: z.string().min(1),
   name: z.string().min(1).max(100),
   wpOrgSlug: z.string().max(200).optional(),
-  detectionKeywords: z.array(z.string().min(1).max(100)).max(50).default([]),
+  detectionKeywords: detectionKeywordsSchema.default([]),
 });
 
 /** POST /api/plugins — create a plugin under a brand. */
