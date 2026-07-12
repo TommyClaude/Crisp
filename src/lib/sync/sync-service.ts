@@ -355,6 +355,49 @@ interface RunSyncOptions {
 }
 
 /**
+ * Grace window before {@link reconcileStaleSyncRuns} closes an orphaned
+ * "running" SyncLog row. Long enough that a cron/CLI incremental sync in a
+ * SEPARATE process (which this process cannot see) normally finishes inside
+ * it; short enough that a restart-orphaned row heals on the next dashboard
+ * poll instead of blocking syncs for hours.
+ */
+const RECONCILE_GRACE_MS = 10 * 60 * 1000;
+
+/**
+ * Close out "running" SyncLog rows that no longer correspond to a live run.
+ * Sync progress lives in process memory, so a server restart (or crash) kills
+ * an in-flight run without ever closing its log row — the row then reads
+ * "running" forever, and the DB single-flight guard in {@link runSync} would
+ * refuse new syncs until the 6-hour staleness window passed. Called from the
+ * status route (the dashboard polls it) and before that guard, so an orphan
+ * heals on the next dashboard view or start attempt. The synced data itself
+ * is never affected — every write was an upsert that already committed.
+ *
+ * Caveat, documented on purpose: a genuinely-running CLI backfill in another
+ * process that has been going longer than the grace window is
+ * indistinguishable from an orphan here and gets its row closed early. The
+ * CLI run itself keeps working and overwrites the row with its real final
+ * status when it ends; the only cost is that the guard would let a dashboard
+ * sync start alongside it (safe for data — upserts — just slower, as both
+ * share the rate limit).
+ */
+export async function reconcileStaleSyncRuns(): Promise<number> {
+  if (getSyncProgress().running) return 0;
+  const graceBefore = new Date(Date.now() - RECONCILE_GRACE_MS);
+  const result = await prisma.syncLog.updateMany({
+    where: { status: "running", startedAt: { lt: graceBefore } },
+    data: {
+      status: "failed",
+      finishedAt: new Date(),
+      error:
+        "Interrupted: the server restarted (or the process died) while this run was in flight. " +
+        "Everything synced up to that point is saved — use Continue or a range sync to pick up where it left off.",
+    },
+  });
+  return result.count;
+}
+
+/**
  * Core page-by-page sync loop. Progress is persisted to SyncLog after every
  * page, so an interrupted run can be resumed with `startPage`.
  */
@@ -364,9 +407,13 @@ async function runSync(options: RunSyncOptions): Promise<SyncRunResult> {
     throw new Error("A sync is already running");
   }
 
+  // Heal restart-orphaned rows first so they can't trip the guard below.
+  await reconcileStaleSyncRuns();
+
   // DB-level single-flight guard: the in-memory flag above only protects one
   // process; a CLI run and the web app (or two app instances) share the DB.
-  // Runs older than the staleness window are assumed crashed and ignored.
+  // After reconciliation this only sees rows younger than the grace window —
+  // i.e. a run that started moments ago in another process.
   const staleBefore = new Date(Date.now() - 6 * 60 * 60 * 1000);
   const activeRun = await prisma.syncLog.findFirst({
     where: { status: "running", startedAt: { gte: staleBefore } },

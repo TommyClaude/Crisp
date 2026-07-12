@@ -1,6 +1,9 @@
 import { NextResponse } from "next/server";
 import { prisma } from "@/lib/db";
-import { getResumePage } from "@/lib/sync/sync-service";
+import {
+  getResumePage,
+  reconcileStaleSyncRuns,
+} from "@/lib/sync/sync-service";
 import { getSyncProgress } from "@/lib/sync/sync-state";
 
 export const dynamic = "force-dynamic";
@@ -10,6 +13,11 @@ export const dynamic = "force-dynamic";
  * Live progress of the current sync (if any) plus recent sync history.
  */
 export async function GET() {
+  // Heal any "running" rows orphaned by a server restart BEFORE reading the
+  // history — the dashboard polls this route, so an orphan disappears on the
+  // next poll instead of reading "Running" forever (and blocking the guard).
+  await reconcileStaleSyncRuns();
+
   const [recentLogs, lastCompleted, resumePage] = await Promise.all([
     prisma.syncLog.findMany({ orderBy: { startedAt: "desc" }, take: 10 }),
     prisma.syncLog.findFirst({
