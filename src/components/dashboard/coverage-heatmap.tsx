@@ -1,9 +1,12 @@
 "use client";
 
 import * as React from "react";
-import { CalendarRange } from "lucide-react";
+import { useRouter } from "next/navigation";
+import { CalendarRange, LoaderCircle } from "lucide-react";
+import { toast } from "sonner";
 
 import { HelpTip } from "@/components/help-tip";
+import { Button } from "@/components/ui/button";
 import {
   Card,
   CardAction,
@@ -14,8 +17,12 @@ import {
 } from "@/components/ui/card";
 import {
   buildCoverageGrid,
+  earliestDetectedMonth,
   intensityLevel,
+  parseMonthLabel,
+  toMonthIndex,
   type CoverageResult,
+  type YearMonth,
 } from "@/lib/sync/coverage";
 import { cn } from "@/lib/utils";
 
@@ -29,6 +36,11 @@ const MONTHS_LONG = [
 ];
 
 const numberFormat = new Intl.NumberFormat("en-US");
+
+/** {year:2018,month:6} -> "June 2018", for the detected-start one-liner. */
+function formatMonthYearLabel(ym: YearMonth): string {
+  return `${MONTHS_LONG[ym.month - 1] ?? "?"} ${ym.year}`;
+}
 
 /**
  * Sequential single-hue (blue) ramp, light→dark, with a DISTINCT empty step so
@@ -61,18 +73,79 @@ export interface CoverageHeatmapProps {
 }
 
 export function CoverageHeatmap({ data, onSelectMonth }: CoverageHeatmapProps) {
-  const { rows, maxCount } = React.useMemo(
-    () => buildCoverageGrid(data.monthly),
-    [data.monthly]
-  );
+  const router = useRouter();
+  const [detecting, setDetecting] = React.useState(false);
 
-  // Dim months that can't have data yet (this month is partial, later ones are
-  // in the future). Year/month granularity is stable across SSR and hydration.
+  // Year/month granularity is stable across SSR and hydration. The grid
+  // spans from the earliest KNOWN month (the DB's own minimum timestamps
+  // and/or a stored "Detect archive start" result — see
+  // data.earliestKnownMonth in coverage-query.ts) through the current month,
+  // falling back to the current month alone when nothing is known yet.
   const now = new Date();
   const currentYear = now.getUTCFullYear();
   const currentMonth = now.getUTCMonth() + 1;
-  const isFuture = (year: number, month: number) =>
-    year > currentYear || (year === currentYear && month > currentMonth);
+
+  const grid = React.useMemo(() => {
+    if (data.total <= 0) return null;
+    return buildCoverageGrid(data.monthly, {
+      start: data.earliestKnownMonth ?? { year: currentYear, month: currentMonth },
+      end: { year: currentYear, month: currentMonth },
+    });
+  }, [data.monthly, data.total, data.earliestKnownMonth, currentYear, currentMonth]);
+  const rows = grid?.rows ?? [];
+  const maxCount = grid?.maxCount ?? 0;
+
+  // The earliest month any brand's "Detect archive start" probe has found —
+  // null when it's never been run (or, degenerately, ran and found nothing).
+  const detectedMonth = data.detectedArchiveStart
+    ? earliestDetectedMonth(data.detectedArchiveStart.brands)
+    : null;
+
+  // Dashed "outside the archive" cells sit on BOTH ends of the grid: before
+  // the (possibly 15-year-clamped) span start, and after the current month
+  // (this month is partial, later ones haven't happened yet). Compared
+  // against grid.effectiveSpan — not the requested span — so a clamp is
+  // reflected here too, and the clamp math lives in exactly one place
+  // (buildCoverageGrid).
+  const isOutsideSpan = (year: number, month: number) => {
+    if (!grid) return false;
+    const index = toMonthIndex(year, month);
+    const { start, end } = grid.effectiveSpan;
+    return (
+      index < toMonthIndex(start.year, start.month) ||
+      index > toMonthIndex(end.year, end.month)
+    );
+  };
+
+  // Spend ~10 tiny Crisp requests to find the true archive start (see
+  // src/app/api/sync/crisp/detect-start/route.ts), store it, then refresh —
+  // same "poll finished, router.refresh()" pattern the sync panel uses once
+  // a background sync completes.
+  const handleDetectArchiveStart = React.useCallback(async () => {
+    setDetecting(true);
+    try {
+      const res = await fetch("/api/sync/crisp/detect-start", { method: "POST" });
+      const body = (await res.json().catch(() => null)) as
+        | { earliestMonth?: string | null; error?: string }
+        | null;
+      if (!res.ok || !body?.earliestMonth) {
+        toast.error(body?.error ?? "Failed to detect archive start");
+        return;
+      }
+      const earliest = parseMonthLabel(body.earliestMonth);
+      toast.success(
+        earliest
+          ? `Archive starts ${formatMonthYearLabel(earliest)}`
+          : "Archive start detected",
+        { description: "The grid now widens to show unsynced years as gaps." }
+      );
+      router.refresh();
+    } catch {
+      toast.error("Failed to detect archive start");
+    } finally {
+      setDetecting(false);
+    }
+  }, [router]);
 
   return (
     <Card>
@@ -147,11 +220,11 @@ export function CoverageHeatmap({ data, onSelectMonth }: CoverageHeatmapProps) {
                     {row.year}
                   </span>
                   {row.cells.map((cell) => {
-                    const future = isFuture(cell.year, cell.month);
+                    const outside = isOutsideSpan(cell.year, cell.month);
                     const level = intensityLevel(cell.count, maxCount);
                     const label = `${MONTHS_LONG[cell.month - 1]} ${cell.year} — ${numberFormat.format(cell.count)} conversation${cell.count === 1 ? "" : "s"}`;
 
-                    if (future) {
+                    if (outside) {
                       return (
                         <span
                           key={cell.month}
@@ -182,6 +255,58 @@ export function CoverageHeatmap({ data, onSelectMonth }: CoverageHeatmapProps) {
             </div>
           </div>
         )}
+
+        {/* Below the grid: either an invitation to widen it (no detected
+            start on file yet), or a quiet note that it's already been done.
+            Detection also runs automatically on every full sync (see
+            runSync's auto-detect hook) — this button is the manual trigger /
+            retry, so there's no button once a result is stored, only a cheap
+            re-detect link. */}
+        {rows.length > 0 &&
+          (detectedMonth ? (
+            <p className="text-muted-foreground mt-3 text-xs">
+              Archive starts{" "}
+              <span className="text-foreground font-medium">
+                {formatMonthYearLabel(detectedMonth)}
+              </span>{" "}
+              (detected).{" "}
+              <button
+                type="button"
+                onClick={handleDetectArchiveStart}
+                disabled={detecting}
+                className="hover:text-foreground underline underline-offset-2 disabled:opacity-50"
+              >
+                {detecting ? "Re-detecting…" : "Re-detect"}
+              </button>
+            </p>
+          ) : (
+            <div className="mt-3 flex flex-wrap items-center gap-x-2 gap-y-1">
+              <p className="text-muted-foreground text-xs">
+                Grid spans the data synced so far — the real archive may start
+                earlier.
+              </p>
+              <Button
+                variant="ghost"
+                size="sm"
+                onClick={handleDetectArchiveStart}
+                disabled={detecting}
+                className="h-6 px-2 text-xs"
+              >
+                {detecting ? (
+                  <LoaderCircle className="size-3 animate-spin" />
+                ) : null}
+                Detect archive start
+              </Button>
+              <HelpTip subject="detect archive start">
+                Runs automatically on every full sync; use this button to
+                detect it without syncing. Probes Crisp with about 10 tiny
+                requests per brand (binary search by month) to find each
+                brand&apos;s first conversation ever, stores the result, and
+                widens the grid so unsynced years show up as gaps instead of
+                being cut off.
+              </HelpTip>
+            </div>
+          ))}
 
         {data.unknownCount > 0 && (
           <p className="text-muted-foreground mt-4 flex items-center gap-1 text-xs">

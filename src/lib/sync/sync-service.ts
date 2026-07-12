@@ -19,6 +19,7 @@ import {
   COVERAGE_BASIS_LABEL,
   shouldStopRangeWalk,
 } from "./coverage";
+import { autoDetectMissingBrands } from "./archive-start";
 
 /** Upsert batch size for messages — keeps transactions small and memory flat. */
 const MESSAGE_BATCH_SIZE = 50;
@@ -400,6 +401,29 @@ async function runSync(options: RunSyncOptions): Promise<SyncRunResult> {
       sharedClient ??= crispClientForTarget();
       return sharedClient;
     };
+
+    // Auto-detect archive start (see coverage.ts / archive-start.ts) on
+    // EVERY full sync — including one resumed via startPage, since brands
+    // after the first always walk from page 1 anyway and the probes are
+    // independent of the page walk entirely. Only brands missing an entry
+    // are probed (~8-10 requests each, negligible next to a full backfill;
+    // zero requests once every brand is detected) and existing entries are
+    // merged, not replaced — a brand added later gets filled in on its next
+    // full sync too. Incremental/range runs never probe: they're routine or
+    // narrowly scoped, not archive-maintenance moments. Never fatal: the
+    // manual "Detect archive start" button on the dashboard remains the
+    // retry path if this fails.
+    if (options.kind === "full") {
+      state.statusMessage = "detecting archive start";
+      try {
+        await autoDetectMissingBrands(targets, clientFor());
+      } catch (error) {
+        console.warn(
+          "Archive-start auto-detect failed (non-fatal, sync continues):",
+          error
+        );
+      }
+    }
 
     for (let t = 0; t < targets.length; t++) {
       const target = targets[t];

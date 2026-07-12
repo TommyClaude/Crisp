@@ -71,6 +71,72 @@ export interface CoverageMonthCount {
   count: number;
 }
 
+/** A (year, month) pair — month is 1-12. Used for span bounds. */
+export interface YearMonth {
+  year: number;
+  month: number;
+}
+
+/**
+ * Result of "Detect archive start" probing (see
+ * src/app/api/sync/crisp/detect-start/route.ts and the auto-detect-on-first-
+ * full-sync hook in sync-service.ts), as stored in AppMeta under
+ * {@link ARCHIVE_START_META_KEY}. A client-safe type — the heatmap reads it
+ * straight off the server-fetched {@link CoverageResult}.
+ *
+ * Shaped per brand (not collapsed to one earliest month) so a future
+ * per-brand coverage view can read a specific brand's start directly instead
+ * of the all-brands minimum. `detectedAt`/`requests` describe the MOST
+ * RECENT store, not a lifetime total — a later run that only fills in
+ * missing brands (see autoDetectMissingBrands) overwrites them with that
+ * run's own smaller cost, while still merging (not replacing) `brands`.
+ */
+export interface DetectedArchiveStart {
+  /**
+   * Earliest known month ("YYYY-MM") per brand, keyed by Brand.id. A legacy
+   * env-only setup (no Brand rows — see getSyncTargets) keys on "default".
+   * `null` is a NEGATIVE cache entry: the brand was probed and has no
+   * conversations at all, so the auto-detect-on-sync path must not spend
+   * requests re-probing it every full sync. A later manual detect (which
+   * always re-probes every brand) refreshes it.
+   */
+  brands: Record<string, string | null>;
+  /** ISO timestamp of the most recent store (full or partial merge). */
+  detectedAt: string;
+  /** Crisp requests spent in that most recent store's probe(s). */
+  requests: number;
+}
+
+/** Parse a "YYYY-MM" label into a YearMonth, or null if malformed. */
+export function parseMonthLabel(label: string): YearMonth | null {
+  const match = /^(\d{4})-(\d{2})$/.exec(label);
+  if (!match) return null;
+  return { year: Number(match[1]), month: Number(match[2]) };
+}
+
+/** "YYYY-MM" from a YearMonth, the inverse of {@link parseMonthLabel}. */
+export function formatMonthLabel(ym: YearMonth): string {
+  return `${ym.year}-${String(ym.month).padStart(2, "0")}`;
+}
+
+/**
+ * Earliest month ("YYYY-MM") across every brand in a "Detect archive start"
+ * result, or null when there's nothing to compare (an empty map, every label
+ * malformed, or only negative-cache `null` entries — probed brands with no
+ * conversations). Used both to combine per-brand results into the all-brands
+ * grid span and by the UI's "Archive starts ... (detected)" line.
+ */
+export function earliestDetectedMonth(
+  brands: Record<string, string | null>
+): YearMonth | null {
+  const indices = Object.values(brands)
+    .map((label) => (label ? parseMonthLabel(label) : null))
+    .filter((ym): ym is YearMonth => ym !== null)
+    .map((ym) => toMonthIndex(ym.year, ym.month));
+  if (indices.length === 0) return null;
+  return fromMonthIndex(Math.min(...indices));
+}
+
 export interface CoverageResult {
   /** Non-empty months only, ascending. The UI fills the zero months. */
   monthly: CoverageMonthCount[];
@@ -80,6 +146,15 @@ export interface CoverageResult {
   total: number;
   /** The basis this was bucketed by — echoed so the UI copy stays honest. */
   basis: CoverageBasis;
+  /**
+   * Earliest month the grid should render: the min of the DB's own
+   * MIN(createdAtCrisp)/MIN(updatedAtCrisp) and the stored "Detect archive
+   * start" result (if any). Null only when the archive has no dated
+   * conversations and no start has been detected yet.
+   */
+  earliestKnownMonth: YearMonth | null;
+  /** The stored "Detect archive start" probe result, if one has ever run. */
+  detectedArchiveStart: DetectedArchiveStart | null;
 }
 
 /** A single month cell on the heatmap grid. */
@@ -98,38 +173,91 @@ export interface CoverageGrid {
   rows: CoverageGridRow[];
   /** Largest single-month count — the top of the intensity scale. */
   maxCount: number;
+  /**
+   * The span actually used to build `rows` — equal to the requested span,
+   * except `start` may have been pulled forward by the {@link MAX_SPAN_YEARS}
+   * clamp. The UI compares cells against THIS (not the requested span) to
+   * decide which are dashed as "outside the archive", so the clamp logic
+   * lives in exactly one place.
+   */
+  effectiveSpan: CoverageSpan;
+}
+
+/** Inclusive (start, end) month bounds the grid should render, both ends full months. */
+export interface CoverageSpan {
+  start: YearMonth;
+  end: YearMonth;
+  /**
+   * Optional Conversation.brandId this span (and the `monthly` counts it's
+   * paired with) is scoped to. buildCoverageGrid doesn't filter by it — the
+   * caller must already have fetched brand-scoped `monthly` data (see
+   * getArchiveCoverage's brandId option) — it's only echoed onto
+   * `effectiveSpan` so a future per-brand view can tell which grid it's
+   * looking at. Undefined/omitted means "all brands", same as today.
+   */
+  brandId?: string;
 }
 
 /**
+ * Absolute, comparable/subtractable linear month index (no epoch offset —
+ * safe for any real calendar year). Shared by the grid span clamp here and
+ * the "Detect archive start" binary search, which both need to do month
+ * arithmetic without re-deriving Date math each time.
+ */
+export function toMonthIndex(year: number, month: number): number {
+  return year * 12 + (month - 1);
+}
+
+/** Inverse of {@link toMonthIndex}. */
+export function fromMonthIndex(index: number): YearMonth {
+  const year = Math.floor(index / 12);
+  const month = index - year * 12 + 1;
+  return { year, month };
+}
+
+/** Grid start is clamped to at most this many years before the span end, guarding against a pathological span (e.g. a bad timestamp) blowing the grid up to hundreds of rows. */
+const MAX_SPAN_YEARS = 15;
+
+/**
  * Expand the sparse monthly counts into a dense year-by-month grid spanning
- * from the earliest to the latest year that has data (inclusive). Every month
- * gets a cell so the UI can render zeros as gaps. Pure — unit-tested directly.
+ * `span.start`..`span.end` inclusive (both full years, Jan..Dec), clamped to
+ * at most {@link MAX_SPAN_YEARS} years. Every month in range gets a cell —
+ * including zero-count ones — so the UI can render them as gaps; months
+ * outside the (possibly clamped) span are the caller's job to dim/dash (see
+ * the heatmap's outside-span check). Pure — unit-tested directly.
  */
 export function buildCoverageGrid(
-  monthly: CoverageMonthCount[]
+  monthly: CoverageMonthCount[],
+  span: CoverageSpan
 ): CoverageGrid {
-  if (monthly.length === 0) return { rows: [], maxCount: 0 };
-
   const byKey = new Map<string, number>();
-  let minYear = Infinity;
-  let maxYear = -Infinity;
   let maxCount = 0;
   for (const m of monthly) {
     byKey.set(`${m.year}-${m.month}`, m.count);
-    if (m.year < minYear) minYear = m.year;
-    if (m.year > maxYear) maxYear = m.year;
     if (m.count > maxCount) maxCount = m.count;
   }
 
+  const endIndex = toMonthIndex(span.end.year, span.end.month);
+  let startIndex = toMonthIndex(span.start.year, span.start.month);
+  const minAllowedIndex = endIndex - MAX_SPAN_YEARS * 12;
+  if (startIndex < minAllowedIndex) startIndex = minAllowedIndex;
+  if (startIndex > endIndex) startIndex = endIndex;
+
+  const effectiveStart = fromMonthIndex(startIndex);
+
   const rows: CoverageGridRow[] = [];
-  for (let year = minYear; year <= maxYear; year++) {
+  for (let year = effectiveStart.year; year <= span.end.year; year++) {
     const cells: CoverageGridCell[] = [];
     for (let month = 1; month <= 12; month++) {
       cells.push({ year, month, count: byKey.get(`${year}-${month}`) ?? 0 });
     }
     rows.push({ year, cells });
   }
-  return { rows, maxCount };
+  return {
+    rows,
+    maxCount,
+    effectiveSpan: { start: effectiveStart, end: span.end, brandId: span.brandId },
+  };
 }
 
 /**

@@ -147,9 +147,13 @@ Only syncs conversations updated since the last successful run, with a 1-hour ov
 
 ### Archive coverage & range sync
 
-The **Archive coverage** card on `/crisp/dashboard` is a year × month heatmap of the conversations already in the database, bucketed by **last activity** (the `COVERAGE_BASIS` constant in `src/lib/sync/coverage.ts`). An empty month between active months usually means that period was never synced. Clicking a month prefills the **From / To** date inputs; **Sync range** then walks the Crisp list with `filter_date_start`/`filter_date_end`, so requests are proportional to the window, not the whole archive (runs land in `SyncLog` as kind `range`).
+The **Archive coverage** card on `/crisp/dashboard` is a year × month heatmap of the conversations already in the database, bucketed by **last activity** (the `COVERAGE_BASIS` constant in `src/lib/sync/coverage.ts`). Clicking a month prefills the **From / To** date inputs; **Sync range** then walks the Crisp list with `filter_date_start`/`filter_date_end`, so requests are proportional to the window, not the whole archive (runs land in `SyncLog` as kind `range`).
 
-Two safeguards, because Crisp's docs don't spell out which timestamp the filter matches:
+**Grid span** — the grid runs from the earliest known month through the current month, not just the years already synced: the query pulls `MIN(createdAtCrisp)`/`MIN(updatedAtCrisp)` across the archive for a zero-request lower bound (an old conversation that got recently bumped already stretches the grid back "for free"), combined with the min of any stored **Detect archive start** result (below). Months before that start or after the current month render dashed ("outside the archive"); months inside the span with zero conversations render as the plain empty cell — that's the actual gap the heatmap exists to reveal. The start is clamped to at most 15 years back as a guard against a pathological timestamp blowing up the grid.
+
+**Detect archive start** — the DB-only lower bound only reaches as far as whatever's already synced. A small button under the heatmap spends ~10 tiny Crisp requests per brand (binary search by month, page-1 existence probes) to find each brand's true first conversation, even one never synced locally, and stores the per-brand result in `AppMeta` (`crisp_archive_start`) so it only has to run once. It also runs **automatically** at the start of every **full** sync (resumed ones included), for whichever brands don't have a stored result yet — brands already detected cost zero requests, and a brand with no conversations at all is remembered as such so it isn't re-probed every sync (a brand added later gets filled in on its next full sync) — the button remains as a manual trigger/retry and never blocks or fails the sync it might be piggybacking on.
+
+Two safeguards on the range walk itself, because Crisp's docs don't spell out which timestamp the filter matches:
 
 - **Early stop** — if an entire page comes back with zero conversations in-range by the basis (and at least one provably out of range), the walk stops instead of degenerating into an unbounded full walk.
 - **First-run verification line** — each range run reports how many fetched conversations fell inside the window by *last activity* vs by *created date* ("In range by last-activity: X/N, by created: Y/N"). If created wins on your workspace, flip `COVERAGE_BASIS` once and the heatmap, the range guard, and the labels all follow.
@@ -220,6 +224,7 @@ All routes require Basic auth (see Security). All bodies/queries are Zod-validat
 | `GET` | `/api/sync/crisp/status` | Live sync progress + last completed run + 10 most recent logs |
 | `POST` | `/api/sync/crisp/stop` | Request graceful cancellation of the running sync (`409` if none) |
 | `POST` | `/api/sync/crisp/conversation/{sessionId}` | Re-fetch one conversation from Crisp, upsert it, rebuild its chunks |
+| `POST` | `/api/sync/crisp/detect-start` | Binary-search each configured brand's true first-conversation month (~10 Crisp requests per brand) and store the per-brand result in `AppMeta`, merged with any existing entries. Also runs automatically on every full sync for brands missing an entry. `502` if a probe fails or no conversations are found anywhere |
 | `GET` | `/api/conversations` | Paginated list. Query: `page, pageSize, state, tag, product, brandId, email, operatorId, hasAttachment, dateFrom, dateTo, search` |
 | `GET` | `/api/conversations/{sessionId}` | Full conversation detail: messages, files, operator, chunk summaries |
 | `GET` | `/api/rag/search` | RAG search. Query: `query` (required), `limit` (default 8, max 50), `source` (`crisp_chat`\|`plugin_docs`\|`wporg_forum`), `pluginId`, `brandId` |
