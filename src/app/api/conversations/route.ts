@@ -20,13 +20,14 @@ const querySchema = z.object({
   dateFrom: z.coerce.date().optional(),
   dateTo: z.coerce.date().optional(),
   search: z.string().max(500).optional(),
+  preview: z.string().max(500).optional(),
 });
 
 /**
  * GET /api/conversations
  * Paginated conversation list with filters and search.
  * Query params: page, pageSize, state, tag, product, email, operatorId,
- * hasAttachment, dateFrom, dateTo, search.
+ * hasAttachment, dateFrom, dateTo, search, preview.
  */
 export async function GET(request: NextRequest) {
   const params = Object.fromEntries(request.nextUrl.searchParams.entries());

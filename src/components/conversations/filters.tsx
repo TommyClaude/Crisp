@@ -5,6 +5,7 @@ import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import { Search, X } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
+import { HelpTip } from "@/components/help-tip";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import {
@@ -27,6 +28,7 @@ const FILTER_KEYS = [
   "hasAttachment",
   "dateFrom",
   "dateTo",
+  "preview",
 ] as const;
 
 /** Radix Select forbids empty-string item values, so "All" uses a sentinel. */
@@ -53,6 +55,7 @@ export function ConversationFilters({
 
   const [search, setSearch] = React.useState(searchParams.get("search") ?? "");
   const [email, setEmail] = React.useState(searchParams.get("email") ?? "");
+  const [preview, setPreview] = React.useState(searchParams.get("preview") ?? "");
 
   const setParams = React.useCallback(
     (updates: Record<string, string | null>) => {
@@ -73,6 +76,7 @@ export function ConversationFilters({
   function clearFilters() {
     setSearch("");
     setEmail("");
+    setPreview("");
     router.push(pathname);
   }
 
@@ -252,6 +256,35 @@ export function ConversationFilters({
           value={email}
           onChange={(event) => setEmail(event.target.value)}
           placeholder="name@example.com"
+          className="h-8 text-sm"
+        />
+      </form>
+
+      <form
+        onSubmit={(event) => {
+          event.preventDefault();
+          setParams({ preview });
+        }}
+        className="space-y-1.5"
+      >
+        <div className="flex items-center gap-1">
+          <Label htmlFor="filter-preview" className="text-muted-foreground text-xs">
+            Preview contains
+          </Label>
+          <HelpTip subject="Preview contains">
+            Matches the conversation&rsquo;s last-message preview exactly as
+            typed (case-insensitive) — unlike Search, it doesn&rsquo;t split
+            the text into separate words. Useful for isolating automated or
+            junk email threads, e.g. &quot;[WordPress Plugin]&quot;
+            notifications, without pulling in unrelated conversations that
+            merely mention the same words.
+          </HelpTip>
+        </div>
+        <Input
+          id="filter-preview"
+          value={preview}
+          onChange={(event) => setPreview(event.target.value)}
+          placeholder="[WordPress Plugin]"
           className="h-8 text-sm"
         />
       </form>

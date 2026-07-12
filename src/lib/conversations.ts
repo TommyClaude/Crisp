@@ -17,6 +17,11 @@ export interface ConversationListFilters {
   dateFrom?: Date;
   dateTo?: Date;
   search?: string;
+  /** Case-insensitive EXACT SUBSTRING match on `lastMessagePreview` — no
+   * full-text expansion, unlike `search`. Isolates junk/automated threads
+   * (e.g. "[WordPress Plugin] ...") that full-text search would otherwise
+   * blend in with legitimate conversations mentioning the same words. */
+  preview?: string;
 }
 
 export const conversationListItemSelect = {
@@ -82,6 +87,10 @@ export async function listConversations(
   }
   if (filters.operatorId) where.assignedOperatorId = filters.operatorId;
   if (filters.hasAttachment) where.files = { some: {} };
+  const preview = filters.preview?.trim();
+  if (preview) {
+    where.lastMessagePreview = { contains: preview, mode: "insensitive" };
+  }
   if (filters.dateFrom || filters.dateTo) {
     where.lastMessageAt = {
       ...(filters.dateFrom ? { gte: filters.dateFrom } : {}),

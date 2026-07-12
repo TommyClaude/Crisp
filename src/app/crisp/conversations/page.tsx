@@ -47,6 +47,7 @@ export default async function ConversationsPage({
       dateFrom: parseDate(first(sp.dateFrom)),
       dateTo: parseDate(first(sp.dateTo)),
       search: first(sp.search),
+      preview: first(sp.preview),
     }),
     getFilterOptions(),
   ]);
