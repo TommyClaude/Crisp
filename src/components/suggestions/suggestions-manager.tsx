@@ -453,14 +453,11 @@ export function SuggestionsManager({
   const checkBusy = checkRunning || checkStarting !== null;
   const haltRequested = checkProgress.cancelRequested;
 
-  // Button label reflects the current phase: "Checking 8/14 — FileBird…" while
-  // reading feeds, "Drafting 2/5…" while drafting replies.
+  // Button label only names the current phase — plugin index, plugin name and
+  // counters live in the progress line right below, so repeating them here
+  // would duplicate (and truncate) the same text.
   const checkLabel =
-    checkProgress.phase === "drafting"
-      ? `Drafting ${checkProgress.draftsDone}/${checkProgress.newThreads}…`
-      : `Checking ${checkProgress.currentIndex ?? checkProgress.pluginsDone}/${
-          checkProgress.pluginsTotal
-        }${checkProgress.currentPlugin ? ` — ${checkProgress.currentPlugin}` : ""}…`;
+    checkProgress.phase === "drafting" ? "Drafting replies…" : "Checking plugins…";
 
   return (
     <div className="space-y-4">
