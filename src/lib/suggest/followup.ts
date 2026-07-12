@@ -354,6 +354,30 @@ export async function generateFollowupForThread(
   // A skipped pass (wp.org unreachable, no replies) delivered nothing — nulling
   // the reminder there would silently drop it with no way to re-arm until the
   // team posts again, which is exactly what the reminder exists to prevent.
+  // Regenerate is a live observation of the thread, so it also maintains the
+  // waiting clock the watcher normally owns. Support posted last with no
+  // promise (a support_last skip or a gentle-close draft) and no clock running
+  // yet: start it, backdated to the best-known moment we learned the team had
+  // answered (the reply date when the watcher recorded one, else the PREVIOUS
+  // follow-up pass that first saw the support-last state) — without this, a
+  // topic whose team reply never appeared in the feed could wait forever
+  // without ever surfacing in "Needs resolved". A normal draft means the
+  // customer has spoken since: stop the clock.
+  const supportLastObserved =
+    result.skipped === "support_last" || result.mode === "gentle_close";
+  const priorGeneratedAt = (() => {
+    const prior = thread.followupJson as { generatedAt?: string } | null;
+    const parsed = prior?.generatedAt ? new Date(prior.generatedAt) : null;
+    return parsed && !Number.isNaN(parsed.getTime()) ? parsed : null;
+  })();
+  const waitingSincePatch = supportLastObserved
+    ? thread.followupPromisedAt == null && thread.waitingSince == null
+      ? { waitingSince: thread.lastReplyAt ?? priorGeneratedAt ?? new Date() }
+      : {}
+    : result.skipped
+      ? {}
+      : { waitingSince: null };
+
   await prisma.supportThread.update({
     where: { id: threadId },
     data: {
@@ -362,6 +386,7 @@ export async function generateFollowupForThread(
       // a transient fetch failure leaves the stored value untouched.
       ...(wpResolved !== null ? { wpResolved } : {}),
       ...(result.skipped ? {} : { followupPromisedAt: null }),
+      ...waitingSincePatch,
     },
   });
 
