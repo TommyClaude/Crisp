@@ -325,8 +325,21 @@ function BrandRow({ brand }: { brand: BrandItem }) {
           <div className="flex flex-wrap items-center gap-2">
             <span className="text-sm font-medium">{brand.name}</span>
             {brand.wpProfileSlug ? (
-              <Badge variant="outline" className="font-mono text-[11px]">
-                wp.org/author/{brand.wpProfileSlug}
+              // Bare slug, not a fake URL — the real author page is one
+              // click away (same treatment as the plugin slug badge).
+              <Badge
+                variant="outline"
+                className="font-mono text-[11px]"
+                title={`wordpress.org/plugins/author/${brand.wpProfileSlug}`}
+              >
+                <a
+                  href={`https://wordpress.org/plugins/author/${brand.wpProfileSlug}/`}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="hover:underline"
+                >
+                  /author/{brand.wpProfileSlug}
+                </a>
               </Badge>
             ) : null}
             {brand.replyStyle ? (
