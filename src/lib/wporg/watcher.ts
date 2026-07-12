@@ -67,6 +67,10 @@ const RESURFACE_EXCERPT_CHARS = 4000;
  */
 const SILENT_REFRESH_CAP = 20;
 
+/** Deadband for the waitingSince retro-correction in {@link refreshSilentTopics}:
+ *  a page-parsed date within an hour of the stored value isn't worth writing. */
+const ONE_HOUR_MS = 60 * 60 * 1000;
+
 /**
  * Resurface topics that got a fresh customer reply. For each plugin's reply
  * feed items (newest kept per topic) within the age cutoff, cheaply dedupe by
@@ -136,6 +140,14 @@ async function resurfaceReplies(
     // wp.org tags support-team posts with a role badge; a bare (roleless) last
     // post means the customer spoke last and the thread is waiting on support.
     const customerLast = lastPost.role == null;
+    // HYBRID date sourcing (review finding): the page's parsed per-post date
+    // is only HOUR/DAY-precise ("5 days ago"), so it may overestimate recency
+    // vs the feed's exact pubDate. Clocks and display fields prefer it —
+    // accuracy at day scale is what they need — but lastReplyAt is the feed
+    // DEDUPE WATERMARK (`existing.lastReplyAt >= replyDate` above) and must
+    // stay sourced from exact, monotonic feed dates: an inflated approximate
+    // watermark would silently skip a genuinely newer customer reply.
+    const effectiveDate = lastPost.postedAt ?? replyDate;
 
     if (!customerLast) {
       // Support answered last. Record lastReplyAt to skip refetching next time;
@@ -153,13 +165,13 @@ async function resurfaceReplies(
           where: { id: existing.id },
           data: {
             lastReplyAt: replyDate,
-            followupPromisedAt: promised ? replyDate : null,
+            followupPromisedAt: promised ? effectiveDate : null,
             // A promise owns the follow-up reminder, so the waiting clock stays
             // off. Without one the ball is now with the customer: start the
             // clock at this reply date so, after WPORG_SILENCE_NUDGE_DAYS of
             // silence, the topic surfaces in "Needs resolved". Either way the
             // topic leaves the "Needs reply" queue until the customer replies.
-            waitingSince: promised ? null : replyDate,
+            waitingSince: promised ? null : effectiveDate,
             // The team answering ON wp.org also retires any standing "New
             // reply" flag — the customer message it pointed at has been
             // handled outside the tool. Leaving it set would keep the topic
@@ -180,7 +192,7 @@ async function resurfaceReplies(
         data: {
           hasNewReply: true,
           lastReplyAt: replyDate,
-          lastActivityAt: replyDate,
+          lastActivityAt: effectiveDate,
           // A fresh customer reply supersedes any pending support promise —
           // the ball is back with the team via the "New reply" badge instead.
           followupPromisedAt: null,
@@ -200,15 +212,16 @@ async function resurfaceReplies(
           url: reply.topicUrl,
           title: fetched.title ?? reply.topicUrl,
           author: firstPost.author,
-          // parseTopicPage carries no per-post dates, so the topic's original
-          // publish date is unknown here — left null. lastActivityAt still
-          // sorts it into "Recent" by the reply date.
+          // The topic's original publish date, from the lead post's own
+          // parsed bbPress timestamp when available; null (unknown) only when
+          // that meta date didn't parse. lastActivityAt still sorts it into
+          // "Recent" by the reply date either way.
           excerpt: firstPost.text.slice(0, RESURFACE_EXCERPT_CHARS),
-          publishedAt: null,
+          publishedAt: firstPost.postedAt ?? null,
           status: "new",
           hasNewReply: true,
           lastReplyAt: replyDate,
-          lastActivityAt: replyDate,
+          lastActivityAt: effectiveDate,
           // Customer posted last — the ball is with the team, not waiting on
           // them (default null, set explicitly to keep the flag matrix clear).
           waitingSince: null,
@@ -224,39 +237,53 @@ async function resurfaceReplies(
 }
 
 /**
- * Resolution-refresh pass for topics sitting in the "waiting on customer" state
- * past the silence threshold (the "Needs resolved" candidates). wp.org emits no
- * feed item when a topic is marked resolved or (occasionally) when a reply
- * lands, so these would otherwise never update. Re-fetch the oldest batch and:
+ * Waiting-clock refresh pass, re-polling every thread currently "waiting on
+ * customer" (SupportThread.waitingSince set). wp.org emits no feed item when a
+ * topic is marked resolved or (occasionally) when a reply lands, so these
+ * would otherwise never update. This used to only re-check topics already
+ * PAST the silence threshold (the "Needs resolved" candidates); it now covers
+ * every waiting thread (still bounded, oldest first) so a clock that was
+ * started from an approximate fallback (see followup.ts's waitingSincePatch)
+ * and landed on the wrong side of the threshold can self-heal on the next
+ * check — not just topics that already look overdue. Re-fetch the batch and:
  *   (a) refresh wpResolved — a now-resolved topic drops out of the tab;
  *   (b) if the newest post is a fresh CUSTOMER reply the feed missed, apply the
  *       same customer-last handling as {@link resurfaceReplies} (flag, bump
- *       dates, clear the waiting/promise state).
+ *       dates, clear the waiting/promise state);
+ *   (c) if the newest post is still support-side, retro-correct waitingSince
+ *       to that post's own parsed date when it disagrees with the stored value
+ *       by more than an hour — same rule as followup.ts's RETRO-CORRECTION:
+ *       the stored value came from an approximate fallback; the page's own
+ *       timestamp is authoritative once we have it.
  * Bounded to {@link SILENT_REFRESH_CAP}, oldest waitingSince first, and honours
  * Pause/Stop between fetches.
  */
 async function refreshSilentTopics(
   pluginId: string | undefined,
-  silenceCutoff: Date,
   result: WatcherResult,
   state: CheckProgress
 ): Promise<void> {
-  const silent = await prisma.supportThread.findMany({
+  const waiting = await prisma.supportThread.findMany({
     where: {
-      waitingSince: { lte: silenceCutoff },
+      waitingSince: { not: null },
       wpResolved: false,
+      // Cost guard (review finding): a row touched within the last hour —
+      // synced, regenerated, or refreshed by the previous check — has nothing
+      // new to learn from another fetch. Without this, every check re-fetched
+      // up to 20 pages even when all clocks were young.
+      updatedAt: { lt: new Date(Date.now() - ONE_HOUR_MS) },
       // A human already acting on it (reviewed/dismissed) opts it out.
       status: { notIn: ["dismissed", "reviewed"] },
       plugin: { wpOrgSlug: { not: null } },
       ...(pluginId ? { pluginId } : {}),
     },
-    select: { id: true, url: true },
+    select: { id: true, url: true, waitingSince: true, followupPromisedAt: true },
     // Oldest waiters first — the topics most overdue for a close.
     orderBy: { waitingSince: "asc" },
     take: SILENT_REFRESH_CAP,
   });
 
-  for (const thread of silent) {
+  for (const thread of waiting) {
     // Honour Pause/Stop promptly — each candidate costs a fetch.
     if (state.cancelRequested) break;
     await sleep(FEED_POLITENESS_MS);
@@ -278,15 +305,20 @@ async function refreshSilentTopics(
 
     if (customerLast) {
       // A customer reply the feed missed — treat exactly like a resurfaced
-      // customer-last reply: flag it and hand the ball back to the team. No
-      // per-post date is parsed, so stamp "now" as the reply/activity time.
-      const now = new Date();
+      // customer-last reply: flag it and hand the ball back to the team.
+      // Prefer the page's own per-post date; fall back to "now" only when
+      // the meta timestamp didn't parse.
+      const replyDate = lastPost.postedAt ?? new Date();
+      // lastReplyAt (the feed dedupe watermark) is deliberately NOT written
+      // here: this date is approximate, and inflating the watermark could
+      // skip a genuinely newer reply on the next feed poll. Worst case the
+      // feed reprocesses this same reply once — idempotent (hasNewReply is
+      // already true by then).
       await prisma.supportThread.update({
         where: { id: thread.id },
         data: {
           hasNewReply: true,
-          lastReplyAt: now,
-          lastActivityAt: now,
+          lastActivityAt: replyDate,
           followupPromisedAt: null,
           waitingSince: null,
           wpResolved: fetched.resolved,
@@ -295,11 +327,24 @@ async function refreshSilentTopics(
       result.resurfaced += 1;
       state.resurfaced += 1;
     } else {
-      // Still support-last: just refresh the resolution flag. A now-resolved
-      // topic drops out of "Needs resolved" naturally on the next page load.
+      // Still support-last: refresh the resolution flag, and retro-correct the
+      // waiting clock when the page's own timestamp disagrees with the stored
+      // value by more than an hour. waitingSince and followupPromisedAt are
+      // mutually exclusive elsewhere in this codebase (a promise owns the
+      // reminder instead of the waiting clock), so followupPromisedAt should
+      // already be null here — the check is defensive, not load-bearing.
+      const lastPostAt = lastPost.postedAt;
+      const needsRetroCorrection =
+        thread.followupPromisedAt == null &&
+        lastPostAt != null &&
+        thread.waitingSince != null &&
+        Math.abs(lastPostAt.getTime() - thread.waitingSince.getTime()) > ONE_HOUR_MS;
       await prisma.supportThread.update({
         where: { id: thread.id },
-        data: { wpResolved: fetched.resolved },
+        data: {
+          wpResolved: fetched.resolved,
+          ...(needsRetroCorrection ? { waitingSince: lastPostAt } : {}),
+        },
       });
     }
   }
@@ -356,10 +401,6 @@ export async function checkPluginForums(options?: {
   // Topics published before this instant are too old to bother with.
   const maxAgeDays = getEnv().WPORG_TOPIC_MAX_AGE_DAYS;
   const ageCutoffMs = Date.now() - maxAgeDays * MS_PER_DAY;
-  // Waiting-on-customer topics older than this are the "Needs resolved"
-  // candidates the silent-topic refresh pass re-polls (they emit no feed item).
-  const nudgeDays = getEnv().WPORG_SILENCE_NUDGE_DAYS;
-  const silenceCutoff = new Date(Date.now() - nudgeDays * MS_PER_DAY);
 
   try {
     // Deterministic alphabetical order — this defines each plugin's 1-based
@@ -459,12 +500,13 @@ export async function checkPluginForums(options?: {
     result.lastIndex = lastIndex;
     result.status = halted ?? "completed";
 
-    // Re-poll silent "Needs resolved" candidates for a resolution flip or a
-    // missed customer reply (skipped on a graceful halt, like drafting). Folds
-    // any missed customer reply into the resurfaced counter.
+    // Re-poll every waiting-on-customer thread for a resolution flip, a missed
+    // customer reply, or a waitingSince retro-correction (skipped on a
+    // graceful halt, like drafting). Folds any missed customer reply into the
+    // resurfaced counter.
     if (!halted) {
       try {
-        await refreshSilentTopics(options?.pluginId, silenceCutoff, result, state);
+        await refreshSilentTopics(options?.pluginId, result, state);
       } catch (error) {
         result.errors.push(
           `silent-refresh pass: ${error instanceof Error ? error.message : String(error)}`

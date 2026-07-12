@@ -29,6 +29,10 @@ import {
 /** Max characters of each transcript post fed into the follow-up prompt. */
 const PROMPT_POST_CHARS = 1200;
 
+/** Deadband for the waitingSince retro-correction below: a page-parsed date
+ *  within an hour of the stored value isn't worth writing. */
+const RETRO_CORRECTION_DEADBAND_MS = 60 * 60 * 1000;
+
 /** Persisted shape of SupportThread.followupJson. Regenerate overwrites it. */
 export interface FollowupResult {
   generatedAt: string;
@@ -55,6 +59,15 @@ export interface FollowupResult {
  */
 export type DraftFollowupOutput = FollowupResult & {
   wpResolved: boolean | null;
+  /**
+   * postedAt of the live thread's newest post (last in fetch order), when the
+   * bbPress meta timestamp was parseable. null when no page was fetched, or
+   * the newest post's date didn't parse. Kept OUT of followupJson (like
+   * wpResolved) so the caller can use it to set/correct SupportThread's own
+   * waitingSince/lastReplyAt columns from the page's own timestamp rather
+   * than the approximate fallbacks (lastReplyAt / prior generatedAt / now).
+   */
+  lastPostAt: Date | null;
 };
 
 export interface DraftFollowupInput {
@@ -219,8 +232,15 @@ export async function draftFollowup(
       context: [],
       skipped: "fetch_failed",
       wpResolved: null,
+      lastPostAt: null,
     };
   }
+
+  // The live thread's newest post's own parsed date — the authoritative
+  // source for the waiting clock (see the caller). Undefined only when the
+  // thread has zero posts (shouldn't happen for a fetched page, but the array
+  // access is defensive).
+  const lastPostAt = fetched.posts[fetched.posts.length - 1]?.postedAt ?? null;
 
   // Opening post + at least one reply required — a follow-up only makes sense
   // once the customer (or someone) has said something after the question.
@@ -232,6 +252,7 @@ export async function draftFollowup(
       context: [],
       skipped: "no_replies",
       wpResolved: fetched.resolved,
+      lastPostAt,
     };
   }
 
@@ -261,6 +282,7 @@ export async function draftFollowup(
       context: [],
       skipped: "support_last",
       wpResolved: fetched.resolved,
+      lastPostAt,
     };
   }
 
@@ -293,6 +315,7 @@ export async function draftFollowup(
     // Marker (not a skip) so the UI can label the box "Closing reply".
     ...(gentleClose ? { mode: "gentle_close" as const } : {}),
     wpResolved: fetched.resolved,
+    lastPostAt,
   };
 }
 
@@ -339,9 +362,10 @@ export async function generateFollowupForThread(
     getEnv().WPORG_SILENCE_NUDGE_DAYS
   );
 
-  // wpResolved is read off the same fetch but persisted to its own column, not
-  // into followupJson — split it out so `result` stays a clean FollowupResult.
-  const { wpResolved, ...result } = await draftFollowup({
+  // wpResolved and lastPostAt are read off the same fetch but persisted to
+  // their own columns, not into followupJson — split them out so `result`
+  // stays a clean FollowupResult.
+  const { wpResolved, lastPostAt, ...result } = await draftFollowup({
     url: thread.url,
     title: thread.title,
     plugin: { id: thread.plugin.id, name: thread.plugin.name },
@@ -356,13 +380,14 @@ export async function generateFollowupForThread(
   // team posts again, which is exactly what the reminder exists to prevent.
   // Regenerate is a live observation of the thread, so it also maintains the
   // waiting clock the watcher normally owns. Support posted last with no
-  // promise (a support_last skip or a gentle-close draft) and no clock running
-  // yet: start it, backdated to the best-known moment we learned the team had
-  // answered (the reply date when the watcher recorded one, else the PREVIOUS
-  // follow-up pass that first saw the support-last state) — without this, a
-  // topic whose team reply never appeared in the feed could wait forever
-  // without ever surfacing in "Needs resolved". A normal draft means the
-  // customer has spoken since: stop the clock.
+  // promise (a support_last skip or a gentle-close draft): start-the-clock
+  // priority is the live thread's own newest-post date (lastPostAt, parsed off
+  // the fetched page — authoritative when present), else the reply date when
+  // the watcher recorded one, else the PREVIOUS follow-up pass that first saw
+  // the support-last state, else now — without this, a topic whose team reply
+  // never appeared in the feed could wait forever without ever surfacing in
+  // "Needs resolved". A normal draft means the customer has spoken since: stop
+  // the clock.
   const supportLastObserved =
     result.skipped === "support_last" || result.mode === "gentle_close";
   const priorGeneratedAt = (() => {
@@ -370,10 +395,30 @@ export async function generateFollowupForThread(
     const parsed = prior?.generatedAt ? new Date(prior.generatedAt) : null;
     return parsed && !Number.isNaN(parsed.getTime()) ? parsed : null;
   })();
+  // Invariant (review-verified): supportLastObserved implies the promise was
+  // already null — draftFollowup only returns support_last/gentle_close when
+  // deliverPromise (= force || followupPromisedAt != null) was false. So no
+  // promise guard is needed here.
   const waitingSincePatch = supportLastObserved
-    ? thread.followupPromisedAt == null && thread.waitingSince == null
-      ? { waitingSince: thread.lastReplyAt ?? priorGeneratedAt ?? new Date() }
-      : {}
+    ? thread.waitingSince == null
+      ? {
+          waitingSince:
+            lastPostAt ?? thread.lastReplyAt ?? priorGeneratedAt ?? new Date(),
+        }
+      : // RETRO-CORRECTION: a clock is already running, but the stored value
+          // came from the approximate fallbacks above. When the live thread's
+          // own parsed date disagrees by more than an hour, trust the page —
+          // whether that moves the clock earlier (the fallback overestimated
+          // how recently support replied — the owner's real-world case: a
+          // same-day Regenerate poisoned the fallback to "today" when the
+          // actual reply was days ago) or later (the team has replied AGAIN
+          // since the clock started, which correctly restarts the wait). A
+          // sub-hour disagreement is noise, not worth a write.
+        lastPostAt != null &&
+          Math.abs(lastPostAt.getTime() - thread.waitingSince.getTime()) >
+            RETRO_CORRECTION_DEADBAND_MS
+        ? { waitingSince: lastPostAt }
+        : {}
     : result.skipped
       ? {}
       : { waitingSince: null };

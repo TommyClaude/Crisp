@@ -102,6 +102,12 @@ export interface ForumPost {
   /** wp.org badge next to the author: Plugin Author, Plugin Support, ... */
   role: string | null;
   text: string;
+  /**
+   * Absolute moment the post was made, parsed from the bbPress relative-time
+   * meta ("5 days, 2 hours ago") next to the post. null when no such string
+   * was found (markup changed, or the fragment is malformed).
+   */
+  postedAt: Date | null;
 }
 
 export interface ForumThreadPage {
@@ -142,9 +148,13 @@ export function looksResolved(fragment: string): boolean {
 
 /**
  * Extract the inner HTML of the <div> whose opening tag starts at
- * `openTagStart`, honoring nested divs. Returns null when unbalanced.
+ * `openTagStart`, honoring nested divs, plus the index right after its
+ * closing `</div>`. Returns null when unbalanced.
  */
-function extractBalancedDiv(html: string, openTagStart: number): string | null {
+function extractBalancedDiv(
+  html: string,
+  openTagStart: number
+): { inner: string; end: number } | null {
   const openEnd = html.indexOf(">", openTagStart);
   if (openEnd === -1) return null;
   const re = /<div[\s>]|<\/div>/gi;
@@ -153,9 +163,52 @@ function extractBalancedDiv(html: string, openTagStart: number): string | null {
   let match: RegExpExecArray | null;
   while ((match = re.exec(html))) {
     depth += match[0].startsWith("</") ? -1 : 1;
-    if (depth === 0) return html.slice(openEnd + 1, match.index);
+    if (depth === 0) {
+      return {
+        inner: html.slice(openEnd + 1, match.index),
+        end: match.index + match[0].length,
+      };
+    }
   }
   return null;
+}
+
+/** Matches a bbPress relative-time stamp, e.g. "5 days, 2 hours ago" or "1
+ *  minute ago". Two magnitude/unit pairs (comma-joined) is the finest
+ *  granularity wp.org renders. */
+const RELATIVE_TIME_RE =
+  /(\d+)\s+(year|month|week|day|hour|minute|second)s?(?:,\s*(\d+)\s+(year|month|week|day|hour|minute|second)s?)?\s+ago/i;
+
+/** Approximate millisecond widths — month=30d, year=365d is plenty precise
+ *  for the hour-scale thresholds this feeds (waitingSince, publishedAt). */
+const RELATIVE_UNIT_MS: Record<string, number> = {
+  second: 1000,
+  minute: 60 * 1000,
+  hour: 60 * 60 * 1000,
+  day: 24 * 60 * 60 * 1000,
+  week: 7 * 24 * 60 * 60 * 1000,
+  month: 30 * 24 * 60 * 60 * 1000,
+  year: 365 * 24 * 60 * 60 * 1000,
+};
+
+/**
+ * Parse a bbPress-style relative-time string ("5 days, 2 hours ago", "1
+ * minute ago") found anywhere in `text` into an absolute Date relative to
+ * `now`. Returns null when no such string is present (garbled markup, or
+ * genuinely absent). Exported for the relative-parse unit tests.
+ */
+export function parseRelativeTimeAgo(
+  text: string,
+  now: Date = new Date()
+): Date | null {
+  // Cap the scan: the regex is quadratic on pathological digit soup, and a
+  // real bbPress meta date always sits in the first few KB of the fragment.
+  const match = text.slice(0, 4000).match(RELATIVE_TIME_RE);
+  if (!match) return null;
+  const [, n1, u1, n2, u2] = match;
+  let ms = Number(n1) * RELATIVE_UNIT_MS[u1.toLowerCase()];
+  if (n2 && u2) ms += Number(n2) * RELATIVE_UNIT_MS[u2.toLowerCase()];
+  return new Date(now.getTime() - ms);
 }
 
 /** Compare hosts ignoring a leading "www." (apex vs www are the same forum). */
@@ -250,8 +303,9 @@ export function parseTopicPage(html: string): ForumThreadPage {
       /<div[^>]*class="[^"]*\bbbp-(?:reply|topic)-content\b[^"]*"[^>]*>/i
     );
     if (!contentOpen || contentOpen.index === undefined) continue;
+    const contentBlock = extractBalancedDiv(segment, contentOpen.index);
     const contentHtml =
-      extractBalancedDiv(segment, contentOpen.index) ??
+      contentBlock?.inner ??
       segment.slice(contentOpen.index + contentOpen[0].length);
     const text = htmlToText(contentHtml);
     if (!text) continue;
@@ -271,7 +325,21 @@ export function parseTopicPage(html: string): ForumThreadPage {
     }
     const role = stripTags(head).match(ROLE_RE)?.[1] ?? null;
 
-    posts.push({ id: postId, author, role, text });
+    // Meta date: search the WHOLE post fragment for the bbPress relative-time
+    // stamp, but with the reply/topic CONTENT body cut out first — so a
+    // customer writing "3 days ago I bought this" inside their message can
+    // never be mistaken for the timestamp. Be defensive about which element
+    // the stamp actually sits in (usually the header, before the content div,
+    // but themes vary) by searching everything BEFORE and AFTER the content
+    // block rather than assuming a fixed position. When the content div
+    // itself was unbalanced (contentBlock null) there's no reliable "after"
+    // boundary, so only the head is searched.
+    const metaArea = contentBlock
+      ? head + segment.slice(contentBlock.end)
+      : head;
+    const postedAt = parseRelativeTimeAgo(stripTags(metaArea));
+
+    posts.push({ id: postId, author, role, text, postedAt });
   }
 
   const title =
