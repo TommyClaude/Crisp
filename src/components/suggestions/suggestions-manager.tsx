@@ -193,6 +193,7 @@ export function SuggestionsManager({
   plugins,
   llmConfigured,
   totalThreadCount,
+  tabCounts,
   initialCheckProgress,
   initialLastCheck,
   initialResumeIndex,
@@ -204,6 +205,10 @@ export function SuggestionsManager({
   /** Count of ALL support topics in the DB (ignoring filters) — distinguishes
    *  a truly empty DB (onboarding hint) from an empty filtered view. */
   totalThreadCount: number;
+  /** Topic count per tab (`?status=` value → count), scoped by the active
+   *  plugin filter with the same where-clauses each tab's list query uses —
+   *  rendered as a muted chip on each tab button. */
+  tabCounts: Record<string, number>;
   initialCheckProgress: CheckProgress;
   initialLastCheck: ForumCheckLogView | null;
   initialResumeIndex: number;
@@ -486,6 +491,9 @@ export function SuggestionsManager({
                 }
               >
                 {tab.label}
+                <span className="text-muted-foreground text-xs tabular-nums">
+                  {tabCounts[tab.value] ?? 0}
+                </span>
               </Button>
               {tab.value === NEEDS_REPLY ? (
                 <HelpTip subject="the Needs reply tab" className="mr-1">

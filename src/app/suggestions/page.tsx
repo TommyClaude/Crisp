@@ -21,9 +21,13 @@ import {
 } from "@/lib/suggest/promise";
 import type { ContextChunkSummary, DraftItem } from "@/lib/suggest/suggester";
 import {
+  NEEDS_REPLY,
+  NEEDS_RESOLVED,
   needsReplyBacklogWhere,
   needsReplyFlaggedWhere,
+  needsReplyWhere,
   needsResolvedWhere,
+  RECENT,
   resolveTab,
 } from "@/lib/suggest/suggestions-view";
 import { computeResumeIndex, getCheckProgress } from "@/lib/wporg/check-state";
@@ -110,7 +114,29 @@ export default async function SuggestionsPage({
               take: 50,
             });
 
-  const [threads, plugins, lastCheckLog, resumeRuns, totalThreadCount] =
+  // Per-tab topic counts for the tab row, scoped by the same plugin filter
+  // and using the exact same where-clauses as each tab's list query above.
+  // Needs-reply is counted via needsReplyWhere — the documented union of
+  // needsReplyFlaggedWhere + needsReplyBacklogWhere — rather than summing two
+  // counts: same result (the two halves are disjoint by construction), one
+  // query. Batched into a single Promise.all so the 7 counts run concurrently
+  // (and concurrently with everything else below).
+  const tabCountEntries: Array<[string, Prisma.SupportThreadWhereInput]> = [
+    [NEEDS_REPLY, { ...needsReplyWhere(promiseCutoff), ...pluginWhere }],
+    [NEEDS_RESOLVED, { ...needsResolvedWhere(silenceCutoff), ...pluginWhere }],
+    [RECENT, { ...pluginWhere }],
+    ["new", { status: "new", ...pluginWhere }],
+    ["failed", { status: "failed", ...pluginWhere }],
+    ["reviewed", { status: "reviewed", ...pluginWhere }],
+    ["dismissed", { status: "dismissed", ...pluginWhere }],
+  ];
+  const tabCountsPromise: Promise<Record<string, number>> = Promise.all(
+    tabCountEntries.map(([, where]) => prisma.supportThread.count({ where }))
+  ).then((counts) =>
+    Object.fromEntries(tabCountEntries.map(([key], i) => [key, counts[i]]))
+  );
+
+  const [threads, plugins, lastCheckLog, resumeRuns, totalThreadCount, tabCounts] =
     await Promise.all([
     fetchThreads,
     prisma.plugin.findMany({
@@ -132,6 +158,7 @@ export default async function SuggestionsPage({
     // onboarding hint ONLY when there are genuinely no topics, versus a
     // per-tab / "no match" message for an empty filtered view.
     prisma.supportThread.count(),
+    tabCountsPromise,
   ]);
 
   // Finish the Needs-reply ordering in JS (flagged-first; the DB did the coarse
@@ -258,6 +285,7 @@ export default async function SuggestionsPage({
         plugins={plugins}
         llmConfigured={suggesterConfigured()}
         totalThreadCount={totalThreadCount}
+        tabCounts={tabCounts}
         initialCheckProgress={initialCheckProgress}
         initialLastCheck={initialLastCheck}
         initialResumeIndex={initialResumeIndex}
