@@ -12,6 +12,10 @@ import {
   beginSyncProgress,
   endSyncProgress,
   getSyncProgress,
+  isQueueHeld,
+  setQueueHeld,
+  shiftQueueEntry,
+  type QueueEntry,
   type SyncKind,
 } from "./sync-state";
 import {
@@ -20,6 +24,7 @@ import {
   shouldStopRangeWalk,
 } from "./coverage";
 import { autoDetectMissingBrands } from "./archive-start";
+import { validateRange } from "./range";
 
 /** Upsert batch size for messages — keeps transactions small and memory flat. */
 const MESSAGE_BATCH_SIZE = 50;
@@ -793,4 +798,132 @@ export async function runIncrementalSync(options?: {
     updatedSince,
     startPage: options?.startPage,
   });
+}
+
+/**
+ * Replay one queued entry through the exact same run functions the start
+ * route uses. The date window is re-validated from the entry's original
+ * `YYYY-MM-DD` strings (see QueueEntry's doc comment) rather than trusting a
+ * pre-resolved window — cheap, and it means a queued range entry always goes
+ * through the identical validation path a fresh request would.
+ *
+ * An unknown/deleted brandId is NOT handled here — it flows into
+ * runRangeSync exactly like a fresh request would, which fails the run with
+ * a clear error and still records a `failed` SyncLog (see runSync's brandId
+ * handling), so a queued entry gone stale while waiting never wedges the
+ * queue: {@link advanceQueueAfter} sees the `failed` status and drains the
+ * next entry regardless.
+ */
+function startQueuedEntry(entry: QueueEntry): Promise<SyncRunResult> {
+  if (entry.kind === "range") {
+    const check = validateRange(entry.dateStart, entry.dateEnd);
+    if (check.ok && check.window) {
+      return runRangeSync({
+        dateStart: check.window.start,
+        dateEnd: check.window.end,
+        brandId: entry.brandId,
+      });
+    }
+    // Unreachable in practice — dateStart/dateEnd were already validated by
+    // the start route before this entry was queued, and plain strings don't
+    // go stale while sitting in the queue. Guarded anyway so a queue entry
+    // can never wedge the drain chain: report it as a failed run (no SyncLog
+    // row, since runSync/runRangeSync was never actually invoked) instead of
+    // throwing out of the chain.
+    console.error(
+      `Queued range entry ${entry.id} failed re-validation: ${
+        check.ok ? "window missing" : check.message
+      }`
+    );
+    return Promise.resolve({
+      syncLogId: "",
+      status: "failed",
+      conversationsSynced: 0,
+      messagesSynced: 0,
+      failedSessions: [],
+      error: check.ok ? "Range window missing on replay" : check.message,
+    });
+  }
+  if (entry.kind === "incremental") {
+    return runIncrementalSync({ startPage: entry.startPage });
+  }
+  return runFullSync({ startPage: entry.startPage });
+}
+
+/**
+ * Drain one entry off the queue and start it, chaining {@link advanceQueueAfter}
+ * onto the resulting run so the chain continues after IT settles too. A
+ * no-op if a sync is already running, the queue is held, or the queue is
+ * empty — callers don't need to check those themselves.
+ */
+function drainNextQueuedSync(): void {
+  if (getSyncProgress().running || isQueueHeld()) return;
+  const next = shiftQueueEntry();
+  if (!next) return;
+  // Fire-and-forget, like the start route's own run.catch(...) — this chain
+  // drives SyncLog + in-memory progress itself; nothing here needs to be
+  // awaited by the caller.
+  void advanceQueueAfter(startQueuedEntry(next)).catch((error) =>
+    console.error(`Queued sync (${next.kind}) failed to start:`, error)
+  );
+}
+
+/**
+ * Wrap a run promise (from runFullSync/runIncrementalSync/runRangeSync) so
+ * that once it settles, the queue reacts correctly:
+ *
+ *  - Natural end (completed/failed) → auto-advance: drain and start the next
+ *    queued entry, if any. A queued entry that fails (e.g. its brand was
+ *    deleted while it waited) still records its own `failed` SyncLog via the
+ *    normal runSync path and this same branch drains past it — no wedged
+ *    queue.
+ *  - Halted by the user (cancelled/paused) → HOLD: set the held flag and
+ *    stop. Stop/Pause expresses "I want control now"; the panel surfaces a
+ *    "Start next" button instead of auto-launching more work.
+ *
+ * Used by both the start route (for a fresh manual run) and the drain chain
+ * itself (for a queue-triggered run), so every run — however it started —
+ * feeds the same advance/hold logic exactly once.
+ */
+export async function advanceQueueAfter(
+  run: Promise<SyncRunResult>
+): Promise<SyncRunResult> {
+  let result: SyncRunResult;
+  try {
+    result = await run;
+  } catch (error) {
+    // Unexpected: the run rejected outright instead of settling into a
+    // completed/failed SyncLog (e.g. the DB-level single-flight guard in
+    // runSync tripped). Hold rather than tight-looping retries against
+    // whatever's wrong.
+    setQueueHeld(true);
+    throw error;
+  }
+  if (result.status === "completed" || result.status === "failed") {
+    drainNextQueuedSync();
+  } else {
+    setQueueHeld(true);
+  }
+  return result;
+}
+
+export type StartNextQueuedResult =
+  | { ok: true; entry: QueueEntry }
+  | { ok: false; reason: "running" | "empty" };
+
+/**
+ * The "Start next" button's server-side action: clears the held flag and
+ * starts the next queued entry, chaining the same advance/hold logic onto
+ * it. 409s (via the caller) when a sync is already running or the queue is
+ * empty.
+ */
+export function startNextQueuedSync(): StartNextQueuedResult {
+  if (getSyncProgress().running) return { ok: false, reason: "running" };
+  const next = shiftQueueEntry();
+  if (!next) return { ok: false, reason: "empty" };
+  setQueueHeld(false);
+  void advanceQueueAfter(startQueuedEntry(next)).catch((error) =>
+    console.error(`Queued sync (${next.kind}) failed to start:`, error)
+  );
+  return { ok: true, entry: next };
 }

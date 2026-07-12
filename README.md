@@ -143,7 +143,15 @@ Only syncs conversations updated since the last successful run, with a 1-hour ov
 
 ### From the dashboard
 
-`/crisp/dashboard` has **Full sync**, **Incremental sync** and **Stop** buttons backed by `POST /api/sync/crisp/start` and `POST /api/sync/crisp/stop`, with live progress from `GET /api/sync/crisp/status`. Only one sync can run at a time (a second start returns `409`). Stop is graceful: the conversation in flight finishes, progress is persisted, and the log is marked `cancelled`.
+`/crisp/dashboard` has **Full sync**, **Incremental sync** and **Stop** buttons backed by `POST /api/sync/crisp/start` and `POST /api/sync/crisp/stop`, with live progress from `GET /api/sync/crisp/status`. Only one sync runs at a time — but see **Sync queue** below for what a second request does now instead of just erroring. Stop is graceful: the conversation in flight finishes, progress is persisted, and the log is marked `cancelled`.
+
+### Sync queue
+
+Clicking Full sync, Incremental sync, or Sync range while one is already running no longer just 409s — the request is validated exactly as usual (still `400` if it's invalid) and, once valid, joins an in-memory FIFO queue instead: `POST /api/sync/crisp/start` returns `202 {queued: true, position, entry, progress}`. The queue holds up to **5** entries; a 6th distinct request `409`s "queue full", and re-submitting a request that exactly matches one already queued (same kind + `startPage`/`dateStart`/`dateEnd`/`brandId`) `409`s "already queued" — but duplicating the *currently running* sync is fine to queue, since re-running the same thing is sometimes intentional.
+
+When the running sync ends **naturally** (`completed` or `failed`), the next queued entry starts automatically, in order — including past a failure: if a queued run's target brand was deleted while it waited, that run fails and records its own `failed` `SyncLog` (same as any other failed run) and the queue keeps draining past it, so one stale entry can never wedge the rest. When the running sync is halted by the owner instead (**Stop** → `cancelled`, **Pause** → `paused`), the queue is **held** — nothing auto-starts, since Stop/Pause means "I want control now" and silently launching more work would fight that. A held queue shows an amber notice and a **Start next** button (`POST /api/sync/crisp/queue/start-next`) that clears the hold and starts one entry; the rest resume auto-advancing normally once that entry settles. Note that starting **any** sync manually while the queue is held clears the hold too — that run takes the slot now, and once it settles naturally the remaining queued entries resume auto-draining without another click. If you halted specifically to reconsider the backlog, remove the entries you no longer want before starting anything new. Each queued entry also has its own **✕** remove button (`POST /api/sync/crisp/queue/remove`).
+
+The queue is **process memory only**, exactly like live sync progress — a server restart loses it, and it's local to one server process. There is no way to persist or re-queue it across a restart.
 
 ### Archive coverage & range sync
 
@@ -222,12 +230,14 @@ All routes require Basic auth (see Security). All bodies/queries are Zod-validat
 
 | Method | Path | Description |
 | --- | --- | --- |
-| `POST` | `/api/sync/crisp/start` | Start a background sync. Body `{mode?: "full"\|"incremental", startPage?, dateStart?, dateEnd?, brandId?}` — `dateStart`+`dateEnd` (both, `YYYY-MM-DD`, start ≤ end) run a range sync over that window; `startPage` is for full/incremental only and is rejected alongside a date range (range page numbers index Crisp's filtered list, not the archive); `brandId` scopes a range sync to one Brand and is rejected without a date range (full/incremental always cover every brand). `202` on start, `409` if one is running |
-| `GET` | `/api/sync/crisp/status` | Live sync progress + last completed run + 10 most recent logs |
-| `POST` | `/api/sync/crisp/stop` | Request graceful cancellation of the running sync (`409` if none) |
+| `POST` | `/api/sync/crisp/start` | Start a background sync. Body `{mode?: "full"\|"incremental", startPage?, dateStart?, dateEnd?, brandId?}` — `dateStart`+`dateEnd` (both, `YYYY-MM-DD`, start ≤ end) run a range sync over that window; `startPage` is for full/incremental only and is rejected alongside a date range (range page numbers index Crisp's filtered list, not the archive); `brandId` scopes a range sync to one Brand and is rejected without a date range (full/incremental always cover every brand). All validation happens before checking whether a sync is running, so an invalid body always `400`s. `202 {started: true, ...}` when it starts immediately; `202 {queued: true, position, entry, progress}` when one is already running and this joins the FIFO queue instead (see **Sync queue**); `409` if queuing itself fails (duplicate of an already-queued entry, or the queue is full) |
+| `GET` | `/api/sync/crisp/status` | Live sync progress (now including `queue` — the FIFO array — and `held`) + last completed run + 10 most recent logs |
+| `POST` | `/api/sync/crisp/stop` | Request graceful cancellation of the running sync (`409` if none). Also HOLDS the queue — see **Sync queue** |
+| `POST` | `/api/sync/crisp/queue/remove` | Remove one entry from the sync queue. Body `{id}`. `404` if that id isn't currently queued |
+| `POST` | `/api/sync/crisp/queue/start-next` | Clear a held queue and start its next entry. `409` if a sync is already running or the queue is empty |
 | `POST` | `/api/sync/crisp/conversation/{sessionId}` | Re-fetch one conversation from Crisp, upsert it, rebuild its chunks |
 | `POST` | `/api/sync/crisp/detect-start` | Binary-search each configured brand's true first-conversation month (~10 Crisp requests per brand) and store the per-brand result in `AppMeta`, merged with any existing entries. Also runs automatically on every full sync for brands missing an entry. `502` if a probe fails or no conversations are found anywhere |
-| `GET` | `/api/conversations` | Paginated list. Query: `page, pageSize, state, tag, product, brandId, email, operatorId, hasAttachment, dateFrom, dateTo, search` |
+| `GET` | `/api/conversations` | Paginated list. Query: `page, pageSize, state, tag, product, brandId, email, operatorId, hasAttachment, dateFrom, dateTo, search, preview` — `preview` matches the last-message preview as an exact case-insensitive substring (no word-splitting, unlike `search`); handy for isolating automated junk threads like `[WordPress Plugin] …` |
 | `GET` | `/api/conversations/{sessionId}` | Full conversation detail: messages, files, operator, chunk summaries |
 | `GET` | `/api/rag/search` | RAG search. Query: `query` (required), `limit` (default 8, max 50), `source` (`crisp_chat`\|`plugin_docs`\|`wporg_forum`), `pluginId`, `brandId` |
 | `POST` | `/api/rag/chunks/rebuild` | Rebuild chat chunks. Body `{sessionId?, onlyResolved?, withEmbeddings?}`. Single session is synchronous; full rebuild runs in the background (`202`, `409` if already running) |
@@ -303,7 +313,8 @@ src/
     conversations/           # list + [sessionId] detail
     rag/                     # search playground
     api/
-      sync/crisp/            # start | status | stop | conversation/[sessionId]
+      sync/crisp/            # start | status | stop | queue/remove | queue/start-next
+                             # | conversation/[sessionId]
       conversations/         # list | [sessionId] detail
       rag/                   # search | chunks/rebuild
   lib/

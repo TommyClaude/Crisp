@@ -1,11 +1,12 @@
 import { NextRequest, NextResponse } from "next/server";
 import { z } from "zod";
 import {
+  advanceQueueAfter,
   runFullSync,
   runIncrementalSync,
   runRangeSync,
 } from "@/lib/sync/sync-service";
-import { getSyncProgress } from "@/lib/sync/sync-state";
+import { enqueueSync, getSyncProgress, MAX_QUEUE_SIZE } from "@/lib/sync/sync-state";
 import { isoDay, validateRange } from "@/lib/sync/range";
 
 export const dynamic = "force-dynamic";
@@ -40,6 +41,19 @@ const bodySchema = z
  * `brandId`; otherwise the usual full/incremental run (which always covers
  * every brand). Progress is exposed by /api/sync/crisp/status. For scheduled
  * syncs, prefer the CLI scripts (`npm run sync:crisp[:incremental]`).
+ *
+ * All the validation above (range/brandId/startPage rules) runs BEFORE
+ * checking whether a sync is already running, so an invalid request always
+ * 400s — it never gets queued. If a sync IS already running, a validated
+ * request no longer 409s outright: it joins the in-memory FIFO queue (see
+ * sync-state.ts) instead and this returns `202 {queued: true, position,
+ * entry}`. Queuing itself can still 409 — an exact duplicate of an
+ * already-queued entry ("already queued"; duplicating the RUNNING sync is
+ * fine), or a full queue (max {@link MAX_QUEUE_SIZE}). Once queued, the entry
+ * starts automatically when the running sync ends naturally (completed or
+ * failed); a Stop/Pause instead HOLDS the queue for manual "Start next" (see
+ * /api/sync/crisp/queue/start-next) — see advanceQueueAfter in
+ * sync-service.ts for the full rationale.
  */
 export async function POST(request: NextRequest) {
   let json: unknown = {};
@@ -84,15 +98,37 @@ export async function POST(request: NextRequest) {
     );
   }
 
+  const kind = rangeCheck.window ? "range" : mode;
+
   const progress = getSyncProgress();
   if (progress.running) {
+    // A sync is already running — queue this validated request instead of
+    // 409ing it away. Dates are kept as the original YYYY-MM-DD strings (not
+    // the resolved window) so the entry replays through the exact same start
+    // path when it's drained (see QueueEntry's doc comment).
+    const enqueued = enqueueSync({ kind, startPage, dateStart, dateEnd, brandId });
+    if (!enqueued.ok) {
+      return NextResponse.json(
+        {
+          error:
+            enqueued.reason === "duplicate"
+              ? "This exact sync is already queued."
+              : `The sync queue is full (max ${MAX_QUEUE_SIZE}) — remove a queued entry or wait for one to start.`,
+        },
+        { status: 409 }
+      );
+    }
     return NextResponse.json(
-      { error: "A sync is already running", progress },
-      { status: 409 }
+      {
+        queued: true,
+        position: enqueued.position,
+        entry: enqueued.entry,
+        progress: getSyncProgress(),
+      },
+      { status: 202 }
     );
   }
 
-  const kind = rangeCheck.window ? "range" : mode;
   const run = rangeCheck.window
     ? runRangeSync({
         dateStart: rangeCheck.window.start,
@@ -102,8 +138,11 @@ export async function POST(request: NextRequest) {
     : mode === "incremental"
       ? runIncrementalSync({ startPage })
       : runFullSync({ startPage });
-  // Fire-and-forget: the run updates SyncLog + in-memory progress itself.
-  run.catch((error) => console.error("Background sync failed:", error));
+  // Fire-and-forget: the run updates SyncLog + in-memory progress itself, and
+  // advanceQueueAfter auto-advances (or holds) the queue once it settles.
+  advanceQueueAfter(run).catch((error) =>
+    console.error("Background sync failed:", error)
+  );
 
   // Give the run a beat to register so the response includes a syncLogId.
   await new Promise((resolve) => setTimeout(resolve, 300));

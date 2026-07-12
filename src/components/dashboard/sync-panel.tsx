@@ -6,12 +6,14 @@ import { formatDistanceToNow } from "date-fns";
 import {
   CalendarRange,
   History,
+  ListOrdered,
   LoaderCircle,
   Pause,
   Play,
   RefreshCw,
   Square,
   TriangleAlert,
+  X,
   Zap,
 } from "lucide-react";
 import { toast } from "sonner";
@@ -33,6 +35,18 @@ import {
 } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { cn } from "@/lib/utils";
+
+/** Mirrors sync-state.ts's QueueEntry — one validated start request waiting
+ *  behind the running sync (dates kept as YYYY-MM-DD strings). */
+interface QueuedSyncEntry {
+  id: string;
+  kind: "full" | "incremental" | "single" | "range";
+  startPage?: number;
+  dateStart?: string;
+  dateEnd?: string;
+  brandId?: string;
+  queuedAt: string;
+}
 
 /** Mirrors the shape returned by GET /api/sync/crisp/status → progress. */
 interface SyncProgress {
@@ -56,6 +70,25 @@ interface SyncProgress {
     inByCreated: number;
     stoppedEarly: boolean;
   };
+  /** FIFO queue of requests waiting behind the running sync (max 5). */
+  queue: QueuedSyncEntry[];
+  /** True when the queue is held after a Stop/Pause — see sync-state.ts. */
+  held: boolean;
+}
+
+/** Plain-language one-liner for a queued entry, for the "Queued" list. */
+function formatQueueEntry(
+  entry: QueuedSyncEntry,
+  brands: Array<{ id: string; name: string }>
+): string {
+  if (entry.kind === "range") {
+    const brandName = entry.brandId
+      ? (brands.find((b) => b.id === entry.brandId)?.name ?? "removed brand")
+      : "all brands";
+    return `Range — ${brandName}, ${entry.dateStart} → ${entry.dateEnd}`;
+  }
+  const label = entry.kind === "incremental" ? "Incremental" : "Full";
+  return entry.startPage ? `${label} from page ${entry.startPage}` : label;
 }
 
 /** A month cell click from the coverage heatmap, to prefill the range form. */
@@ -168,6 +201,12 @@ export function SyncPanel({
   const [halting, setHalting] = React.useState<"pause" | "stop" | null>(null);
   const [running, setRunning] = React.useState(false);
   const runningRef = React.useRef(false);
+  // Which queued entry is mid-removal (disables just that entry's ✕), and
+  // whether "Start next" is in flight (disables just that button).
+  const [removingQueueId, setRemovingQueueId] = React.useState<string | null>(
+    null
+  );
+  const [startingNext, setStartingNext] = React.useState(false);
 
   // The input tracks the latest computed resume page until the user edits it.
   React.useEffect(() => {
@@ -281,7 +320,13 @@ export function SyncPanel({
         body: JSON.stringify({ mode: opts.mode, startPage: opts.startPage }),
       });
       if (res.status === 409) {
-        toast.error("A sync is already running");
+        // Queue-specific 409 (duplicate/full) — a plain "already running"
+        // 409 shouldn't happen anymore since a running sync now queues a
+        // valid request instead, but the message still applies if it does.
+        const data = (await res.json().catch(() => null)) as {
+          error?: string;
+        } | null;
+        toast.error(data?.error ?? "A sync is already running");
         await refreshStatus();
         return;
       }
@@ -289,7 +334,17 @@ export function SyncPanel({
         toast.error("Failed to start sync");
         return;
       }
-      const data = (await res.json()) as { progress?: SyncProgress };
+      const data = (await res.json()) as {
+        progress?: SyncProgress;
+        queued?: boolean;
+      };
+      if (data.queued) {
+        toast.info("Queued — will start after the current sync", {
+          description: `${opts.label} will start automatically once the running sync finishes.`,
+        });
+        await refreshStatus();
+        return;
+      }
       if (data.progress) setProgress(data.progress);
       runningRef.current = true;
       setRunning(true);
@@ -322,7 +377,10 @@ export function SyncPanel({
         }),
       });
       if (res.status === 409) {
-        toast.error("A sync is already running");
+        const data = (await res.json().catch(() => null)) as {
+          error?: string;
+        } | null;
+        toast.error(data?.error ?? "A sync is already running");
         await refreshStatus();
         return;
       }
@@ -337,7 +395,19 @@ export function SyncPanel({
         toast.error("Failed to start range sync");
         return;
       }
-      const data = (await res.json()) as { progress?: SyncProgress };
+      const data = (await res.json()) as {
+        progress?: SyncProgress;
+        queued?: boolean;
+      };
+      if (data.queued) {
+        toast.info("Queued — will start after the current sync", {
+          description: effectiveBrandName
+            ? `Range — ${effectiveBrandName} · ${rangeStart} → ${rangeEnd}`
+            : `Range — ${rangeStart} → ${rangeEnd}`,
+        });
+        await refreshStatus();
+        return;
+      }
       if (data.progress) setProgress(data.progress);
       runningRef.current = true;
       setRunning(true);
@@ -379,8 +449,64 @@ export function SyncPanel({
     }
   };
 
-  const busy = running || starting !== null;
+  const removeQueued = async (id: string) => {
+    setRemovingQueueId(id);
+    try {
+      const res = await fetch("/api/sync/crisp/queue/remove", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ id }),
+      });
+      if (!res.ok) {
+        toast.error("Failed to remove queued sync");
+        return;
+      }
+      toast.success("Removed from queue");
+      await refreshStatus();
+    } catch {
+      toast.error("Failed to remove queued sync");
+    } finally {
+      setRemovingQueueId(null);
+    }
+  };
+
+  const startNextQueued = async () => {
+    setStartingNext(true);
+    try {
+      const res = await fetch("/api/sync/crisp/queue/start-next", {
+        method: "POST",
+      });
+      if (res.status === 409) {
+        const data = (await res.json().catch(() => null)) as {
+          error?: string;
+        } | null;
+        toast.error(data?.error ?? "Cannot start the next queued sync");
+        await refreshStatus();
+        return;
+      }
+      if (!res.ok) {
+        toast.error("Failed to start the next queued sync");
+        return;
+      }
+      runningRef.current = true;
+      setRunning(true);
+      toast.success("Started next queued sync");
+      await refreshStatus();
+    } catch {
+      toast.error("Failed to start the next queued sync");
+    } finally {
+      setStartingNext(false);
+    }
+  };
+
+  // Buttons that trigger a start request stay enabled while a sync is
+  // running — the click enqueues instead of starting immediately (see
+  // startSync/startRangeSync's `queued` handling). Only a request actually
+  // in flight (`starting`) disables them, to prevent a double-submit.
+  const busy = starting !== null;
   const halted = Boolean(progress?.cancelRequested);
+  const queue = progress?.queue ?? [];
+  const queueHeld = Boolean(progress?.held);
 
   return (
     <div className="space-y-6">
@@ -421,7 +547,7 @@ export function SyncPanel({
             )}
           </CardDescription>
           <CardAction className="flex flex-wrap items-center gap-2">
-            {running ? (
+            {running && (
               <>
                 <Button
                   variant="outline"
@@ -456,7 +582,13 @@ export function SyncPanel({
                     : "Stop"}
                 </Button>
               </>
-            ) : latestHalted ? (
+            )}
+            {/* The resume ("Continue from a halted run") flow only makes
+                sense when nothing is running — while a sync is running, the
+                Full/Incremental buttons below stay enabled and enqueue
+                instead (see startSync's `queued` handling), same as the
+                default (no-halted-history) case. */}
+            {!running && latestHalted ? (
               <>
                 <Button
                   variant="outline"
@@ -639,6 +771,76 @@ export function SyncPanel({
                   </dd>
                 </div>
               </dl>
+            </div>
+          )}
+
+          {/* Queued syncs — requests that came in while another sync was
+              running (see /api/sync/crisp/start's enqueue path). Shown
+              whenever entries are waiting, whether or not one is currently
+              running: after a Stop/Pause the queue is HELD (nothing running)
+              but the entries are still here waiting on "Start next". */}
+          {queue.length > 0 && (
+            <div className="space-y-2 rounded-lg border p-3">
+              <div className="flex items-center gap-1.5">
+                <ListOrdered className="text-muted-foreground size-3.5" />
+                <p className="text-sm font-medium">Queued ({queue.length})</p>
+                <HelpTip subject="sync queue">
+                  Up to 5 requests can queue behind the running sync, first
+                  in, first out. The queue lives in server memory only — a
+                  restart clears it, same as a running sync&apos;s progress.
+                  When you Stop or Pause the running sync, the queue is held
+                  (nothing auto-starts) until you click &quot;Start
+                  next&quot; — or until you manually start any other sync,
+                  which also clears the hold and lets the remaining entries
+                  auto-drain after it. Remove entries you no longer want
+                  before starting anything new.
+                </HelpTip>
+              </div>
+              <ul className="space-y-1">
+                {queue.map((entry) => (
+                  <li
+                    key={entry.id}
+                    className="flex items-center justify-between gap-2 text-xs"
+                  >
+                    <span className="text-muted-foreground truncate">
+                      {formatQueueEntry(entry, brands)}
+                    </span>
+                    <Button
+                      variant="ghost"
+                      size="icon"
+                      className="text-muted-foreground hover:text-foreground size-5 shrink-0"
+                      disabled={removingQueueId === entry.id}
+                      onClick={() => removeQueued(entry.id)}
+                      aria-label={`Remove queued sync: ${formatQueueEntry(entry, brands)}`}
+                    >
+                      {removingQueueId === entry.id ? (
+                        <LoaderCircle className="size-3 animate-spin" />
+                      ) : (
+                        <X className="size-3" />
+                      )}
+                    </Button>
+                  </li>
+                ))}
+              </ul>
+              {queueHeld && (
+                <div className="flex flex-wrap items-center justify-between gap-2 rounded-md border border-amber-200 bg-amber-50 px-2.5 py-1.5 text-xs text-amber-700 dark:border-amber-500/30 dark:bg-amber-500/10 dark:text-amber-400">
+                  <span>Queue held after Stop/Pause — nothing will auto-start.</span>
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    disabled={startingNext}
+                    onClick={startNextQueued}
+                    className="h-6 border-amber-300 px-2 text-amber-700 hover:bg-amber-100 dark:border-amber-500/40 dark:text-amber-400 dark:hover:bg-amber-500/20"
+                  >
+                    {startingNext ? (
+                      <LoaderCircle className="size-3 animate-spin" />
+                    ) : (
+                      <Play className="size-3" />
+                    )}
+                    Start next
+                  </Button>
+                </div>
+              )}
             </div>
           )}
 
