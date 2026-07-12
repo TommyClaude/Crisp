@@ -1,3 +1,4 @@
+import type { Prisma } from "@prisma/client";
 import { prisma } from "@/lib/db";
 import { getEnv } from "@/env";
 import { CrispApiError, CrispClient } from "@/lib/crisp/client";
@@ -26,6 +27,48 @@ import {
 } from "./coverage";
 import { autoDetectMissingBrands } from "./archive-start";
 import { validateRange } from "./range";
+
+/** One brand's page range within a single sync run, as recorded on SyncLog.brandPages. */
+export interface BrandPageProgress {
+  from: number;
+  to: number;
+  /**
+   * Conversations synced during THIS brand's own walk (retry-pass successes
+   * included). The per-brand made-progress rule in computeResumePages needs
+   * this — the run-level conversationsSynced would let one brand's progress
+   * poison a sibling brand's resume point (review finding).
+   */
+  synced: number;
+}
+
+/**
+ * SyncLog.brandPages shape: per-brand page progress for one run, keyed by
+ * `brandId ?? "default"` (same convention as archiveStartBrandKey in
+ * archive-start.ts). See the column's doc comment in schema.prisma.
+ */
+export type BrandPagesMap = Record<string, BrandPageProgress>;
+
+/**
+ * Safely coerce a SyncLog row's `brandPages` JSON column (an `unknown` —
+ * Prisma's JsonValue, or whatever a caller/test hands in) into a
+ * BrandPagesMap, or null when absent/malformed/empty. Defensive because this
+ * reads a JSON column with no runtime schema enforcement — a hand-rolled
+ * value (or a future format change) must degrade to "no brandPages" rather
+ * than throw.
+ */
+function parseBrandPages(value: unknown): BrandPagesMap | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const result: BrandPagesMap = {};
+  for (const [key, entry] of Object.entries(value as Record<string, unknown>)) {
+    const from = (entry as { from?: unknown } | null)?.from;
+    const to = (entry as { to?: unknown } | null)?.to;
+    const synced = (entry as { synced?: unknown } | null)?.synced;
+    if (typeof from === "number" && typeof to === "number") {
+      result[key] = { from, to, synced: typeof synced === "number" ? synced : 0 };
+    }
+  }
+  return Object.keys(result).length > 0 ? result : null;
+}
 
 /** Upsert batch size for messages — keeps transactions small and memory flat. */
 const MESSAGE_BATCH_SIZE = 50;
@@ -381,7 +424,27 @@ export async function resyncConversation(sessionId: string): Promise<{
 
 interface RunSyncOptions {
   kind: SyncKind;
+  /**
+   * Legacy single-number resume: maps to the FIRST target's brand key only
+   * (brands ordered by createdAt asc, same as getSyncTargets) — the original
+   * "resumes the first brand only" behavior, kept working for CLI scripts
+   * (`npm run sync:crisp -- --page=N`) and any other caller that has no
+   * per-brand map to give. Ignored for kind "range" (see startPages below).
+   * When both this and `startPages` are given, this still wins for the first
+   * brand's key — `startPages` (built by resolveStartPages) never carries an
+   * entry for that key in that combination, so there's no actual conflict in
+   * practice.
+   */
   startPage?: number;
+  /**
+   * Per-brand resume: each target's walk starts at `startPages[brandId ??
+   * "default"] ?? 1`, independent of every other brand — see
+   * computeResumePages/getResumePages for how the suggested map is derived.
+   * Ignored for kind "range": range page numbers index Crisp's date-filtered
+   * list, a different numbering space, and a range walk always starts every
+   * scoped brand at page 1.
+   */
+  startPages?: Record<string, number>;
   /** Only sync conversations updated at/after this time (incremental). */
   updatedSince?: Date | null;
   /**
@@ -479,10 +542,19 @@ async function runSync(options: RunSyncOptions): Promise<SyncRunResult> {
     data: {
       kind: options.kind,
       status: "running",
-      pageFrom: options.startPage ?? 1,
+      // Range walks always start at page 1 of the filtered list — an ignored
+      // legacy startPage must not be recorded as if it took effect.
+      pageFrom: options.kind === "range" ? 1 : (options.startPage ?? 1),
       brandId: options.brandId ?? null,
     },
   });
+
+  // Per-brand page progress accumulated over the WHOLE run (see
+  // SyncLog.brandPages) — persisted alongside pageTo at the same cadence, one
+  // entry per brand the walk has reached so far. Declared OUTSIDE the try so
+  // the final SyncLog update (which persists retry-pass increments) can read
+  // it on every exit path.
+  const brandPages: BrandPagesMap = {};
   // Range window: both bounds or neither (callers guarantee this).
   const rangeWindow =
     options.dateStart && options.dateEnd
@@ -553,6 +625,18 @@ async function runSync(options: RunSyncOptions): Promise<SyncRunResult> {
       }
     }
 
+    // Resolve the effective per-brand starting page for this run. Range mode
+    // ignores both startPage and startPages entirely — a range walk always
+    // starts every scoped brand at page 1 (its page numbers index Crisp's
+    // date-filtered list, a different numbering space; see computeResumePage/
+    // computeResumePages for the same exclusion on the read side).
+    const effectiveStartPages: Record<string, number> =
+      options.kind === "range" ? {} : { ...(options.startPages ?? {}) };
+    if (options.kind !== "range" && options.startPage != null && targets[0]) {
+      // Legacy startPage resumes the FIRST brand only, same as before
+      // per-brand resume existed.
+      effectiveStartPages[targets[0].brandId ?? "default"] = options.startPage;
+    }
     for (let t = 0; t < targets.length; t++) {
       const target = targets[t];
       if (state.cancelRequested) {
@@ -580,9 +664,14 @@ async function runSync(options: RunSyncOptions): Promise<SyncRunResult> {
         );
       }
 
-      // startPage resumes the FIRST brand only — later brands always start
-      // from page 1 (their progress was not what got interrupted).
-      let page = t === 0 ? (options.startPage ?? 1) : 1;
+      // Each brand resumes independently from its own entry in
+      // effectiveStartPages (see above) — defaulting to page 1 for a brand
+      // with no resume entry at all.
+      const brandKey = target.brandId ?? "default";
+      // This brand's own synced count for the run — see BrandPageProgress.synced.
+      let brandSynced = 0;
+      let page = effectiveStartPages[brandKey] ?? 1;
+      const brandStartPage = page;
       let reachedCheckpoint = false;
 
       while (page < MAX_PAGES && !reachedCheckpoint) {
@@ -661,6 +750,7 @@ async function runSync(options: RunSyncOptions): Promise<SyncRunResult> {
               target
             );
             state.conversationsSynced += 1;
+            brandSynced += 1;
             state.messagesSynced += result.messageCount;
 
             // Junk conversations are excluded from chunk rebuilding — they
@@ -680,11 +770,16 @@ async function runSync(options: RunSyncOptions): Promise<SyncRunResult> {
           }
         }
 
-        // Persist page-level progress so the run is resumable.
+        // Persist page-level progress so the run is resumable. brandPages
+        // records THIS brand's own range (unaffected by whatever other
+        // brands did earlier in the run) alongside the legacy global pageTo
+        // (still whichever brand is currently walking — unchanged meaning).
+        brandPages[brandKey] = { from: brandStartPage, to: page, synced: brandSynced };
         await prisma.syncLog.update({
           where: { id: syncLog.id },
           data: {
             pageTo: page,
+            brandPages: brandPages as unknown as Prisma.InputJsonValue,
             conversationsSynced: state.conversationsSynced,
             messagesSynced: state.messagesSynced,
             failedSessions: state.failedSessions,
@@ -732,6 +827,9 @@ async function runSync(options: RunSyncOptions): Promise<SyncRunResult> {
           );
           state.conversationsSynced += 1;
           state.messagesSynced += result.messageCount;
+          // A retry success is progress for ITS brand's walk, too.
+          const retryEntry = brandPages[target.brandId ?? "default"];
+          if (retryEntry) retryEntry.synced += 1;
           // Junk conversations never re-enter the RAG index (see the main loop).
           if (conversation.state === "resolved" && !result.isJunk) {
             try {
@@ -767,6 +865,10 @@ async function runSync(options: RunSyncOptions): Promise<SyncRunResult> {
       conversationsSynced: state.conversationsSynced,
       messagesSynced: state.messagesSynced,
       failedSessions: state.failedSessions,
+      // Re-persist so retry-pass increments to per-brand synced counts land.
+      ...(Object.keys(brandPages).length > 0
+        ? { brandPages: brandPages as unknown as Prisma.InputJsonValue }
+        : {}),
       error: errorMessage ?? null,
     },
   });
@@ -793,12 +895,14 @@ async function runSync(options: RunSyncOptions): Promise<SyncRunResult> {
   };
 }
 
-/** The subset of SyncLog columns {@link computeResumePage} needs. */
+/** The subset of SyncLog columns {@link computeResumePage}/{@link computeResumePages} need. */
 export interface ResumeCandidate {
   kind: string;
   pageFrom: number | null;
   pageTo: number | null;
   conversationsSynced: number;
+  /** Per-brand page progress for this run (see SyncLog.brandPages) — absent/null on legacy rows and any row written before this feature. */
+  brandPages?: unknown;
 }
 
 /**
@@ -842,9 +946,152 @@ export async function getResumePage(): Promise<number> {
   return computeResumePage(runs);
 }
 
-/** Full sync of all conversations, oldest data included. Resumable via startPage. */
-export function runFullSync(options?: { startPage?: number }): Promise<SyncRunResult> {
-  return runSync({ kind: "full", startPage: options?.startPage });
+/**
+ * Pure per-brand reduction over sync history — the per-brand counterpart to
+ * {@link computeResumePage}. For each key in `orderedBrandKeys` (brands
+ * ordered by createdAt asc — the same "first brand" convention runSync's
+ * legacy `startPage` handling has always used; falls back to `["default"]`
+ * when empty, matching the legacy env-only fallback target), returns the
+ * furthest page any run's walk of THAT brand reached, across all of history.
+ *
+ * Same made-progress rule as computeResumePage (conversationsSynced > 0 || to
+ * > from) — applied PER BRAND for a run that recorded `brandPages` (using
+ * that brand's own `to`/`from`; `conversationsSynced` is only tracked at the
+ * whole-run level, so it's reused as-is for every brand the run touched).
+ * Range runs are excluded entirely, same reasoning as computeResumePage:
+ * their page numbers index Crisp's date-filtered list, a different numbering
+ * space. Legacy rows — pageTo set but no brandPages, from before this column
+ * existed — count toward the FIRST brand key only, matching the
+ * first-brand-only semantics those runs actually had. Falls back to 1 for
+ * any brand with no qualifying history.
+ *
+ * Pure — takes the ordered brand keys as a parameter instead of querying
+ * Brand itself, so it stays testable without a database (see
+ * {@link getResumePages} for the DB-backed wrapper).
+ */
+export function computeResumePages(
+  runs: ResumeCandidate[],
+  orderedBrandKeys: string[]
+): Record<string, number> {
+  const keys = orderedBrandKeys.length > 0 ? orderedBrandKeys : ["default"];
+  const firstKey = keys[0];
+  const furthest: Record<string, number> = {};
+  const bump = (key: string, page: number) => {
+    if (page > (furthest[key] ?? 0)) furthest[key] = page;
+  };
+
+  for (const run of runs) {
+    if (run.kind === "range") continue;
+    const brandPages = parseBrandPages(run.brandPages);
+    if (brandPages) {
+      for (const [key, { from, to, synced }] of Object.entries(brandPages)) {
+        // The brand's OWN progress only — the run-level conversationsSynced
+        // would let brand A's progress mark brand B's stalled walk as
+        // progressed and silently skip B's pages (review finding).
+        const madeProgress = synced > 0 || to > from;
+        if (madeProgress) bump(key, to);
+      }
+      continue;
+    }
+    const pageTo = run.pageTo ?? 0;
+    const pageFrom = run.pageFrom ?? 1;
+    const madeProgress = run.conversationsSynced > 0 || pageTo > pageFrom;
+    if (madeProgress) bump(firstKey, pageTo);
+  }
+
+  const result: Record<string, number> = {};
+  for (const key of keys) {
+    result[key] = Math.max(furthest[key] ?? 0, 1);
+  }
+  return result;
+}
+
+/**
+ * Brand keys in the order runSync/getSyncTargets walks them (createdAt asc),
+ * for the "first brand" convention legacy startPage handling relies on.
+ * `["default"]` for the legacy env-only fallback (no Brand rows at all) —
+ * matching getSyncTargets' own fallback target.
+ */
+async function getOrderedBrandKeys(): Promise<string[]> {
+  const brands = await prisma.brand.findMany({
+    orderBy: { createdAt: "asc" },
+    select: { id: true },
+  });
+  return brands.length > 0 ? brands.map((brand) => brand.id) : ["default"];
+}
+
+/**
+ * The per-brand "Continue" resume point (see {@link computeResumePages}) —
+ * each configured brand's own furthest page across all history, independent
+ * of the others. Object key order matches `orderedBrandKeys` (createdAt asc),
+ * so `Object.keys(result)[0]` is always the "first brand" — relied on by the
+ * dashboard's default (no `?brand=` selected) prefill.
+ */
+export async function getResumePages(): Promise<Record<string, number>> {
+  const [orderedBrandKeys, runs] = await Promise.all([
+    getOrderedBrandKeys(),
+    prisma.syncLog.findMany({
+      where: { status: { not: "running" } },
+      select: {
+        kind: true,
+        pageFrom: true,
+        pageTo: true,
+        conversationsSynced: true,
+        brandPages: true,
+      },
+    }),
+  ]);
+  return computeResumePages(runs, orderedBrandKeys);
+}
+
+/**
+ * Resolve the final startPage/startPages to hand to runFullSync/
+ * runIncrementalSync, given a validated `resume`/`startPage`/
+ * `startPageBrandId` combination (see the start route's body schema — this
+ * assumes that validation already ran). `resume` derives a FRESH per-brand
+ * map from current history (see getResumePages) at the moment this is
+ * called — deliberately re-derived rather than resolved once upfront, so a
+ * QUEUED resume entry (see startQueuedEntry) reflects everything synced
+ * while it waited, not a stale snapshot from when it was queued. `startPage`,
+ * when given, overrides ONE brand's derived page: `startPageBrandId` if set,
+ * else the first brand (createdAt asc) — the same "first brand" convention
+ * runSync's legacy startPage handling has always used.
+ *
+ * When neither `resume` nor `startPageBrandId` is set, this is a pure
+ * pass-through of `startPage` with no extra DB query — the common, unchanged
+ * "resume the first brand by number" case behaves exactly as it did before
+ * per-brand resume existed. Shared by the start route (fresh requests) and
+ * startQueuedEntry (queued replays) so both compute the exact same thing the
+ * exact same way.
+ */
+export async function resolveStartPages(options: {
+  resume?: boolean;
+  startPage?: number;
+  startPageBrandId?: string;
+}): Promise<{ startPage?: number; startPages?: Record<string, number> }> {
+  if (!options.resume && options.startPageBrandId == null) {
+    return { startPage: options.startPage };
+  }
+  const startPages: Record<string, number> = options.resume
+    ? await getResumePages()
+    : {};
+  if (options.startPage != null) {
+    const key = options.startPageBrandId ?? (await getOrderedBrandKeys())[0];
+    startPages[key] = options.startPage;
+  }
+  return { startPages };
+}
+
+/** Full sync of all conversations, oldest data included. Resumable via startPage/startPages. */
+export function runFullSync(options?: {
+  startPage?: number;
+  startPages?: Record<string, number>;
+}): Promise<SyncRunResult> {
+  return runSync({
+    kind: "full",
+    startPage: options?.startPage,
+    startPages: options?.startPages,
+  });
 }
 
 /**
@@ -882,13 +1129,18 @@ export function runRangeSync(options: {
  */
 export async function runIncrementalSync(options?: {
   startPage?: number;
+  startPages?: Record<string, number>;
 }): Promise<SyncRunResult> {
   const lastSuccess = await prisma.syncLog.findFirst({
     where: { status: "completed", kind: { in: ["full", "incremental"] } },
     orderBy: { startedAt: "desc" },
   });
   if (!lastSuccess) {
-    return runSync({ kind: "full", startPage: options?.startPage });
+    return runSync({
+      kind: "full",
+      startPage: options?.startPage,
+      startPages: options?.startPages,
+    });
   }
   const updatedSince = new Date(
     lastSuccess.startedAt.getTime() - INCREMENTAL_OVERLAP_MS
@@ -897,6 +1149,7 @@ export async function runIncrementalSync(options?: {
     kind: "incremental",
     updatedSince,
     startPage: options?.startPage,
+    startPages: options?.startPages,
   });
 }
 
@@ -913,8 +1166,13 @@ export async function runIncrementalSync(options?: {
  * handling), so a queued entry gone stale while waiting never wedges the
  * queue: {@link advanceQueueAfter} sees the `failed` status and drains the
  * next entry regardless.
+ *
+ * A queued `resume` entry re-derives its startPages map at DRAIN time via
+ * {@link resolveStartPages} (not once when it was queued) — see that
+ * function's doc comment for why that's the correct behavior for a request
+ * that may have waited behind other syncs.
  */
-function startQueuedEntry(entry: QueueEntry): Promise<SyncRunResult> {
+async function startQueuedEntry(entry: QueueEntry): Promise<SyncRunResult> {
   if (entry.kind === "range") {
     const check = validateRange(entry.dateStart, entry.dateEnd);
     if (check.ok && check.window) {
@@ -935,19 +1193,24 @@ function startQueuedEntry(entry: QueueEntry): Promise<SyncRunResult> {
         check.ok ? "window missing" : check.message
       }`
     );
-    return Promise.resolve({
+    return {
       syncLogId: "",
       status: "failed",
       conversationsSynced: 0,
       messagesSynced: 0,
       failedSessions: [],
       error: check.ok ? "Range window missing on replay" : check.message,
-    });
+    };
   }
+  const resolved = await resolveStartPages({
+    resume: entry.resume,
+    startPage: entry.startPage,
+    startPageBrandId: entry.startPageBrandId,
+  });
   if (entry.kind === "incremental") {
-    return runIncrementalSync({ startPage: entry.startPage });
+    return runIncrementalSync(resolved);
   }
-  return runFullSync({ startPage: entry.startPage });
+  return runFullSync(resolved);
 }
 
 /**

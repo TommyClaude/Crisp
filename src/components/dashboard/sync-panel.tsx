@@ -42,6 +42,8 @@ interface QueuedSyncEntry {
   id: string;
   kind: "full" | "incremental" | "single" | "range";
   startPage?: number;
+  startPageBrandId?: string;
+  resume?: boolean;
   dateStart?: string;
   dateEnd?: string;
   brandId?: string;
@@ -88,7 +90,33 @@ function formatQueueEntry(
     return `Range — ${brandName}, ${entry.dateStart} → ${entry.dateEnd}`;
   }
   const label = entry.kind === "incremental" ? "Incremental" : "Full";
-  return entry.startPage ? `${label} from page ${entry.startPage}` : label;
+  const overrideBrandName = entry.startPageBrandId
+    ? (brands.find((b) => b.id === entry.startPageBrandId)?.name ?? "removed brand")
+    : null;
+  if (entry.resume) {
+    return entry.startPage
+      ? `${label} — resume (override: page ${entry.startPage}${
+          overrideBrandName ? ` for ${overrideBrandName}` : ""
+        })`
+      : `${label} — resume`;
+  }
+  if (entry.startPage) {
+    return overrideBrandName
+      ? `${label} from page ${entry.startPage} (${overrideBrandName})`
+      : `${label} from page ${entry.startPage}`;
+  }
+  return label;
+}
+
+/** Compact "Brand → page" summary across every configured brand, e.g.
+ *  "YayCommerce → 164 · Ninja Team → 37" — shown instead of a single resume
+ *  number once more than one brand is configured, since each brand now
+ *  resumes independently (see resumePages / getResumePages). */
+function formatResumePagesSummary(
+  resumePages: Record<string, number>,
+  brands: Array<{ id: string; name: string }>
+): string {
+  return brands.map((b) => `${b.name} → ${resumePages[b.id] ?? 1}`).join(" · ");
 }
 
 /** A month cell click from the coverage heatmap, to prefill the range form. */
@@ -132,6 +160,7 @@ interface StatusResponse {
   lastCompleted: SerializedSyncLog | null;
   recentLogs: SerializedSyncLog[];
   resumePage: number;
+  resumePages: Record<string, number>;
 }
 
 export interface LastSyncSummary {
@@ -145,8 +174,10 @@ export interface LastSyncSummary {
 interface SyncPanelProps {
   lastSync: LastSyncSummary | null;
   recentLogs: SerializedSyncLog[];
-  /** The furthest page any past sync run has reached (see getResumePage). */
+  /** The furthest page any past sync run has reached (see getResumePage). Kept for back-compat; resumePages is per-brand. */
   resumePage: number;
+  /** Each configured brand's own furthest page across history, keyed by brand id — or "default" for the legacy env-only fallback (see getResumePages). Object key order is createdAt asc, so the first key is "the first brand". */
+  resumePages: Record<string, number>;
   /** Set when a heatmap month cell is clicked, to prefill the range form. */
   prefillRange?: PrefillRange | null;
   /** Every configured brand, for the recent-runs badge and the range-sync brand label. */
@@ -169,6 +200,7 @@ export function SyncPanel({
   lastSync,
   recentLogs,
   resumePage: initialResumePage,
+  resumePages: initialResumePages,
   prefillRange,
   brands,
   selectedBrandId,
@@ -188,13 +220,31 @@ export function SyncPanel({
   );
   const rangeFormRef = React.useRef<HTMLDivElement>(null);
   // The furthest page any past run has reached, across all sync history —
-  // the default "Continue" resume point. Kept separate from the input value
-  // below so a manual edit is never clobbered by a status refresh.
+  // kept for back-compat (the single-number "Earlier runs reached" line when
+  // 0-1 brands are configured). resumePages is the per-brand source of truth.
   const [resumePage, setResumePage] = React.useState(initialResumePage);
+  const [resumePages, setResumePages] = React.useState(initialResumePages);
+  // Object key order matches getResumePages' orderedBrandKeys (createdAt
+  // asc) — the first key is always "the first brand" (see its doc comment).
+  const firstBrandKey = React.useMemo(
+    () => Object.keys(resumePages)[0],
+    [resumePages]
+  );
+  // Which brand the manual override input targets: the URL-selected brand
+  // when one is chosen, else the first brand — matching the Continue flow's
+  // "override targets that brand automatically" behavior.
+  const targetBrandKey = selectedBrandId ?? firstBrandKey;
+  const targetResumePage = targetBrandKey ? (resumePages[targetBrandKey] ?? 1) : 1;
   // Kept as a string so the field can be freely edited (including a brief
   // empty state) without fighting the user on every keystroke; parsed and
   // clamped to an integer >= 1 on blur and again right before starting.
-  const [resumeFrom, setResumeFrom] = React.useState(String(initialResumePage));
+  const [resumeFrom, setResumeFrom] = React.useState(String(targetResumePage));
+  // True once the user has actually typed in the resume-from input — a
+  // prefill (from a fresh status poll, or the initial per-brand default) is
+  // NOT an edit. Only an edited value is sent as an explicit startPage
+  // override; otherwise Continue relies entirely on `resume: true` (see
+  // startSync below).
+  const [resumeDirty, setResumeDirty] = React.useState(false);
   const [starting, setStarting] = React.useState<
     "full" | "incremental" | "resume" | "range" | null
   >(null);
@@ -208,10 +258,11 @@ export function SyncPanel({
   );
   const [startingNext, setStartingNext] = React.useState(false);
 
-  // The input tracks the latest computed resume page until the user edits it.
+  // The input tracks the latest computed resume page for its target brand
+  // until the user edits it (see resumeDirty).
   React.useEffect(() => {
-    setResumeFrom(String(resumePage));
-  }, [resumePage]);
+    if (!resumeDirty) setResumeFrom(String(targetResumePage));
+  }, [targetResumePage, resumeDirty]);
 
   // Apply a heatmap month click to the range inputs and scroll them into view.
   React.useEffect(() => {
@@ -251,7 +302,13 @@ export function SyncPanel({
     return latest;
   }, [logs]);
   // Where this specific run itself stopped (for the "Interrupted at" copy) —
-  // may be behind resumePage if an earlier run got further.
+  // may be behind resumePage if an earlier run got further. Deliberately
+  // kept as the run's own legacy pageTo/pageFrom (not that run's own
+  // brandPages broken out by brand) — this line names ONE page for the
+  // run that was actually interrupted, and a single number stays the least
+  // surprising phrasing for "where THIS run stopped"; the per-brand summary
+  // right after it (see formatResumePagesSummary below) is where per-brand
+  // detail belongs.
   const latestHaltedPage = latestHalted
     ? (latestHalted.pageTo ?? latestHalted.pageFrom ?? 1)
     : null;
@@ -264,6 +321,9 @@ export function SyncPanel({
       setProgress(data.progress);
       if (Array.isArray(data.recentLogs)) setLogs(data.recentLogs);
       if (typeof data.resumePage === "number") setResumePage(data.resumePage);
+      if (data.resumePages && typeof data.resumePages === "object") {
+        setResumePages(data.resumePages);
+      }
       if (data.lastCompleted) {
         setLast({
           finishedAt: data.lastCompleted.finishedAt,
@@ -310,6 +370,8 @@ export function SyncPanel({
     key: "full" | "incremental" | "resume";
     mode: "full" | "incremental";
     startPage?: number;
+    startPageBrandId?: string;
+    resume?: boolean;
     label: string;
   }) => {
     setStarting(opts.key);
@@ -317,7 +379,12 @@ export function SyncPanel({
       const res = await fetch("/api/sync/crisp/start", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ mode: opts.mode, startPage: opts.startPage }),
+        body: JSON.stringify({
+          mode: opts.mode,
+          ...(opts.resume ? { resume: true } : {}),
+          ...(opts.startPage != null ? { startPage: opts.startPage } : {}),
+          ...(opts.startPageBrandId ? { startPageBrandId: opts.startPageBrandId } : {}),
+        }),
       });
       if (res.status === 409) {
         // Queue-specific 409 (duplicate/full) — a plain "already running"
@@ -541,8 +608,11 @@ export function SyncPanel({
               <span className="text-amber-600 dark:text-amber-400">
                 Interrupted at page {latestHaltedPage} — continue where it
                 left off.
-                {resumePage > (latestHaltedPage ?? 1) &&
-                  ` Earlier runs reached page ${resumePage}.`}
+                {brands.length > 1
+                  ? Object.values(resumePages).some((page) => page > 1) &&
+                    ` Earlier runs reached: ${formatResumePagesSummary(resumePages, brands)}.`
+                  : resumePage > (latestHaltedPage ?? 1) &&
+                    ` Earlier runs reached page ${resumePage}.`}
               </span>
             )}
           </CardDescription>
@@ -611,7 +681,10 @@ export function SyncPanel({
                   step={1}
                   value={resumeFrom}
                   disabled={busy}
-                  onChange={(e) => setResumeFrom(e.target.value)}
+                  onChange={(e) => {
+                    setResumeFrom(e.target.value);
+                    setResumeDirty(true);
+                  }}
                   onBlur={() =>
                     setResumeFrom(String(clampResumePage(resumeFrom)))
                   }
@@ -619,33 +692,49 @@ export function SyncPanel({
                   className="h-8 w-20 tabular-nums"
                 />
                 <HelpTip subject="continue from page">
-                  Resumes the conversation-list backfill from this Crisp API
-                  page instead of starting over. Defaults to the furthest
-                  page any past sync run has reached.
+                  Each brand automatically continues from its own furthest
+                  synced page — Continue already does this for every brand
+                  with no input needed. This number is an optional manual
+                  override for{" "}
+                  {selectedBrandId
+                    ? (brands.find((b) => b.id === selectedBrandId)?.name ??
+                      "the selected brand")
+                    : "the first brand"}{" "}
+                  only; every other brand still resumes from its own
+                  progress.
                 </HelpTip>
-                {brands.length > 1 ? (
-                  <HelpTip subject="multi-brand resume">
-                    With more than one brand configured, this page number only
-                    resumes the FIRST brand — every other brand always walks
-                    its own list from page 1 regardless of what you enter here
-                    (a full/incremental sync always covers every brand, so
-                    there is no per-brand page to resume for the rest).
-                  </HelpTip>
-                ) : null}
                 <Button
                   size="sm"
                   disabled={busy}
-                  onClick={() =>
+                  onClick={() => {
+                    // The manual override (startPage + startPageBrandId) is
+                    // only sent when the user actually edited the input —
+                    // otherwise Continue relies entirely on `resume: true`,
+                    // which resumes every brand from its own furthest page
+                    // server-side (see getResumePages). A prefilled value
+                    // the user never touched is NOT an edit (resumeDirty).
+                    const overrideBrandId =
+                      brands.length > 0 ? targetBrandKey : undefined;
                     startSync({
                       key: "resume",
+                      // A halted incremental resumes AS incremental — it
+                      // self-checkpoints and stops at fresh data, so forcing
+                      // a full walk here would silently turn a light catch-up
+                      // into a whole-archive crawl (review recommendation).
                       mode:
-                        latestHalted.kind === "incremental"
+                        latestHalted?.kind === "incremental"
                           ? "incremental"
                           : "full",
-                      startPage: clampResumePage(resumeFrom),
+                      resume: true,
+                      ...(resumeDirty
+                        ? {
+                            startPage: clampResumePage(resumeFrom),
+                            startPageBrandId: overrideBrandId,
+                          }
+                        : {}),
                       label: "Continue",
-                    })
-                  }
+                    });
+                  }}
                 >
                   {starting === "resume" ? (
                     <LoaderCircle className="size-3.5 animate-spin" />

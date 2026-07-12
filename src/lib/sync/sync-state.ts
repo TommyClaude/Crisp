@@ -71,6 +71,18 @@ export interface QueueEntry {
   id: string;
   kind: SyncKind;
   startPage?: number;
+  /**
+   * Scopes `startPage` to one brand (full/incremental only) — see the start
+   * route's `startPageBrandId` validation. Re-applied at drain time by
+   * resolveStartPages in sync-service.ts, same as a fresh request.
+   */
+  startPageBrandId?: string;
+  /**
+   * Full/incremental only — the run should resume every brand from its own
+   * furthest page, derived FRESH from history at drain time (not frozen at
+   * queue time) via getResumePages/resolveStartPages in sync-service.ts.
+   */
+  resume?: boolean;
   dateStart?: string;
   dateEnd?: string;
   brandId?: string;
@@ -221,13 +233,21 @@ function getQueueState(): QueueState {
 /** The fields that define whether two queue requests are "the same sync". */
 type QueueEntryKey = Pick<
   QueueEntry,
-  "kind" | "startPage" | "dateStart" | "dateEnd" | "brandId"
+  | "kind"
+  | "startPage"
+  | "startPageBrandId"
+  | "resume"
+  | "dateStart"
+  | "dateEnd"
+  | "brandId"
 >;
 
 function sameQueueEntry(a: QueueEntryKey, b: QueueEntryKey): boolean {
   return (
     a.kind === b.kind &&
     a.startPage === b.startPage &&
+    a.startPageBrandId === b.startPageBrandId &&
+    a.resume === b.resume &&
     a.dateStart === b.dateStart &&
     a.dateEnd === b.dateEnd &&
     a.brandId === b.brandId
@@ -245,7 +265,8 @@ export type EnqueueResult =
  * only enforces queue-specific rules:
  *
  *  - An exact duplicate of an ALREADY-QUEUED entry (same kind + startPage/
- *    dateStart/dateEnd/brandId) is rejected ("duplicate"). A request that
+ *    startPageBrandId/resume/dateStart/dateEnd/brandId) is rejected
+ *    ("duplicate"). A request that
  *    merely duplicates the currently-RUNNING sync is fine to queue —
  *    re-running is idempotent and sometimes intentional — so the running
  *    sync is deliberately not part of this comparison.
@@ -268,6 +289,8 @@ export function enqueueSync(input: QueueEntryKey): EnqueueResult {
   const entry: QueueEntry = {
     kind: input.kind,
     startPage: input.startPage,
+    startPageBrandId: input.startPageBrandId,
+    resume: input.resume,
     dateStart: input.dateStart,
     dateEnd: input.dateEnd,
     brandId: input.brandId,

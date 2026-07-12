@@ -49,6 +49,8 @@ interface CrispSyncDashboardProps {
   lastSync: LastSyncSummary | null;
   recentLogs: SerializedSyncLog[];
   resumePage: number;
+  /** Each configured brand's own furthest page across history — see getResumePages. */
+  resumePages: Record<string, number>;
 }
 
 /**
@@ -125,6 +127,7 @@ export function CrispSyncDashboard({
   lastSync,
   recentLogs,
   resumePage,
+  resumePages,
 }: CrispSyncDashboardProps) {
   const [prefillRange, setPrefillRange] = React.useState<PrefillRange | null>(
     null
@@ -180,6 +183,7 @@ export function CrispSyncDashboard({
         lastSync={lastSync}
         recentLogs={recentLogs}
         resumePage={resumePage}
+        resumePages={resumePages}
         prefillRange={prefillRange}
         brands={brands}
         selectedBrandId={selectedBrandId}

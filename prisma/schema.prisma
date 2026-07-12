@@ -337,6 +337,15 @@ model SyncLog {
   // plain column with no relation on purpose — SyncLog is history and must
   // survive the brand being deleted later.
   brandId             String?
+  // Per-brand page progress for THIS run — {[brandId | "default"]: {from,
+  // to}} — updated as the walk advances (same cadence as pageTo), one entry
+  // per brand the run has reached so far. The per-brand resume suggestion
+  // (see computeResumePages/getResumePages in sync-service.ts) is derived
+  // from this across all of history; legacy rows from before this column
+  // existed have no entry here and fall back to the old first-brand-only
+  // semantics (pageFrom/pageTo counted toward the first configured brand
+  // only).
+  brandPages          Json?
 
   @@index([status])
   @@index([startedAt])

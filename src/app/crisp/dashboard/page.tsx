@@ -24,7 +24,7 @@ import {
 import { prisma } from "@/lib/db";
 import { getDashboardStats } from "@/lib/conversations";
 import { getArchiveCoverage } from "@/lib/sync/coverage-query";
-import { getResumePage } from "@/lib/sync/sync-service";
+import { getResumePage, getResumePages } from "@/lib/sync/sync-service";
 
 export const dynamic = "force-dynamic";
 
@@ -114,9 +114,10 @@ export default async function DashboardPage({
     ? brandParam
     : undefined;
 
-  const [stats, resumePage, coverageView] = await Promise.all([
+  const [stats, resumePage, resumePages, coverageView] = await Promise.all([
     getDashboardStats({ brandId: selectedBrandId }),
     getResumePage(),
+    getResumePages(),
     buildCoverageView(brands, selectedBrandId),
   ]);
 
@@ -217,6 +218,7 @@ export default async function DashboardPage({
         lastSync={lastSync}
         recentLogs={recentLogs}
         resumePage={resumePage}
+        resumePages={resumePages}
       />
     </div>
   );

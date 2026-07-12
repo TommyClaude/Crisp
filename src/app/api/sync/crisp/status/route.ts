@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { prisma } from "@/lib/db";
 import {
   getResumePage,
+  getResumePages,
   reconcileStaleSyncRuns,
 } from "@/lib/sync/sync-service";
 import { getSyncProgress } from "@/lib/sync/sync-state";
@@ -18,13 +19,16 @@ export async function GET() {
   // next poll instead of reading "Running" forever (and blocking the guard).
   await reconcileStaleSyncRuns();
 
-  const [recentLogs, lastCompleted, resumePage] = await Promise.all([
+  const [recentLogs, lastCompleted, resumePage, resumePages] = await Promise.all([
     prisma.syncLog.findMany({ orderBy: { startedAt: "desc" }, take: 10 }),
     prisma.syncLog.findFirst({
       where: { status: "completed" },
       orderBy: { finishedAt: "desc" },
     }),
+    // Kept alongside resumePages for back-compat — anything still reading
+    // the single-number field keeps working unchanged.
     getResumePage(),
+    getResumePages(),
   ]);
 
   return NextResponse.json({
@@ -32,5 +36,6 @@ export async function GET() {
     lastCompleted,
     recentLogs,
     resumePage,
+    resumePages,
   });
 }
