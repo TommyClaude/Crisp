@@ -2,7 +2,7 @@
   "name": "yayassist",
   "version": "0.1.0",
   "private": true,
-  "description": "YayAssist \u2014 AI answer suggestions for support teams: drafts replies to tickets/forum threads grounded in your Crisp.chat history and product documentation (RAG).",
+  "description": "YayAssist — AI answer suggestions for support teams: drafts replies to tickets/forum threads grounded in your Crisp.chat history and product documentation (RAG).",
   "engines": {
     "node": ">=20"
   },
