@@ -169,7 +169,19 @@ interface CheckStatusResponse {
   pluginCount: number;
 }
 
+/** Payload from GET /api/wporg/mail/status — the email-push listener's state. */
+interface MailListenerStatusView {
+  status: "disabled" | "connecting" | "listening" | "error" | "stopped";
+  lastError: string | null;
+  lastEventAt: string | null;
+  eventsProcessed: number;
+  connectedAt: string | null;
+  cursor: { lastUid: number; updatedAt: string } | null;
+}
+
 const CHECK_POLL_INTERVAL_MS = 2500;
+/** The mail-listener dot is refreshed on this cadence regardless of checks. */
+const MAIL_POLL_INTERVAL_MS = 15000;
 
 /** Statuses the bulk generator considers (matches the API's eligibility). */
 const BULK_ELIGIBLE_STATUSES = ["new", "drafted", "failed"];
@@ -406,6 +418,26 @@ export function SuggestionsManager({
     const id = setInterval(() => void refreshCheckStatus(), CHECK_POLL_INTERVAL_MS);
     return () => clearInterval(id);
   }, [checkRunning, refreshCheckStatus]);
+
+  // Email-push listener status (near-realtime forum updates). Polled steadily
+  // alongside the check-status poll so its dot stays fresh even when no check
+  // is running.
+  const [mailStatus, setMailStatus] =
+    React.useState<MailListenerStatusView | null>(null);
+  const refreshMailStatus = React.useCallback(async () => {
+    try {
+      const res = await fetch("/api/wporg/mail/status", { cache: "no-store" });
+      if (!res.ok) return;
+      setMailStatus((await res.json()) as MailListenerStatusView);
+    } catch {
+      // Best-effort; the next tick retries.
+    }
+  }, []);
+  React.useEffect(() => {
+    void refreshMailStatus();
+    const id = setInterval(() => void refreshMailStatus(), MAIL_POLL_INTERVAL_MS);
+    return () => clearInterval(id);
+  }, [refreshMailStatus]);
 
   const startCheck = async (opts: {
     key: "start" | "continue";
@@ -814,6 +846,8 @@ export function SuggestionsManager({
         </div>
       ) : null}
 
+      <MailListenerLine status={mailStatus} />
+
       {threads.length === 0 ? (
         <div className="text-muted-foreground rounded-lg border border-dashed p-10 text-center text-sm">
           <Lightbulb className="mx-auto mb-2 size-6 opacity-60" />
@@ -834,6 +868,64 @@ export function SuggestionsManager({
           />
         ))
       )}
+    </div>
+  );
+}
+
+/** Dot colour per mail-listener status. */
+const MAIL_DOT_CLASS: Record<MailListenerStatusView["status"], string> = {
+  disabled: "bg-muted-foreground/40",
+  connecting: "bg-amber-500",
+  listening: "bg-emerald-500",
+  error: "bg-red-500",
+  stopped: "bg-muted-foreground/40",
+};
+
+/**
+ * Muted one-line status of the wp.org email-push listener, with a coloured dot
+ * and a HelpTip explaining the flow. Renders nothing until the first poll lands.
+ */
+function MailListenerLine({
+  status,
+}: {
+  status: MailListenerStatusView | null;
+}) {
+  if (!status) return null;
+
+  let label: string;
+  switch (status.status) {
+    case "listening":
+      label = `listening · ${status.eventsProcessed} event${status.eventsProcessed === 1 ? "" : "s"}`;
+      break;
+    case "connecting":
+      label = "connecting…";
+      break;
+    case "error":
+      label = `error${status.lastError ? `: ${status.lastError}` : ""}`;
+      break;
+    case "stopped":
+      label = "stopped";
+      break;
+    default:
+      label = "disabled";
+  }
+
+  return (
+    <div className="text-muted-foreground -mt-2 flex items-center gap-1.5 text-xs">
+      <span
+        className={`size-2 shrink-0 rounded-full ${MAIL_DOT_CLASS[status.status]}`}
+        aria-hidden
+      />
+      <span className="min-w-0 truncate" title={status.lastError ?? undefined}>
+        Mail listener: {label}
+      </span>
+      <HelpTip subject="the mail listener" side="right">
+        wordpress.org emails a dedicated inbox on every new topic and reply; this
+        listener turns each into a targeted single-topic check within seconds, so
+        updates land in near-realtime without waiting for the next scheduled
+        forum check. The mailbox is read-only, and the periodic forum check
+        remains the safety net for anything email push misses.
+      </HelpTip>
     </div>
   );
 }

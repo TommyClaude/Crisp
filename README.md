@@ -75,6 +75,11 @@ Copy `.env.example` to `.env`. Validated at startup by `src/env.ts` (Zod) — in
 | `ANTHROPIC_MODEL` | no | `claude-opus-4-8` | Anthropic model for drafts |
 | `OPENAI_CHAT_MODEL` | no | `gpt-4o-mini` | OpenAI model for drafts (uses `OPENAI_API_KEY`) |
 | `WPORG_FEED_BASE` | no | `https://wordpress.org/support/plugin` | Forum feed base URL (tests only) |
+| `WPORG_MAIL_ENABLED` | no | `false` | Enable the wp.org email-push listener (near-realtime forum updates). Requires `WPORG_MAIL_USER` + `WPORG_MAIL_PASSWORD` |
+| `WPORG_MAIL_HOST` | no | `imap.gmail.com` | IMAP host for the notification inbox |
+| `WPORG_MAIL_PORT` | no | `993` | IMAP port (implicit TLS) |
+| `WPORG_MAIL_USER` | no | — | IMAP username (the dedicated inbox address) |
+| `WPORG_MAIL_PASSWORD` | no | — | IMAP password — for Gmail, a 16-char App Password (needs 2FA) |
 | `BASIC_AUTH_USER` | prod: yes | — | Admin UI/API Basic auth username |
 | `BASIC_AUTH_PASSWORD` | prod: yes | — | Admin UI/API Basic auth password |
 | `CRISP_REQUEST_INTERVAL_MS` | no | `150` | Minimum delay between Crisp API requests (ms) |
@@ -128,6 +133,22 @@ Cron example (hourly): `0 * * * *  cd /path/to/app && npm run wporg:check`. Repl
 **Age cutoff** — quiet forums keep years-old topics in their RSS feed, so each check skips any feed topic whose publish date is older than `WPORG_TOPIC_MAX_AGE_DAYS` (default 30) — those are never stored and never drafted (topics with no publish date are kept, since their age is unknown). The count of skipped-old topics is reported in the result and logs. A one-time migration (`…_delete_stale_support_threads`) also removes any pre-existing `SupportThread` rows older than 30 days (all statuses; NULL publish dates kept) when you `prisma migrate deploy`.
 
 **Background checks + logs** — "Check forums now" on `/suggestions` runs in the background (like Crisp sync): `POST /api/wporg/check` returns `202` immediately and the run drives its own progress, so navigating away or opening another tab never loses visibility. The button shows live progress (`Checking 8/14 — FileBird…`, then `Drafting 2/5…`) for any in-flight check, and a one-line last-check summary (`Last check 4m ago — 3 new topics, 2 drafted, 1 skipped (old)`, with feed errors expandable) sits under the toolbar. Each run is recorded in the `ForumCheckLog` table (status, counts, errors); poll `GET /api/wporg/check/status` for live progress plus the 5 most recent runs.
+
+### Near-realtime updates via email push
+
+wordpress.org has no webhooks, but it emails a subscribed account on every new topic and reply. An optional IMAP listener watches a dedicated inbox and, within seconds of a notification, runs a targeted single-topic check for exactly that topic — so updates land in near-realtime and the `wporg:check` cron can be relaxed (e.g. from hourly to a few times a day). **The scheduled forum check remains the safety net** for anything email push misses (a notification that never arrives, a listener outage, a topic whose plugin can't be resolved).
+
+The listener starts automatically from Next's `instrumentation.ts` when configured; there is nothing to run separately.
+
+**Setup:**
+
+1. **Dedicated inbox** — create a mailbox that receives only these notifications (the owner uses `yayassist@gmail.com`). For Gmail, enable IMAP and create a 16-character **App Password** (requires 2-factor auth); use that, not the account password.
+2. **Subscribe on wp.org** — for each plugin's support forum, click **Subscribe** while logged in as an account whose notification emails are forwarded to the dedicated inbox (in Gmail, set up a filter/forward from your wp.org account to `yayassist@gmail.com`). wp.org then emails that account on every new topic/reply.
+3. **Configure** — set `WPORG_MAIL_ENABLED=true`, `WPORG_MAIL_USER`, `WPORG_MAIL_PASSWORD` (host/port default to Gmail). The listener refuses to start unless all three are present. Changing these values requires a server restart to take effect.
+
+**Read-only guarantee** — the inbox is opened strictly `{ readOnly: true }`: the listener never marks messages seen, never moves or deletes them. Progress is tracked purely by message **UID** in the `wporg_mail_cursor` `AppMeta` row (never by `\Seen` flags), so the mailbox is left byte-for-byte untouched. Only mail whose envelope `From` address ends in `@wordpress.org` is acted on; everything else just advances the cursor. The single-topic check uses the same code path as the feed's resurface pass but never advances the feed dedupe watermark (it has no exact date), and never drafts (cost control — regenerate manually).
+
+A muted status line on `/suggestions` shows the listener's health (`Mail listener: listening · N events` / `disabled` / `error: …`).
 
 ### Incremental sync
 
@@ -260,6 +281,8 @@ All routes require Basic auth (see Security). All bodies/queries are Zod-validat
 | `POST` | `/api/docs/sources/{id}/ingest` | Crawl + chunk + embed in the background (`202`, `409` while running). For `wporg_forum` sources this imports answered forum topics as Q&A transcripts |
 | `POST` | `/api/wporg/check` | Start a background check of the wp.org forum feeds of all plugins with a `wpOrgSlug`; stores new topics (skipping ones older than `WPORG_TOPIC_MAX_AGE_DAYS`) and drafts suggestions. Body `{withSuggestions?, pluginId?}`. `202` with initial progress, `409` if one is running |
 | `GET` | `/api/wporg/check/status` | Live forum-check progress + the 5 most recent `ForumCheckLog` runs (with errors) |
+| `GET` | `/api/wporg/mail/status` | Email-push listener state (`status`, `lastError`, `lastEventAt`, `eventsProcessed`, `connectedAt`) + the persisted UID cursor |
+| `POST` | `/api/wporg/mail/restart` | Tear down + reconnect the listener's IMAP connection (recovers a wedged connection). Reuses loaded env — changing `WPORG_MAIL_*` still needs a server restart. `409` when disabled |
 | `GET` | `/api/wporg/threads` | Support topics + suggestions. Query: `status, pluginId, page, pageSize` |
 | `PATCH`/`DELETE` | `/api/wporg/threads/{id}` | Update review status (`reviewed`/`dismissed`/...) or delete |
 | `POST` | `/api/wporg/threads/{id}/suggest` | (Re)generate the RAG-grounded reply draft for a topic |
@@ -276,7 +299,7 @@ All routes require Basic auth (see Security). All bodies/queries are Zod-validat
 | `/crisp/conversations/{sessionId}` | Chat-style message log with attachments, visitor panel (masked PII), resync/rebuild actions, chunk summaries, and a **Mark as junk / Not junk** veto with a junk badge |
 | `/rag` | Search playground: query the chunk store (all sources / chats / docs / forum Q&A), see mode + similarity scores + source conversation, docs-page or forum-topic links |
 | `/brands` | Manage brands — one per Crisp website; the sync covers every brand listed. Set a brand's wp.org author profile to bulk-import its plugins with one click |
-| `/plugins` | Manage plugins per brand (detection keywords, wp.org slug), their docs sources and wp.org forum Q&A sources, with one-click ingest and live crawl status |
+| `/plugins` | Manage plugins per brand (detection keywords, wp.org slug), their docs sources and wp.org forum Q&A sources, with one-click ingest and live crawl status. The add-plugin form sits behind an **Add a plugin** button, detection keywords are editable inline on each card, and the list filters by brand and by status (missing docs / missing forum Q&A / never ingested) |
 | `/suggestions` | wp.org forum topics with RAG-grounded reply drafts. Opens on the **Needs reply** work queue (unhandled or flagged topics, flagged-first); tabs for Needs resolved / Recent / No draft / Failed / Reviewed / Dismissed, each showing a topic count. Shows **New reply** and **Follow-up due** badges, checks forums on demand, bulk-generates missing drafts, regenerates/copies drafts, marks reviewed or dismissed, and offers **Draft anyway** to deliver an overdue support promise |
 | `/test-answer` | Answer-quality playground: paste a hypothetical support question and get the same RAG-grounded reply drafts the forum flow produces — no `SupportThread` is created, nothing is saved |
 

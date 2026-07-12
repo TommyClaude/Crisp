@@ -50,6 +50,22 @@ const envSchema = z.object({
   // gentle-close draft. Under the threshold the topic just shows a muted
   // "Waiting on customer" badge in Recent.
   WPORG_SILENCE_NUDGE_DAYS: z.coerce.number().int().positive().default(3),
+  // ── wp.org email push listener (near-realtime forum updates) ─────────────
+  // wordpress.org has no webhooks but emails subscribed accounts on every new
+  // topic/reply. A dedicated Gmail inbox collects those forwarded "WordPress.org
+  // Forums" notifications; an IMAP listener (src/lib/wporg/mail-listener.ts)
+  // turns each into a targeted single-topic check within seconds, so the RSS
+  // cron can be relaxed. The listener refuses to start unless ENABLED is true
+  // AND both USER and PASSWORD are set; the mailbox is opened strictly
+  // read-only (never marked seen, moved, or deleted).
+  WPORG_MAIL_ENABLED: z.preprocess(
+    (v) => v === "true" || v === "1",
+    z.boolean()
+  ),
+  WPORG_MAIL_HOST: z.string().default("imap.gmail.com"),
+  WPORG_MAIL_PORT: z.coerce.number().int().positive().default(993),
+  WPORG_MAIL_USER: z.string().optional().or(z.literal("")),
+  WPORG_MAIL_PASSWORD: z.string().optional().or(z.literal("")),
   BASIC_AUTH_USER: z.string().optional(),
   BASIC_AUTH_PASSWORD: z.string().optional(),
   CRISP_REQUEST_INTERVAL_MS: z.coerce.number().int().positive().default(150),
@@ -84,4 +100,16 @@ export function getEnv(): Env {
 export function embeddingsConfigured(): boolean {
   const env = getEnv();
   return Boolean(env.OPENAI_API_KEY && env.OPENAI_API_KEY.length > 0);
+}
+
+/**
+ * True when the wp.org email-push listener has everything it needs: explicitly
+ * enabled AND both an IMAP user and password. The single source of truth for
+ * "should the listener run" — the listener refuses to start otherwise.
+ */
+export function mailListenerConfigured(): boolean {
+  const env = getEnv();
+  return Boolean(
+    env.WPORG_MAIL_ENABLED && env.WPORG_MAIL_USER && env.WPORG_MAIL_PASSWORD
+  );
 }

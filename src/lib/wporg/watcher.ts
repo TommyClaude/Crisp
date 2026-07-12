@@ -2,7 +2,13 @@ import { prisma } from "@/lib/db";
 import { getEnv } from "@/env";
 import { classifyFollowupPromise } from "@/lib/suggest/promise";
 import { generateSuggestionForThread } from "@/lib/suggest/suggester";
-import { fetchTopicThread } from "@/lib/wporg/forum-crawler";
+import {
+  canonicalForumUrl,
+  fetchTopicThread,
+  type FetchedTopicThread,
+} from "@/lib/wporg/forum-crawler";
+import { canonicalizeTopicUrl, topicSlug } from "@/lib/wporg/topic-url";
+import type { Prisma } from "@prisma/client";
 import {
   beginCheckProgress,
   endCheckProgress,
@@ -72,6 +78,194 @@ const SILENT_REFRESH_CAP = 20;
 const ONE_HOUR_MS = 60 * 60 * 1000;
 
 /**
+ * OR-terms matching every stored spelling of one topic, for SupportThread row
+ * lookups. New rows are stored under the canonical permalink
+ * ({@link canonicalizeTopicUrl}), but rows written before canonicalization —
+ * or by a feed that spells the guid differently (scheme/www/trailing slash,
+ * /page/N/ suffix) — must still match, or the feed and mail paths would fork
+ * one topic into two rows. Matches the canonical string, any raw spellings the
+ * caller has in hand, and a slug-anchored form for everything else. The slug
+ * terms are boundary-safe: `contains ".../<slug>/"` (trailing slash bounds the
+ * slug) plus `endsWith ".../<slug>"` — so "my-topic" never matches
+ * "my-topic-2".
+ */
+export function topicLookupOr(
+  canonical: string,
+  rawSpellings: string[]
+): Prisma.SupportThreadWhereInput[] {
+  const terms: Prisma.SupportThreadWhereInput[] = [
+    { guid: canonical },
+    { url: canonical },
+  ];
+  for (const raw of rawSpellings) {
+    if (raw && raw !== canonical) terms.push({ guid: raw }, { url: raw });
+  }
+  const slug = topicSlug(canonical);
+  if (slug) {
+    terms.push(
+      { guid: { contains: `/support/topic/${slug}/` } },
+      { guid: { endsWith: `/support/topic/${slug}` } },
+      { url: { contains: `/support/topic/${slug}/` } },
+      { url: { endsWith: `/support/topic/${slug}` } }
+    );
+  }
+  return terms;
+}
+
+/** What {@link applyThreadFromFetch} did to the SupportThread row. */
+export type ThreadUpsertOutcome =
+  /** Customer posted last on an existing tracked thread → flagged hasNewReply. */
+  | "flagged"
+  /** A new thread row was created (customer-last, or support-last on the mail path). */
+  | "created"
+  /** Support answered last on an existing thread → promise/waiting state recorded. */
+  | "support_recorded"
+  /** Support answered last on an untracked topic and creation wasn't requested. */
+  | "skipped";
+
+export interface ThreadUpsertResult {
+  outcome: ThreadUpsertOutcome;
+  /** The affected row id (existing or newly created); null for "skipped". */
+  threadId: string | null;
+}
+
+/**
+ * Shared per-topic upsert, factored out of the resurface loop so the feed path
+ * ({@link resurfaceReplies}) and the email-push path ({@link checkSingleTopic})
+ * apply IDENTICAL state transitions from a freshly fetched thread. Given the
+ * live thread and whether the last post is the customer's or the team's:
+ *   - customer-last, existing → flag hasNewReply, bump lastActivityAt, clear
+ *     any promise/waiting state;
+ *   - customer-last, untracked → create the row (flagged) from the lead post;
+ *   - support-last, existing → classify the follow-up promise, set
+ *     followupPromisedAt/waitingSince accordingly, retire hasNewReply;
+ *   - support-last, untracked → create the row in its waiting/promise state
+ *     when `createOnSupportLast` (mail path), else skip (feed path — a
+ *     support-last reply item on an untracked topic isn't actionable).
+ * Always refreshes wpResolved from the fetched page. No drafting happens here
+ * (cost control) — the admin regenerates.
+ *
+ * CRITICAL INVARIANT (HYBRID watermark): `lastReplyAt` is the feed dedupe
+ * watermark and is sourced from EXACT feed pubDates only. Only the feed path
+ * passes `exactReplyDate`; the mail path passes null and this function then
+ * leaves lastReplyAt untouched (exactly like {@link refreshSilentTopics}) — an
+ * inflated approximate watermark would silently skip a genuinely newer reply on
+ * the next feed poll. The page's own per-post date still feeds lastActivityAt /
+ * waitingSince / publishedAt, which only need day-scale accuracy.
+ */
+async function applyThreadFromFetch(opts: {
+  pluginId: string;
+  topicGuid: string;
+  topicUrl: string;
+  fetched: FetchedTopicThread;
+  existing: { id: string } | null;
+  /** Exact feed reply date (feed path) or null (mail path — no watermark write). */
+  exactReplyDate: Date | null;
+  /** Create a row when a support-last topic is untracked (mail path only). */
+  createOnSupportLast: boolean;
+}): Promise<ThreadUpsertResult> {
+  const { fetched } = opts;
+  const lastPost = fetched.posts[fetched.posts.length - 1];
+  const firstPost = fetched.posts[0];
+  // A bare (roleless) last post means the customer spoke last; a role badge
+  // (Plugin Support/Author/…) means the team answered last.
+  const customerLast = lastPost.role == null;
+  // Clocks/badges prefer the page's own per-post date; fall back to the exact
+  // feed date (feed path) then "now" (mail path, no date at all).
+  const effectiveDate = lastPost.postedAt ?? opts.exactReplyDate ?? new Date();
+  // Only an EXACT feed date may advance the dedupe watermark — see the HYBRID
+  // invariant above.
+  const watermark = opts.exactReplyDate
+    ? { lastReplyAt: opts.exactReplyDate }
+    : {};
+
+  if (!customerLast) {
+    if (opts.existing) {
+      // Classify whether the team's last post promised a further update
+      // ("let me check and get back to you"): YES arms the follow-up reminder;
+      // NO hands the ball to the customer and starts the silence clock. The
+      // classifier is best-effort and resolves to NO on failure.
+      const promised = await classifyFollowupPromise(lastPost.text);
+      await prisma.supportThread.update({
+        where: { id: opts.existing.id },
+        data: {
+          ...watermark,
+          followupPromisedAt: promised ? effectiveDate : null,
+          waitingSince: promised ? null : effectiveDate,
+          // The team answering ON wp.org retires any standing "New reply" flag.
+          hasNewReply: false,
+          wpResolved: fetched.resolved,
+        },
+      });
+      return { outcome: "support_recorded", threadId: opts.existing.id };
+    }
+    if (!opts.createOnSupportLast) {
+      return { outcome: "skipped", threadId: null };
+    }
+    // Untracked topic whose team answered last (mail path): create the row in
+    // its waiting/promise state so it can still surface in "Needs resolved".
+    const promised = await classifyFollowupPromise(lastPost.text);
+    const created = await prisma.supportThread.create({
+      data: {
+        pluginId: opts.pluginId,
+        guid: opts.topicGuid,
+        url: opts.topicUrl,
+        title: fetched.title ?? opts.topicUrl,
+        author: firstPost.author,
+        excerpt: firstPost.text.slice(0, RESURFACE_EXCERPT_CHARS),
+        publishedAt: firstPost.postedAt ?? null,
+        status: "new",
+        hasNewReply: false,
+        ...watermark,
+        lastActivityAt: effectiveDate,
+        followupPromisedAt: promised ? effectiveDate : null,
+        waitingSince: promised ? null : effectiveDate,
+        wpResolved: fetched.resolved,
+      },
+    });
+    return { outcome: "created", threadId: created.id };
+  }
+
+  // Customer posted last — the ball is with the team.
+  if (opts.existing) {
+    await prisma.supportThread.update({
+      where: { id: opts.existing.id },
+      data: {
+        hasNewReply: true,
+        ...watermark,
+        lastActivityAt: effectiveDate,
+        // A fresh customer reply supersedes any pending promise / waiting state.
+        followupPromisedAt: null,
+        waitingSince: null,
+        wpResolved: fetched.resolved,
+      },
+    });
+    return { outcome: "flagged", threadId: opts.existing.id };
+  }
+  const created = await prisma.supportThread.create({
+    data: {
+      pluginId: opts.pluginId,
+      guid: opts.topicGuid,
+      url: opts.topicUrl,
+      title: fetched.title ?? opts.topicUrl,
+      author: firstPost.author,
+      // The topic's original publish date, from the lead post's own parsed
+      // bbPress timestamp when available; null (unknown) otherwise.
+      excerpt: firstPost.text.slice(0, RESURFACE_EXCERPT_CHARS),
+      publishedAt: firstPost.postedAt ?? null,
+      status: "new",
+      hasNewReply: true,
+      ...watermark,
+      lastActivityAt: effectiveDate,
+      // Customer posted last — ball is with the team, not waiting on them.
+      waitingSince: null,
+      wpResolved: fetched.resolved,
+    },
+  });
+  return { outcome: "created", threadId: created.id };
+}
+
+/**
  * Resurface topics that got a fresh customer reply. For each plugin's reply
  * feed items (newest kept per topic) within the age cutoff, cheaply dedupe by
  * the stored lastReplyAt, then fetch the live thread ONCE and inspect the last
@@ -99,9 +293,12 @@ async function resurfaceReplies(
     if (!reply.publishedAt) continue;
     // The cutoff applies to the REPLY date — the topic itself may be years old.
     if (reply.publishedAt.getTime() < ageCutoffMs) continue;
-    const seen = newestByTopic.get(reply.topicGuid);
+    // Key by the canonical permalink so two spellings of one topic in the same
+    // batch (e.g. with and without a /page/N/ suffix) collapse to one fetch.
+    const key = canonicalizeTopicUrl(reply.topicGuid) ?? reply.topicGuid;
+    const seen = newestByTopic.get(key);
     if (!seen || reply.publishedAt > seen.publishedAt!) {
-      newestByTopic.set(reply.topicGuid, reply);
+      newestByTopic.set(key, reply);
     }
   }
 
@@ -111,8 +308,15 @@ async function resurfaceReplies(
     // via lastReplyAt) on the next check.
     if (state.cancelRequested) break;
     const replyDate = reply.publishedAt!;
-    const existing = await prisma.supportThread.findUnique({
-      where: { pluginId_guid: { pluginId: plugin.id, guid: reply.topicGuid } },
+    // Store keys are the canonical permalink; the lookup also matches raw feed
+    // spellings and slug-anchored legacy rows (see topicLookupOr).
+    const canonicalGuid = canonicalizeTopicUrl(reply.topicGuid) ?? reply.topicGuid;
+    const canonicalUrl = canonicalizeTopicUrl(reply.topicUrl) ?? reply.topicUrl;
+    const existing = await prisma.supportThread.findFirst({
+      where: {
+        pluginId: plugin.id,
+        OR: topicLookupOr(canonicalGuid, [reply.topicGuid, reply.topicUrl]),
+      },
       select: { id: true, lastReplyAt: true },
     });
     // Already processed a reply at least this recent — nothing new.
@@ -136,103 +340,27 @@ async function resurfaceReplies(
     // Fetch failed or nothing parsed — leave it for the next check to retry.
     if (!fetched || fetched.posts.length === 0) continue;
 
-    const lastPost = fetched.posts[fetched.posts.length - 1];
-    // wp.org tags support-team posts with a role badge; a bare (roleless) last
-    // post means the customer spoke last and the thread is waiting on support.
-    const customerLast = lastPost.role == null;
-    // HYBRID date sourcing (review finding): the page's parsed per-post date
-    // is only HOUR/DAY-precise ("5 days ago"), so it may overestimate recency
-    // vs the feed's exact pubDate. Clocks and display fields prefer it —
-    // accuracy at day scale is what they need — but lastReplyAt is the feed
-    // DEDUPE WATERMARK (`existing.lastReplyAt >= replyDate` above) and must
-    // stay sourced from exact, monotonic feed dates: an inflated approximate
-    // watermark would silently skip a genuinely newer customer reply.
-    const effectiveDate = lastPost.postedAt ?? replyDate;
+    // Delegate the state transition to the shared upsert (same logic the mail
+    // path uses). The feed path passes the EXACT reply pubDate so the dedupe
+    // watermark advances, and does NOT create rows for support-last untracked
+    // topics (not actionable from a bare reply feed item).
+    const applied = await applyThreadFromFetch({
+      pluginId: plugin.id,
+      topicGuid: canonicalGuid,
+      topicUrl: canonicalUrl,
+      fetched,
+      existing: existing ? { id: existing.id } : null,
+      exactReplyDate: replyDate,
+      createOnSupportLast: false,
+    });
 
-    if (!customerLast) {
-      // Support answered last. Record lastReplyAt to skip refetching next time;
-      // don't flag, and don't create a row for a topic we weren't tracking.
-      // For a tracked thread, classify whether that last post promised a
-      // further update the team may forget ("let me check and get back to
-      // you"): YES arms the follow-up reminder (followupPromisedAt = this reply
-      // date); NO clears any prior promise (the team delivered or closed). The
-      // classifier is best-effort — a failure resolves to NO and never blocks
-      // the check. We only reach here when the reply is newer than the last one
-      // processed, so a standing promise isn't re-classified every check.
-      if (existing) {
-        const promised = await classifyFollowupPromise(lastPost.text);
-        await prisma.supportThread.update({
-          where: { id: existing.id },
-          data: {
-            lastReplyAt: replyDate,
-            followupPromisedAt: promised ? effectiveDate : null,
-            // A promise owns the follow-up reminder, so the waiting clock stays
-            // off. Without one the ball is now with the customer: start the
-            // clock at this reply date so, after WPORG_SILENCE_NUDGE_DAYS of
-            // silence, the topic surfaces in "Needs resolved". Either way the
-            // topic leaves the "Needs reply" queue until the customer replies.
-            waitingSince: promised ? null : effectiveDate,
-            // The team answering ON wp.org also retires any standing "New
-            // reply" flag — the customer message it pointed at has been
-            // handled outside the tool. Leaving it set would keep the topic
-            // in "Needs reply" AND (once the silence clock ages) in "Needs
-            // resolved" at the same time.
-            hasNewReply: false,
-            // Refresh the wp.org resolution flag from the page we just fetched.
-            wpResolved: fetched.resolved,
-          },
-        });
-      }
-      continue;
+    // Only a customer-last flag/create counts as a resurface; the drafting
+    // phase restores the badge for rows created-and-flagged in one poll.
+    if (applied.outcome === "flagged" || applied.outcome === "created") {
+      if (applied.threadId) flaggedIds.add(applied.threadId);
+      result.resurfaced += 1;
+      state.resurfaced += 1;
     }
-
-    if (existing) {
-      await prisma.supportThread.update({
-        where: { id: existing.id },
-        data: {
-          hasNewReply: true,
-          lastReplyAt: replyDate,
-          lastActivityAt: effectiveDate,
-          // A fresh customer reply supersedes any pending support promise —
-          // the ball is back with the team via the "New reply" badge instead.
-          followupPromisedAt: null,
-          // …and it ends any "waiting on the customer" state (they just replied).
-          waitingSince: null,
-          // Refresh the wp.org resolution flag from the page we just fetched.
-          wpResolved: fetched.resolved,
-        },
-      });
-      flaggedIds.add(existing.id);
-    } else {
-      const firstPost = fetched.posts[0];
-      const created = await prisma.supportThread.create({
-        data: {
-          pluginId: plugin.id,
-          guid: reply.topicGuid,
-          url: reply.topicUrl,
-          title: fetched.title ?? reply.topicUrl,
-          author: firstPost.author,
-          // The topic's original publish date, from the lead post's own
-          // parsed bbPress timestamp when available; null (unknown) only when
-          // that meta date didn't parse. lastActivityAt still sorts it into
-          // "Recent" by the reply date either way.
-          excerpt: firstPost.text.slice(0, RESURFACE_EXCERPT_CHARS),
-          publishedAt: firstPost.postedAt ?? null,
-          status: "new",
-          hasNewReply: true,
-          lastReplyAt: replyDate,
-          lastActivityAt: effectiveDate,
-          // Customer posted last — the ball is with the team, not waiting on
-          // them (default null, set explicitly to keep the flag matrix clear).
-          waitingSince: null,
-          // Resolution flag from the page we just fetched.
-          wpResolved: fetched.resolved,
-        },
-      });
-      flaggedIds.add(created.id);
-    }
-    result.resurfaced += 1;
-    state.resurfaced += 1;
   }
 }
 
@@ -355,6 +483,69 @@ export function isWatcherRunning(): boolean {
   return isCheckRunning();
 }
 
+/** Outcome of a {@link checkSingleTopic} call — for the mail listener's logs. */
+export interface SingleTopicResult {
+  outcome: ThreadUpsertOutcome | "fetch_failed";
+  threadId: string | null;
+}
+
+/**
+ * Check ONE wp.org topic on demand, given the plugin it belongs to and its
+ * (any-form) topic URL. The near-realtime email-push path
+ * (src/lib/wporg/mail-listener.ts) calls this within seconds of a wp.org
+ * notification email, so the RSS cron can be relaxed.
+ *
+ * Fetches the live thread ONCE and applies the exact same state transitions as
+ * the feed's resurface pass via {@link applyThreadFromFetch}, EXCEPT it passes
+ * no exact reply date — so, like the refresh pass, it never advances the
+ * lastReplyAt feed dedupe watermark (see the HYBRID invariant). It creates the
+ * row when the topic is untracked (new-topic notifications land here), including
+ * the support-last case, and never drafts (cost control — the admin
+ * regenerates). Idempotent: re-processing the same notification is a no-op
+ * upsert, and it is safe to run concurrently with a full forum check (both are
+ * idempotent upserts on the same rows).
+ */
+export async function checkSingleTopic(
+  pluginId: string,
+  topicUrl: string
+): Promise<SingleTopicResult> {
+  // Canonicalize to the bare topic permalink so guid/url line up with how the
+  // feed stores the same topic (strips #anchor, query, /page/N/).
+  const canonical = canonicalizeTopicUrl(topicUrl) ?? canonicalForumUrl(topicUrl);
+
+  let fetched;
+  try {
+    fetched = await fetchTopicThread(canonical);
+  } catch (error) {
+    console.error(
+      `[wporg-mail] fetch failed ${canonical}:`,
+      error instanceof Error ? error.message : error
+    );
+    return { outcome: "fetch_failed", threadId: null };
+  }
+  if (!fetched || fetched.posts.length === 0) {
+    return { outcome: "fetch_failed", threadId: null };
+  }
+
+  // Match an existing row by canonical guid/url or any slug-anchored legacy
+  // spelling — the feed and mail paths must converge on the same row even when
+  // they arrived at slightly different stored strings for one topic.
+  const existing = await prisma.supportThread.findFirst({
+    where: { pluginId, OR: topicLookupOr(canonical, [topicUrl]) },
+    select: { id: true },
+  });
+
+  return applyThreadFromFetch({
+    pluginId,
+    topicGuid: canonical,
+    topicUrl: canonical,
+    fetched,
+    existing,
+    exactReplyDate: null,
+    createOnSupportLast: true,
+  });
+}
+
 const MS_PER_DAY = 24 * 60 * 60 * 1000;
 
 export async function checkPluginForums(options?: {
@@ -461,16 +652,24 @@ export async function checkPluginForums(options?: {
             state.skippedOld += 1;
             continue;
           }
-          const existing = await prisma.supportThread.findUnique({
-            where: { pluginId_guid: { pluginId: plugin.id, guid: topic.guid } },
+          // Store keys are the canonical permalink; the lookup also matches
+          // raw feed spellings and slug-anchored legacy rows (including rows
+          // the mail path created first), so both paths converge on one row.
+          const canonicalGuid = canonicalizeTopicUrl(topic.guid) ?? topic.guid;
+          const canonicalUrl = canonicalizeTopicUrl(topic.url) ?? topic.url;
+          const existing = await prisma.supportThread.findFirst({
+            where: {
+              pluginId: plugin.id,
+              OR: topicLookupOr(canonicalGuid, [topic.guid, topic.url]),
+            },
             select: { id: true },
           });
           if (existing) continue;
           const thread = await prisma.supportThread.create({
             data: {
               pluginId: plugin.id,
-              guid: topic.guid,
-              url: topic.url,
+              guid: canonicalGuid,
+              url: canonicalUrl,
               title: topic.title,
               author: topic.author,
               excerpt: topic.excerpt,

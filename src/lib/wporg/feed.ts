@@ -22,12 +22,13 @@ export interface ForumTopic {
 /**
  * A reply item from the feed (a link carrying a #post-N anchor). Unlike a new
  * topic, a reply may bump a topic that is years old — so we keep the topic's
- * bare guid/url (anchor stripped, matching {@link ForumTopic.guid} /
- * SupportThread.guid) plus the reply's own guid and publish date. The watcher
- * uses these to resurface an old topic that just got a fresh customer reply.
+ * bare guid/url (anchor stripped, matching {@link ForumTopic.guid}) plus the
+ * reply's own guid and publish date. The watcher canonicalizes these to the
+ * bare topic permalink (topic-url.ts) before any SupportThread lookup/write,
+ * and uses them to resurface an old topic that just got a fresh customer reply.
  */
 export interface ForumReply {
-  /** Topic guid with the #post-N anchor stripped — matches SupportThread.guid. */
+  /** Topic guid with the #post-N anchor stripped (raw feed spelling). */
   topicGuid: string;
   /** Topic URL with the #post-N anchor stripped. */
   topicUrl: string;

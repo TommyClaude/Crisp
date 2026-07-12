@@ -64,6 +64,20 @@ export function forumUrlForSlug(wpOrgSlug: string): string {
 }
 
 /**
+ * Extract the plugin slug from a fetched wp.org topic page by finding the first
+ * link to the plugin's support forum (`/support/plugin/<slug>/`). Every topic
+ * page carries a breadcrumb / "in: [Plugin]" link back to its forum, so this
+ * resolves which plugin a notification email is about when the subject bracket
+ * hint didn't match a known Plugin. Returns null when no such link is present.
+ */
+export function extractPluginSlug(html: string): string | null {
+  const match = html.match(
+    /\/support\/plugin\/([a-z0-9][a-z0-9-]*)\/?/i
+  );
+  return match ? match[1].toLowerCase() : null;
+}
+
+/**
  * Canonicalize a wp.org forum URL: force https, drop a leading "www.",
  * strip query/fragment, ensure a trailing slash. A user-pasted
  * `http://www.wordpress.org/support/plugin/x` and the canonical form then
