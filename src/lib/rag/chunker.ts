@@ -3,6 +3,7 @@ import { redactText } from "./redact";
 import {
   DEFAULT_PRODUCT_DEFS,
   detectPrimaryProduct,
+  pluginIdForProduct,
   type ProductDef,
 } from "./products";
 
@@ -20,6 +21,13 @@ export interface BuiltChunk {
   messageIds: string[];
   chunkText: string;
   product: string | null;
+  /**
+   * FK to the Plugin the detected {@link product} maps to, so plugin-/brand-
+   * scoped retrieval can reach chat chunks. NULL when the product matches no
+   * plugin (a built-in platform like WooCommerce/WordPress, or a segment with
+   * no plugin) — the product string is kept regardless.
+   */
+  pluginId: string | null;
   topic: string | null;
   language: string | null;
   rawJson: {
@@ -38,10 +46,12 @@ interface Exchange {
  * Version of the chunk-building rules below. Bump when chunk-building rules
  * change (e.g. the exchange grouping, the header format, or the chunkability
  * gate) so installs are prompted to rebuild their chat chunks under the new
- * rules. Version 2 = the noise-gate era ({@link NOISE_PATTERNS} filtering in
+ * rules. Version 3 = chat chunks now carry a `pluginId` FK resolved from the
+ * detected product (segments-first), so plugin-/brand-scoped retrieval reaches
+ * them; version 2 = the noise-gate era ({@link NOISE_PATTERNS} filtering in
  * {@link isChunkableConversation}); version 1 predated any noise filtering.
  */
-export const CHUNKER_VERSION = 2;
+export const CHUNKER_VERSION = 3;
 
 /** Target size for a chunk's body text, in characters (~350-400 tokens). */
 const MAX_CHUNK_CHARS = 1600;
@@ -214,6 +224,9 @@ export function buildChunksForConversation(
 
   const fullText = exchanges.map(renderExchange).join("\n");
   const product = detectPrimaryProduct(fullText, conversation.tags, productDefs);
+  // Map the detected product to its backing plugin (NULL for platforms /
+  // unmatched segments) so plugin-/brand-scoped retrieval can reach chats.
+  const pluginId = pluginIdForProduct(product, productDefs);
   const language = detectLanguage(conversation);
   const date = (conversation.createdAtCrisp ?? conversation.createdAt)
     .toISOString()
@@ -259,6 +272,7 @@ export function buildChunksForConversation(
         messageIds,
         chunkText: `[${headerText}]\n${redactText(piece)}`,
         product,
+        pluginId,
         topic,
         language,
         rawJson: { exchangeCount, header },

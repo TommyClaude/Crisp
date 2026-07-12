@@ -4,26 +4,106 @@ import {
   buildChunksForConversation,
   isChunkableConversation,
 } from "./chunker";
-import { embedTexts } from "./embeddings";
+import { EMBEDDING_DIMENSIONS, embedTexts } from "./embeddings";
 import { getProductDefinitions } from "./product-defs";
 import { recordChunksRebuilt } from "./rebuild-advice";
 import {
   beginRebuildProgress,
   endRebuildProgress,
 } from "./rebuild-state";
-import { storeChunkEmbeddings } from "./search";
+import { hasPgvector, storeChunkEmbeddings } from "./search";
 
 export interface RebuildResult {
   conversationId: string;
   sessionId: string;
   chunksCreated: number;
   embedded: boolean;
+  /** New/changed chunks embedded via the OpenAI API this rebuild. */
+  embeddedCount: number;
+  /**
+   * Chunks whose text was byte-identical to a pre-rebuild chunk, so their
+   * existing embedding was reused instead of paying to re-embed it.
+   */
+  reusedCount: number;
   /**
    * True when the conversation failed the chunkability gate (no real
    * customer↔operator exchange, or known automated noise). Any chunks it
    * previously had were purged and none were created.
    */
   skipped?: boolean;
+}
+
+/**
+ * Snapshot chunkText → embedding for a conversation's existing chunks, so a
+ * rebuild can reuse the embedding of any chunk whose text is unchanged instead
+ * of paying to re-embed it. Reads the pgvector column (as text) when present,
+ * else the JSON fallback.
+ *
+ * Best-effort by design: on any error it returns an empty map, so the caller
+ * simply re-embeds everything. A reused vector is only ever written for
+ * byte-identical chunk text and only when it has the expected width, so reuse
+ * can never leave a chunk with a mismatched embedding.
+ */
+async function snapshotEmbeddings(
+  conversationId: string
+): Promise<Map<string, number[]>> {
+  const byText = new Map<string, number[]>();
+  try {
+    if (await hasPgvector()) {
+      const rows = await prisma.$queryRaw<
+        Array<{
+          chunkText: string;
+          embedding: string | null;
+          embeddingJson: unknown;
+        }>
+      >`
+        SELECT "chunkText", embedding::text AS embedding, "embeddingJson"
+        FROM "EmbeddingChunk"
+        WHERE "conversationId" = ${conversationId}
+      `;
+      for (const row of rows) {
+        const vector =
+          parseVectorLiteral(row.embedding) ?? asVector(row.embeddingJson);
+        if (vector) byText.set(row.chunkText, vector);
+      }
+    } else {
+      const rows = await prisma.embeddingChunk.findMany({
+        where: { conversationId },
+        select: { chunkText: true, embeddingJson: true },
+      });
+      for (const row of rows) {
+        const vector = asVector(row.embeddingJson);
+        if (vector) byText.set(row.chunkText, vector);
+      }
+    }
+  } catch (error) {
+    // Never let a snapshot failure corrupt or block the rebuild — fall back
+    // to embedding every chunk normally.
+    console.error(
+      `Embedding snapshot failed for ${conversationId} (will re-embed):`,
+      error
+    );
+    return new Map();
+  }
+  return byText;
+}
+
+/** A JSON embeddingJson value, validated to the expected width, else null. */
+function asVector(value: unknown): number[] | null {
+  if (!Array.isArray(value) || value.length !== EMBEDDING_DIMENSIONS) return null;
+  return value.every((n) => typeof n === "number" && Number.isFinite(n))
+    ? (value as number[])
+    : null;
+}
+
+/** Parse a pgvector `[0.1,0.2,...]::text` literal, validated to width, else null. */
+function parseVectorLiteral(text: string | null): number[] | null {
+  if (!text) return null;
+  const inner = text.replace(/^\[|\]$/g, "");
+  if (!inner) return null;
+  const vector = inner.split(",").map(Number);
+  if (vector.length !== EMBEDDING_DIMENSIONS) return null;
+  return vector.some((n) => !Number.isFinite(n)) ? null : vector;
 }
 
 /**
@@ -56,6 +136,10 @@ export async function rebuildChunksForConversation(
       )
     : [];
 
+  // Snapshot existing embeddings BEFORE the delete so unchanged chunk text can
+  // reuse its embedding below instead of re-calling the OpenAI API.
+  const priorEmbeddings = await snapshotEmbeddings(conversationId);
+
   const created = await prisma.$transaction(async (tx) => {
     await tx.embeddingChunk.deleteMany({ where: { conversationId } });
     if (chunks.length === 0) return [] as Array<{ id: string; chunkText: string }>;
@@ -66,6 +150,7 @@ export async function rebuildChunksForConversation(
         messageIds: chunk.messageIds,
         chunkText: chunk.chunkText,
         product: chunk.product,
+        pluginId: chunk.pluginId,
         topic: chunk.topic,
         language: chunk.language,
         rawJson: chunk.rawJson,
@@ -76,13 +161,43 @@ export async function rebuildChunksForConversation(
 
   const wantEmbeddings = options?.withEmbeddings ?? true;
   let embedded = false;
+  let embeddedCount = 0;
+  let reusedCount = 0;
   if (wantEmbeddings && embeddingsConfigured() && created.length > 0) {
-    const vectors = await embedTexts(created.map((c) => c.chunkText));
-    await storeChunkEmbeddings(
-      created.map((c) => c.id),
-      vectors
-    );
+    // Split into chunks we can reuse (byte-identical text with a snapshotted
+    // embedding) and genuinely new/changed ones that must be embedded.
+    const reuse: Array<{ id: string; vector: number[] }> = [];
+    const toEmbed: Array<{ id: string; chunkText: string }> = [];
+    for (const chunk of created) {
+      const prior = priorEmbeddings.get(chunk.chunkText);
+      if (prior) reuse.push({ id: chunk.id, vector: prior });
+      else toEmbed.push(chunk);
+    }
+
+    // Store the reused vectors FIRST — they are already in memory and cost no
+    // API call, so an embeddings-API outage below cannot throw them away. If
+    // embedTexts then fails, only the genuinely new/changed chunks are left
+    // unembedded (visible in the dashboard's embedded-vs-total gap) and the
+    // next rebuild re-embeds just those; the reused ones stay intact.
+    if (reuse.length > 0) {
+      await storeChunkEmbeddings(
+        reuse.map((r) => r.id),
+        reuse.map((r) => r.vector)
+      );
+    }
+    const fresh =
+      toEmbed.length > 0
+        ? await embedTexts(toEmbed.map((c) => c.chunkText))
+        : [];
+    if (toEmbed.length > 0) {
+      await storeChunkEmbeddings(
+        toEmbed.map((c) => c.id),
+        fresh
+      );
+    }
     embedded = true;
+    embeddedCount = toEmbed.length;
+    reusedCount = reuse.length;
   }
 
   return {
@@ -90,6 +205,8 @@ export async function rebuildChunksForConversation(
     sessionId: conversation.sessionId,
     chunksCreated: created.length,
     embedded,
+    embeddedCount,
+    reusedCount,
     ...(eligible ? {} : { skipped: true }),
   };
 }
@@ -111,6 +228,8 @@ export async function rebuildAllChunks(options?: {
   chunks: number;
   skipped: number;
   purged: number;
+  embedded: number;
+  reused: number;
   errors: string[];
   cancelled: boolean;
 }> {
@@ -181,6 +300,8 @@ export async function rebuildAllChunks(options?: {
 
     let chunkCount = 0;
     let skipped = 0;
+    let embedded = 0;
+    let reused = 0;
     let cancelled = false;
     for (let i = 0; i < conversations.length; i++) {
       // Honour a graceful stop BEFORE any further chunk-building or embedding
@@ -195,6 +316,10 @@ export async function rebuildAllChunks(options?: {
         });
         chunkCount += result.chunksCreated;
         progress.chunksCreated += result.chunksCreated;
+        embedded += result.embeddedCount;
+        reused += result.reusedCount;
+        progress.embedded += result.embeddedCount;
+        progress.reused += result.reusedCount;
         if (result.skipped) {
           skipped += 1;
           progress.skipped += 1;
@@ -224,6 +349,8 @@ export async function rebuildAllChunks(options?: {
       chunks: chunkCount,
       skipped,
       purged,
+      embedded,
+      reused,
       errors,
       cancelled,
     };

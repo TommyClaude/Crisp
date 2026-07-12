@@ -108,6 +108,8 @@ interface RebuildProgress {
   total: number;
   done: number;
   chunksCreated: number;
+  embedded: number;
+  reused: number;
   skipped: number;
   purged: number;
   cancelRequested: boolean;
@@ -119,6 +121,8 @@ const REBUILD_IDLE: RebuildProgress = {
   total: 0,
   done: 0,
   chunksCreated: 0,
+  embedded: 0,
+  reused: 0,
   skipped: 0,
   purged: 0,
   cancelRequested: false,
@@ -127,9 +131,13 @@ const REBUILD_IDLE: RebuildProgress = {
 
 const REBUILD_POLL_INTERVAL_MS = 2500;
 
-/** "Rebuild finished — N chunks from M conversations (X skipped, Y purged)". */
+/** "Rebuild finished — N chunks from M conversations (embedded X, reused Y, ...)". */
 function rebuildSummary(p: RebuildProgress): string {
   const extras: string[] = [];
+  // Only surface the embed/reuse split when embeddings actually ran.
+  if (p.embedded > 0 || p.reused > 0) {
+    extras.push(`embedded ${p.embedded}, reused ${p.reused}`);
+  }
   if (p.skipped > 0) extras.push(`${p.skipped} skipped`);
   if (p.purged > 0) extras.push(`${p.purged} purged`);
   const suffix = extras.length > 0 ? ` (${extras.join(", ")})` : "";

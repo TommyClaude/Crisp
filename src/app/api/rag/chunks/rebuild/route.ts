@@ -93,6 +93,7 @@ export async function POST(request: NextRequest) {
       console.log(
         `Chunk rebuild ${result.cancelled ? "cancelled" : "finished"}: ` +
           `${result.chunks} chunks from ${result.conversations} conversations` +
+          `, embedded ${result.embedded}, reused ${result.reused}` +
           (result.skipped > 0
             ? `, ${result.skipped} skipped as unchunkable`
             : "") +

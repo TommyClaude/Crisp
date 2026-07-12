@@ -23,6 +23,13 @@ export interface ProductDef {
   patterns: RegExp[];
   /** Platforms (WooCommerce/WordPress) only win when no plugin matched. */
   isPlatform: boolean;
+  /**
+   * The backing Plugin row's id, when this definition came from the Plugin
+   * table. Undefined for the hardcoded {@link DEFAULT_PRODUCT_DEFS} fallback
+   * and for built-in platforms with no plugin — a chunk detected as one of
+   * those keeps its `product` string but a NULL `pluginId`.
+   */
+  pluginId?: string;
 }
 
 /** Escape a keyword and turn it into a word-boundary, space-tolerant regex. */
@@ -37,9 +44,9 @@ export function keywordPattern(keyword: string): RegExp {
 
 const PLATFORM_NAMES = new Set(["WooCommerce", "WordPress"]);
 
-/** Build detection definitions from Plugin rows (name + keywords). */
+/** Build detection definitions from Plugin rows (id + name + keywords). */
 export function defsFromPlugins(
-  plugins: Array<{ name: string; detectionKeywords: string[] }>
+  plugins: Array<{ id: string; name: string; detectionKeywords: string[] }>
 ): ProductDef[] {
   return plugins.map((plugin) => ({
     name: plugin.name,
@@ -50,6 +57,7 @@ export function defsFromPlugins(
         .map(keywordPattern),
     ],
     isPlatform: PLATFORM_NAMES.has(plugin.name),
+    pluginId: plugin.id,
   }));
 }
 
@@ -125,4 +133,21 @@ export function detectPrimaryProduct(
     }
   }
   return best;
+}
+
+/**
+ * Resolve a detected `product` string to its backing Plugin id, by definition
+ * identity: the {@link ProductDef} carries the `pluginId` it was built from
+ * (see {@link defsFromPlugins}), so this is a lookup over the already-loaded
+ * defs, not a fresh DB query per chunk. Returns null when the product maps to
+ * no plugin — a built-in platform (WooCommerce/WordPress) or the hardcoded
+ * fallback defs — so those chunks keep their product string but a NULL
+ * pluginId.
+ */
+export function pluginIdForProduct(
+  product: string | null,
+  defs: ProductDef[] = DEFAULT_PRODUCT_DEFS
+): string | null {
+  if (!product) return null;
+  return defs.find((d) => d.name === product)?.pluginId ?? null;
 }

@@ -24,6 +24,10 @@ export interface RebuildProgress {
   /** Conversations processed so far (advances one per conversation). */
   done: number;
   chunksCreated: number;
+  /** Chunks embedded via the OpenAI API this run (new/changed text only). */
+  embedded: number;
+  /** Chunks whose unchanged text let their existing embedding be reused. */
+  reused: number;
   skipped: number;
   purged: number;
   cancelRequested: boolean;
@@ -36,6 +40,8 @@ function freshProgress(): RebuildProgress {
     total: 0,
     done: 0,
     chunksCreated: 0,
+    embedded: 0,
+    reused: 0,
     skipped: 0,
     purged: 0,
     cancelRequested: false,

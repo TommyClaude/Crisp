@@ -71,7 +71,14 @@ export function toContextSummary(result: RagSearchResult): ContextChunkSummary {
   };
 }
 
-/** Retrieve context for a thread: plugin-scoped first, widen if too thin. */
+/**
+ * Retrieve context for a thread: plugin-scoped first, and when that is too
+ * thin (<3 hits) widen to the plugin's OWN BRAND only — never to a fully
+ * unscoped search. Grounding must stay within the brand so a topic for one
+ * plugin can't be answered from a different brand's chats or docs. If the
+ * brand-scoped widening finds nothing extra, the thin plugin-scoped result is
+ * the honest answer.
+ */
 export async function retrieveContext(
   query: string,
   pluginId: string
@@ -79,7 +86,17 @@ export async function retrieveContext(
   const scoped = await ragSearch(query, { limit: CONTEXT_LIMIT, pluginId });
   if (scoped.results.length >= 3) return scoped.results;
 
-  const wide = await ragSearch(query, { limit: CONTEXT_LIMIT });
+  // Resolve the plugin's brand once so the widening pass stays in-brand.
+  const plugin = await prisma.plugin.findUnique({
+    where: { id: pluginId },
+    select: { brandId: true },
+  });
+  if (!plugin?.brandId) return scoped.results;
+
+  const wide = await ragSearch(query, {
+    limit: CONTEXT_LIMIT,
+    brandId: plugin.brandId,
+  });
   const seen = new Set(scoped.results.map((r) => r.chunkId));
   return [
     ...scoped.results,
