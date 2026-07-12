@@ -127,6 +127,15 @@ export interface ThreadUpsertResult {
   outcome: ThreadUpsertOutcome;
   /** The affected row id (existing or newly created); null for "skipped". */
   threadId: string | null;
+  /**
+   * Whether the LAST post on the thread is the customer's (the ball is with
+   * the team) as of this upsert — true for "flagged" and a customer-last
+   * "created" row, false for "support_recorded", a support-last "created"
+   * row, and "skipped". Additive field so callers (the mail listener) can
+   * tell a brand-new customer question apart from a support-last topic the
+   * mail path merely tracked into its waiting state, without re-querying.
+   */
+  customerLast: boolean;
 }
 
 /**
@@ -197,10 +206,14 @@ async function applyThreadFromFetch(opts: {
           wpResolved: fetched.resolved,
         },
       });
-      return { outcome: "support_recorded", threadId: opts.existing.id };
+      return {
+        outcome: "support_recorded",
+        threadId: opts.existing.id,
+        customerLast: false,
+      };
     }
     if (!opts.createOnSupportLast) {
-      return { outcome: "skipped", threadId: null };
+      return { outcome: "skipped", threadId: null, customerLast: false };
     }
     // Untracked topic whose team answered last (mail path): create the row in
     // its waiting/promise state so it can still surface in "Needs resolved".
@@ -223,7 +236,7 @@ async function applyThreadFromFetch(opts: {
         wpResolved: fetched.resolved,
       },
     });
-    return { outcome: "created", threadId: created.id };
+    return { outcome: "created", threadId: created.id, customerLast: false };
   }
 
   // Customer posted last — the ball is with the team.
@@ -240,7 +253,7 @@ async function applyThreadFromFetch(opts: {
         wpResolved: fetched.resolved,
       },
     });
-    return { outcome: "flagged", threadId: opts.existing.id };
+    return { outcome: "flagged", threadId: opts.existing.id, customerLast: true };
   }
   const created = await prisma.supportThread.create({
     data: {
@@ -262,7 +275,7 @@ async function applyThreadFromFetch(opts: {
       wpResolved: fetched.resolved,
     },
   });
-  return { outcome: "created", threadId: created.id };
+  return { outcome: "created", threadId: created.id, customerLast: true };
 }
 
 /**
@@ -487,6 +500,8 @@ export function isWatcherRunning(): boolean {
 export interface SingleTopicResult {
   outcome: ThreadUpsertOutcome | "fetch_failed";
   threadId: string | null;
+  /** See {@link ThreadUpsertResult.customerLast}; always false for "fetch_failed". */
+  customerLast: boolean;
 }
 
 /**
@@ -500,10 +515,14 @@ export interface SingleTopicResult {
  * no exact reply date — so, like the refresh pass, it never advances the
  * lastReplyAt feed dedupe watermark (see the HYBRID invariant). It creates the
  * row when the topic is untracked (new-topic notifications land here), including
- * the support-last case, and never drafts (cost control — the admin
- * regenerates). Idempotent: re-processing the same notification is a no-op
- * upsert, and it is safe to run concurrently with a full forum check (both are
- * idempotent upserts on the same rows).
+ * the support-last case. This function itself never drafts — the caller
+ * (mail-listener.ts) auto-drafts a freshly created CUSTOMER-LAST row (see
+ * {@link ThreadUpsertResult.customerLast}); everything else (a reply on an
+ * already-tracked topic, or a support-last topic merely recorded into its
+ * waiting state) is left for the manual Regenerate action. Idempotent:
+ * re-processing the same notification is a no-op upsert, and it is safe to run
+ * concurrently with a full forum check (both are idempotent upserts on the
+ * same rows).
  */
 export async function checkSingleTopic(
   pluginId: string,
@@ -521,10 +540,10 @@ export async function checkSingleTopic(
       `[wporg-mail] fetch failed ${canonical}:`,
       error instanceof Error ? error.message : error
     );
-    return { outcome: "fetch_failed", threadId: null };
+    return { outcome: "fetch_failed", threadId: null, customerLast: false };
   }
   if (!fetched || fetched.posts.length === 0) {
-    return { outcome: "fetch_failed", threadId: null };
+    return { outcome: "fetch_failed", threadId: null, customerLast: false };
   }
 
   // Match an existing row by canonical guid/url or any slug-anchored legacy

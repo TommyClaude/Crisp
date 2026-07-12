@@ -8,6 +8,7 @@ import {
 import { getEnv, mailListenerConfigured } from "@/env";
 import { prisma } from "@/lib/db";
 import { fetchHtml } from "@/lib/docs/crawler";
+import { generateSuggestionForThread } from "@/lib/suggest/suggester";
 import { extractPluginSlug } from "@/lib/wporg/forum-crawler";
 import { extractEmailBodies, parseNotificationEmail } from "@/lib/wporg/mail-parse";
 import { checkSingleTopic } from "@/lib/wporg/watcher";
@@ -79,6 +80,8 @@ interface MailListenerState {
   lastEventAt: string | null;
   /** Count of wp.org notifications turned into a topic check. */
   eventsProcessed: number;
+  /** Count of new customer-last topics auto-drafted (see {@link processMessage}). */
+  drafted: number;
   connectedAt: string | null;
   // ── Internal machinery ──
   client: ImapFlow | null;
@@ -101,6 +104,7 @@ function freshState(): MailListenerState {
     lastError: null,
     lastEventAt: null,
     eventsProcessed: 0,
+    drafted: 0,
     connectedAt: null,
     client: null,
     stopping: false,
@@ -128,6 +132,7 @@ export interface MailListenerStatusView {
   lastError: string | null;
   lastEventAt: string | null;
   eventsProcessed: number;
+  drafted: number;
   connectedAt: string | null;
 }
 
@@ -144,6 +149,7 @@ export function getMailListenerStatus(): MailListenerStatusView {
     lastError: s.lastError,
     lastEventAt: s.lastEventAt,
     eventsProcessed: s.eventsProcessed,
+    drafted: s.drafted,
     connectedAt: s.connectedAt,
   };
 }
@@ -272,6 +278,32 @@ async function processMessage(msg: FetchMessageObject): Promise<void> {
   state.eventsProcessed += 1;
   state.lastEventAt = new Date().toISOString();
   console.log(`[wporg-mail] ${parsed.topicUrl} → ${result.outcome}`);
+
+  // Auto-draft ONLY a freshly created CUSTOMER-LAST topic — a brand-new
+  // question where the ball is with the team. Never for "flagged" (a reply on
+  // an already-tracked topic: the manual whole-thread Regenerate is the
+  // intended tool there), "support_recorded", or a support-last "created" row
+  // (the mail path merely tracked it into its waiting state). Same cheap
+  // first-reply-only pass the feed watcher uses for its newly found topics —
+  // never the expensive whole-thread follow-up pass.
+  if (result.outcome === "created" && result.customerLast && result.threadId) {
+    try {
+      const suggestion = await generateSuggestionForThread(result.threadId);
+      if (suggestion.draftAnswer) {
+        state.drafted += 1;
+      }
+    } catch (error) {
+      // Failure-isolated exactly like the per-message handling around this
+      // call: log and move on. A draft failure (LLM down, no provider key,
+      // RAG error) must never crash the single-flight chain, trip a
+      // reconnect, flip listener status to "error", or block the UID cursor
+      // from advancing past this message.
+      console.error(
+        `[wporg-mail] auto-draft failed for ${parsed.topicUrl}:`,
+        error instanceof Error ? error.message : error
+      );
+    }
+  }
 }
 
 /**

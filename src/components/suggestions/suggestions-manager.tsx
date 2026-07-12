@@ -175,6 +175,7 @@ interface MailListenerStatusView {
   lastError: string | null;
   lastEventAt: string | null;
   eventsProcessed: number;
+  drafted: number;
   connectedAt: string | null;
   cursor: { lastUid: number; updatedAt: string } | null;
 }
@@ -895,7 +896,9 @@ function MailListenerLine({
   let label: string;
   switch (status.status) {
     case "listening":
-      label = `listening · ${status.eventsProcessed} event${status.eventsProcessed === 1 ? "" : "s"}`;
+      label =
+        `listening · ${status.eventsProcessed} event${status.eventsProcessed === 1 ? "" : "s"}` +
+        ` · ${status.drafted} drafted`;
       break;
     case "connecting":
       label = "connecting…";

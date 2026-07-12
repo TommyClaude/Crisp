@@ -11,6 +11,12 @@ export const EMBEDDING_DIMENSIONS = 1536;
 const OPENAI_EMBEDDINGS_URL = "https://api.openai.com/v1/embeddings";
 const BATCH_SIZE = 64;
 const MAX_RETRIES = 4;
+// Per-attempt cap so a HUNG connection (no error, no response) can't block a
+// caller forever — this runs inside the mail listener's single-flight chain,
+// where an unbounded hang would silently stall all mail processing. An abort
+// surfaces as a fetch rejection and goes through the normal retry path below.
+// Embeddings normally answer in well under a second; 60s is generous.
+const FETCH_TIMEOUT_MS = 60_000;
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -20,6 +26,8 @@ async function requestEmbeddings(inputs: string[]): Promise<number[][]> {
   const env = getEnv();
   for (let attempt = 0; ; attempt++) {
     let response: Response | null = null;
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
     try {
       response = await fetch(OPENAI_EMBEDDINGS_URL, {
         method: "POST",
@@ -33,6 +41,7 @@ async function requestEmbeddings(inputs: string[]): Promise<number[][]> {
           dimensions: EMBEDDING_DIMENSIONS,
         }),
         cache: "no-store",
+        signal: controller.signal,
       });
     } catch (error) {
       if (attempt >= MAX_RETRIES) {
@@ -40,6 +49,8 @@ async function requestEmbeddings(inputs: string[]): Promise<number[][]> {
       }
       await sleep(2000 * 2 ** attempt);
       continue;
+    } finally {
+      clearTimeout(timer);
     }
 
     if (response.ok) {

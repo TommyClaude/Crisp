@@ -150,9 +150,9 @@ The listener starts automatically from Next's `instrumentation.ts` when configur
 2. **Subscribe on wp.org** — for each plugin's support forum, click **Subscribe** while logged in as an account whose notification emails are forwarded to the dedicated inbox (in Gmail, set up a filter/forward from your wp.org account to `yayassist@gmail.com`). wp.org then emails that account on every new topic/reply.
 3. **Configure** — set `WPORG_MAIL_ENABLED=true`, `WPORG_MAIL_USER`, `WPORG_MAIL_PASSWORD` (host/port default to Gmail). The listener refuses to start unless all three are present. Changing these values requires a server restart to take effect.
 
-**Read-only guarantee** — the inbox is opened strictly `{ readOnly: true }`: the listener never marks messages seen, never moves or deletes them. Progress is tracked purely by message **UID** in the `wporg_mail_cursor` `AppMeta` row (never by `\Seen` flags), so the mailbox is left byte-for-byte untouched. Only mail whose envelope `From` address ends in `@wordpress.org` is acted on; everything else just advances the cursor. The single-topic check uses the same code path as the feed's resurface pass but never advances the feed dedupe watermark (it has no exact date), and never drafts (cost control — regenerate manually).
+**Read-only guarantee** — the inbox is opened strictly `{ readOnly: true }`: the listener never marks messages seen, never moves or deletes them. Progress is tracked purely by message **UID** in the `wporg_mail_cursor` `AppMeta` row (never by `\Seen` flags), so the mailbox is left byte-for-byte untouched. Only mail whose envelope `From` address ends in `@wordpress.org` is acted on; everything else just advances the cursor. The single-topic check uses the same code path as the feed's resurface pass but never advances the feed dedupe watermark (it has no exact date). A brand-new customer topic ingested this way (the ball is with the team) is auto-drafted immediately — the same cheap first-reply-only pass the feed watcher uses for its newly found topics, never the expensive whole-thread follow-up pass. A reply on an already-tracked topic, or a support-last topic the mail path merely tracks into its waiting state, still leaves drafting to the manual **Regenerate** action.
 
-A muted status line on `/suggestions` shows the listener's health (`Mail listener: listening · N events` / `disabled` / `error: …`).
+A muted status line on `/suggestions` shows the listener's health (`Mail listener: listening · N events · M drafted` / `disabled` / `error: …`).
 
 ### Incremental sync
 
@@ -285,7 +285,7 @@ All routes require Basic auth (see Security). All bodies/queries are Zod-validat
 | `POST` | `/api/docs/sources/{id}/ingest` | Crawl + chunk + embed in the background (`202`, `409` while running). For `wporg_forum` sources this imports answered forum topics as Q&A transcripts |
 | `POST` | `/api/wporg/check` | Start a background check of the wp.org forum feeds of all plugins with a `wpOrgSlug`; stores new topics (skipping ones older than `WPORG_TOPIC_MAX_AGE_DAYS`) and drafts suggestions. Body `{withSuggestions?, pluginId?}`. `202` with initial progress, `409` if one is running |
 | `GET` | `/api/wporg/check/status` | Live forum-check progress + the 5 most recent `ForumCheckLog` runs (with errors) |
-| `GET` | `/api/wporg/mail/status` | Email-push listener state (`status`, `lastError`, `lastEventAt`, `eventsProcessed`, `connectedAt`) + the persisted UID cursor |
+| `GET` | `/api/wporg/mail/status` | Email-push listener state (`status`, `lastError`, `lastEventAt`, `eventsProcessed`, `drafted`, `connectedAt`) + the persisted UID cursor |
 | `POST` | `/api/wporg/mail/restart` | Tear down + reconnect the listener's IMAP connection (recovers a wedged connection). Reuses loaded env — changing `WPORG_MAIL_*` still needs a server restart. `409` when disabled |
 | `GET` | `/api/wporg/threads` | Support topics + suggestions. Query: `status, pluginId, page, pageSize` |
 | `PATCH`/`DELETE` | `/api/wporg/threads/{id}` | Update review status (`reviewed`/`dismissed`/...) or delete |
