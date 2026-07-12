@@ -36,9 +36,10 @@ function yearMonthOf(date: Date): YearMonth {
 export interface GetArchiveCoverageOptions {
   /**
    * Scope everything (monthly counts, DB minimums, the detected-start
-   * lookup) to one Brand. Omit for the all-brands view (today's behaviour).
-   * No UI wires this yet — the brand selector is a separate package — this
-   * is just the query-layer plumbing for it, kept minimal on purpose.
+   * lookup) to one Brand. Omit for the all-brands view. Wired to the
+   * dashboard's ?brand= selector — each brand's coverage card queries with
+   * its own id (there is no merged multi-brand grid; merging would let one
+   * brand's data mask another brand's gap).
    */
   brandId?: string;
 }

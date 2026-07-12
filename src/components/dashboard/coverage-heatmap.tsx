@@ -70,9 +70,34 @@ export interface CoverageHeatmapProps {
   data: CoverageResult;
   /** Called with a month's first/last day (YYYY-MM-DD) when a cell is clicked. */
   onSelectMonth?: (start: string, end: string) => void;
+  /**
+   * The Brand.id `data` was fetched with (see getArchiveCoverage's brandId
+   * option) — used ONLY to read that brand's own entry out of
+   * data.detectedArchiveStart.brands for the "Archive starts ..." footer,
+   * instead of the all-brands minimum. Omit for merged/all-brands data (the
+   * legacy no-Brand-rows fallback), where the all-brands minimum IS the
+   * right thing to show.
+   */
+  brandId?: string;
+  /**
+   * Compact rendering for the all-brands stacked view (one card per brand):
+   * smaller cells, a plain brand-name header instead of "Archive coverage",
+   * and no legend / detect-archive-start chrome (that stays on the
+   * single-brand and merged views — running it once covers every brand
+   * anyway, so repeating the control on every card would be redundant).
+   */
+  compact?: boolean;
+  /** Header title — defaults to "Archive coverage"; compact instances pass the brand name. */
+  title?: string;
 }
 
-export function CoverageHeatmap({ data, onSelectMonth }: CoverageHeatmapProps) {
+export function CoverageHeatmap({
+  data,
+  onSelectMonth,
+  brandId,
+  compact = false,
+  title = "Archive coverage",
+}: CoverageHeatmapProps) {
   const router = useRouter();
   const [detecting, setDetecting] = React.useState(false);
 
@@ -85,21 +110,39 @@ export function CoverageHeatmap({ data, onSelectMonth }: CoverageHeatmapProps) {
   const currentYear = now.getUTCFullYear();
   const currentMonth = now.getUTCMonth() + 1;
 
+  // Scoped to `brandId` when given: that brand's own detected month (a
+  // negative-cache null entry counts as "not detected"). Otherwise the
+  // earliest across every brand that HAS been detected — matches how
+  // getArchiveCoverage itself resolves earliestKnownMonth, so this label
+  // never disagrees with the grid it sits under.
+  const detectedMonth = data.detectedArchiveStart
+    ? brandId
+      ? ((label) => (label ? parseMonthLabel(label) : null))(
+          data.detectedArchiveStart.brands[brandId] ?? null
+        )
+      : earliestDetectedMonth(data.detectedArchiveStart.brands)
+    : null;
+
+  // A grid renders whenever there's SOMETHING to show: real conversations, or
+  // a detected start with none synced yet (a legitimate "here's the gap, all
+  // of it" visualization) — only truly nothing-known collapses to the
+  // one-line empty state below.
   const grid = React.useMemo(() => {
-    if (data.total <= 0) return null;
+    if (data.total <= 0 && !detectedMonth) return null;
     return buildCoverageGrid(data.monthly, {
       start: data.earliestKnownMonth ?? { year: currentYear, month: currentMonth },
       end: { year: currentYear, month: currentMonth },
     });
-  }, [data.monthly, data.total, data.earliestKnownMonth, currentYear, currentMonth]);
+  }, [
+    data.monthly,
+    data.total,
+    data.earliestKnownMonth,
+    detectedMonth,
+    currentYear,
+    currentMonth,
+  ]);
   const rows = grid?.rows ?? [];
   const maxCount = grid?.maxCount ?? 0;
-
-  // The earliest month any brand's "Detect archive start" probe has found —
-  // null when it's never been run (or, degenerately, ran and found nothing).
-  const detectedMonth = data.detectedArchiveStart
-    ? earliestDetectedMonth(data.detectedArchiveStart.brands)
-    : null;
 
   // Dashed "outside the archive" cells sit on BOTH ends of the grid: before
   // the (possibly 15-year-clamped) span start, and after the current month
@@ -147,26 +190,51 @@ export function CoverageHeatmap({ data, onSelectMonth }: CoverageHeatmapProps) {
     }
   }, [router]);
 
+  const cellSize = compact ? "size-5" : "size-7";
+  const yearColWidth = compact ? "2rem" : "2.5rem";
+  const cellColWidth = compact ? "1.35rem" : "1.75rem";
+  const gridTemplateColumns = `${yearColWidth} repeat(12, ${cellColWidth})`;
+
   return (
     <Card>
-      <CardHeader>
-        <CardTitle className="flex items-center gap-2">
-          <CalendarRange className="text-muted-foreground size-4" />
-          Archive coverage
-          <HelpTip subject="archive coverage">
-            Each cell buckets conversations by their <strong>last activity</strong>{" "}
-            date. A darker cell means more conversations that month; an empty
-            month sitting between active months usually means that period was
-            never synced. Click a month to prefill the range sync below and
-            backfill exactly that gap.
-          </HelpTip>
+      <CardHeader className={compact ? "gap-1" : undefined}>
+        <CardTitle
+          className={
+            compact
+              ? "flex items-center justify-between text-sm font-medium"
+              : "flex items-center gap-2"
+          }
+        >
+          {compact ? (
+            <>
+              <span>{title}</span>
+              <span className="text-muted-foreground text-xs font-normal tabular-nums">
+                {numberFormat.format(data.total)} conversation
+                {data.total === 1 ? "" : "s"}
+              </span>
+            </>
+          ) : (
+            <>
+              <CalendarRange className="text-muted-foreground size-4" />
+              {title}
+              <HelpTip subject="archive coverage">
+                Each cell buckets conversations by their <strong>last activity</strong>{" "}
+                date. A darker cell means more conversations that month; an empty
+                month sitting between active months usually means that period was
+                never synced. Click a month to prefill the range sync below and
+                backfill exactly that gap.
+              </HelpTip>
+            </>
+          )}
         </CardTitle>
-        <CardDescription>
-          {data.total > 0
-            ? `${numberFormat.format(data.total)} conversations by month — spot the gaps, then click a month to refill it.`
-            : "No conversations archived yet."}
-        </CardDescription>
-        {rows.length > 0 && (
+        {!compact && (
+          <CardDescription>
+            {data.total > 0
+              ? `${numberFormat.format(data.total)} conversations by month — spot the gaps, then click a month to refill it.`
+              : "No conversations archived yet."}
+          </CardDescription>
+        )}
+        {!compact && rows.length > 0 && (
           <CardAction>
             <div className="text-muted-foreground flex items-center gap-1.5 text-xs">
               <span>Less</span>
@@ -181,27 +249,31 @@ export function CoverageHeatmap({ data, onSelectMonth }: CoverageHeatmapProps) {
           </CardAction>
         )}
       </CardHeader>
-      <CardContent>
+      <CardContent className={compact ? "pt-0" : undefined}>
         {rows.length === 0 ? (
-          <p className="text-muted-foreground py-6 text-center text-sm">
-            No dated conversations yet. Run a sync to populate the archive, then
-            this heatmap shows which months are covered.
+          <p
+            className={cn(
+              "text-muted-foreground text-sm",
+              compact ? "py-1 text-xs" : "py-6 text-center"
+            )}
+          >
+            {compact
+              ? "No conversations synced yet."
+              : "No dated conversations yet. Run a sync to populate the archive, then this heatmap shows which months are covered."}
           </p>
         ) : (
           <div className="overflow-x-auto">
             <div className="inline-block min-w-max">
               {/* Month header row */}
-              <div
-                className="grid gap-1"
-                style={{
-                  gridTemplateColumns: "2.5rem repeat(12, 1.75rem)",
-                }}
-              >
+              <div className="grid gap-1" style={{ gridTemplateColumns }}>
                 <span aria-hidden />
                 {MONTHS_SHORT.map((label) => (
                   <span
                     key={label}
-                    className="text-muted-foreground text-center text-[10px] leading-6"
+                    className={cn(
+                      "text-muted-foreground text-center leading-6",
+                      compact ? "text-[9px]" : "text-[10px]"
+                    )}
                   >
                     {label}
                   </span>
@@ -212,9 +284,7 @@ export function CoverageHeatmap({ data, onSelectMonth }: CoverageHeatmapProps) {
                 <div
                   key={row.year}
                   className="grid gap-1 pb-1"
-                  style={{
-                    gridTemplateColumns: "2.5rem repeat(12, 1.75rem)",
-                  }}
+                  style={{ gridTemplateColumns }}
                 >
                   <span className="text-muted-foreground pr-1 text-right text-xs leading-7 tabular-nums">
                     {row.year}
@@ -229,7 +299,10 @@ export function CoverageHeatmap({ data, onSelectMonth }: CoverageHeatmapProps) {
                         <span
                           key={cell.month}
                           aria-hidden
-                          className="border-border/40 size-7 rounded-md border border-dashed"
+                          className={cn(
+                            "border-border/40 rounded-md border border-dashed",
+                            cellSize
+                          )}
                         />
                       );
                     }
@@ -244,7 +317,8 @@ export function CoverageHeatmap({ data, onSelectMonth }: CoverageHeatmapProps) {
                           onSelectMonth?.(start, end);
                         }}
                         className={cn(
-                          "focus-visible:ring-ring/60 size-7 rounded-md transition-[outline,box-shadow] outline-none hover:ring-2 hover:ring-blue-500/50 focus-visible:ring-2",
+                          "focus-visible:ring-ring/60 rounded-md transition-[outline,box-shadow] outline-none hover:ring-2 hover:ring-blue-500/50 focus-visible:ring-2",
+                          cellSize,
                           CELL_STYLE[level]
                         )}
                       />
@@ -261,25 +335,38 @@ export function CoverageHeatmap({ data, onSelectMonth }: CoverageHeatmapProps) {
             Detection also runs automatically on every full sync (see
             runSync's auto-detect hook) — this button is the manual trigger /
             retry, so there's no button once a result is stored, only a cheap
-            re-detect link. */}
+            re-detect link. Compact cards (the all-brands stacked view) skip
+            the interactive part entirely: detecting always probes EVERY
+            brand (see /api/sync/crisp/detect-start), so repeating the button
+            on each card would just be three ways to trigger the same action
+            — the merged/single-brand view keeps the one real control. */}
         {rows.length > 0 &&
           (detectedMonth ? (
-            <p className="text-muted-foreground mt-3 text-xs">
-              Archive starts{" "}
-              <span className="text-foreground font-medium">
-                {formatMonthYearLabel(detectedMonth)}
-              </span>{" "}
-              (detected).{" "}
-              <button
-                type="button"
-                onClick={handleDetectArchiveStart}
-                disabled={detecting}
-                className="hover:text-foreground underline underline-offset-2 disabled:opacity-50"
-              >
-                {detecting ? "Re-detecting…" : "Re-detect"}
-              </button>
-            </p>
-          ) : (
+            compact ? (
+              <p className="text-muted-foreground mt-2 text-xs">
+                Archive starts{" "}
+                <span className="text-foreground font-medium">
+                  {formatMonthYearLabel(detectedMonth)}
+                </span>
+              </p>
+            ) : (
+              <p className="text-muted-foreground mt-3 text-xs">
+                Archive starts{" "}
+                <span className="text-foreground font-medium">
+                  {formatMonthYearLabel(detectedMonth)}
+                </span>{" "}
+                (detected).{" "}
+                <button
+                  type="button"
+                  onClick={handleDetectArchiveStart}
+                  disabled={detecting}
+                  className="hover:text-foreground underline underline-offset-2 disabled:opacity-50"
+                >
+                  {detecting ? "Re-detecting…" : "Re-detect"}
+                </button>
+              </p>
+            )
+          ) : compact ? null : (
             <div className="mt-3 flex flex-wrap items-center gap-x-2 gap-y-1">
               <p className="text-muted-foreground text-xs">
                 Grid spans the data synced so far — the real archive may start
@@ -309,15 +396,22 @@ export function CoverageHeatmap({ data, onSelectMonth }: CoverageHeatmapProps) {
           ))}
 
         {data.unknownCount > 0 && (
-          <p className="text-muted-foreground mt-4 flex items-center gap-1 text-xs">
+          <p
+            className={cn(
+              "text-muted-foreground flex items-center gap-1 text-xs",
+              compact ? "mt-2" : "mt-4"
+            )}
+          >
             {numberFormat.format(data.unknownCount)} conversation
             {data.unknownCount === 1 ? "" : "s"} with unknown dates (no last-activity
             timestamp) — not shown above.
-            <HelpTip subject="unknown dates">
-              These conversations have no last-activity timestamp from Crisp, so
-              they can&apos;t be placed on the calendar. They&apos;re still in the
-              archive and searchable.
-            </HelpTip>
+            {!compact && (
+              <HelpTip subject="unknown dates">
+                These conversations have no last-activity timestamp from Crisp, so
+                they can&apos;t be placed on the calendar. They&apos;re still in the
+                archive and searchable.
+              </HelpTip>
+            )}
           </p>
         )}
       </CardContent>

@@ -300,9 +300,15 @@ model SyncLog {
   messagesSynced      Int       @default(0)
   failedSessions      String[]  @default([])
   error               String?
+  // Set only on brand-scoped range runs (see runRangeSync's brandId option);
+  // full/incremental runs always cover every brand and leave this null. A
+  // plain column with no relation on purpose — SyncLog is history and must
+  // survive the brand being deleted later.
+  brandId             String?
 
   @@index([status])
   @@index([startedAt])
+  @@index([brandId])
 }
 
 // A run of the wp.org forum watcher (the "Check forums now" flow, or cron

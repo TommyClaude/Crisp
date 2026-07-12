@@ -7,8 +7,12 @@ import {
   MessagesSquare,
 } from "lucide-react";
 
+import { BrandSelector } from "@/components/dashboard/brand-selector";
 import { CrispTabs } from "@/components/crisp/crisp-tabs";
-import { CrispSyncDashboard } from "@/components/dashboard/crisp-sync-dashboard";
+import {
+  CrispSyncDashboard,
+  type CoverageView,
+} from "@/components/dashboard/crisp-sync-dashboard";
 import type { SerializedSyncLog } from "@/components/dashboard/sync-log-table";
 import {
   Card,
@@ -17,6 +21,7 @@ import {
   CardHeader,
   CardTitle,
 } from "@/components/ui/card";
+import { prisma } from "@/lib/db";
 import { getDashboardStats } from "@/lib/conversations";
 import { getArchiveCoverage } from "@/lib/sync/coverage-query";
 import { getResumePage } from "@/lib/sync/sync-service";
@@ -28,6 +33,13 @@ export const metadata: Metadata = {
 };
 
 const numberFormat = new Intl.NumberFormat("en-US");
+
+type SearchParams = Promise<Record<string, string | string[] | undefined>>;
+
+function first(value: string | string[] | undefined): string | undefined {
+  const v = Array.isArray(value) ? value[0] : value;
+  return v || undefined;
+}
 
 function serializeSyncLog(log: SyncLog): SerializedSyncLog {
   return {
@@ -42,6 +54,7 @@ function serializeSyncLog(log: SyncLog): SerializedSyncLog {
     messagesSynced: log.messagesSynced,
     failedSessions: log.failedSessions,
     error: log.error,
+    brandId: log.brandId,
   };
 }
 
@@ -52,13 +65,64 @@ interface StatCard {
   icon: React.ComponentType<{ className?: string }>;
 }
 
-export default async function DashboardPage() {
-  const [stats, resumePage, coverage] = await Promise.all([
-    getDashboardStats(),
-    getResumePage(),
-    getArchiveCoverage(),
+/**
+ * Build the Archive coverage section's data for the given selection — see
+ * CoverageView's doc comment for why this is never a single grid merged
+ * across brands. Runs 1 or `brands.length` getArchiveCoverage queries
+ * (2-3 in practice), all in parallel.
+ */
+async function buildCoverageView(
+  brands: Array<{ id: string; name: string }>,
+  selectedBrandId: string | undefined
+): Promise<CoverageView> {
+  if (selectedBrandId) {
+    const brand = brands.find((b) => b.id === selectedBrandId)!;
+    const data = await getArchiveCoverage({ brandId: selectedBrandId });
+    return { mode: "single", brandId: brand.id, brandName: brand.name, data };
+  }
+  if (brands.length > 0) {
+    const perBrand = await Promise.all(
+      brands.map(async (brand) => ({
+        brandId: brand.id,
+        brandName: brand.name,
+        data: await getArchiveCoverage({ brandId: brand.id }),
+      }))
+    );
+    return { mode: "stacked", brands: perBrand };
+  }
+  // Legacy env-only fallback: no Brand rows configured, so there is nothing
+  // to scope by — the one merged grid is the correct (and only) view.
+  const data = await getArchiveCoverage();
+  return { mode: "merged", data };
+}
+
+export default async function DashboardPage({
+  searchParams,
+}: {
+  searchParams: SearchParams;
+}) {
+  const [sp, brands] = await Promise.all([
+    searchParams,
+    prisma.brand.findMany({
+      select: { id: true, name: true },
+      orderBy: { name: "asc" },
+    }),
   ]);
 
+  const brandParam = first(sp.brand);
+  const selectedBrandId = brands.some((b) => b.id === brandParam)
+    ? brandParam
+    : undefined;
+
+  const [stats, resumePage, coverageView] = await Promise.all([
+    getDashboardStats({ brandId: selectedBrandId }),
+    getResumePage(),
+    buildCoverageView(brands, selectedBrandId),
+  ]);
+
+  // Run-centric sync progress/logs are deliberately global (not brand-scoped)
+  // — a SyncLog row describes a JOB, and full/incremental runs always cover
+  // every brand regardless of which brand is selected in the UI right now.
   const lastSync = stats.lastSync
     ? {
         finishedAt: stats.lastSync.finishedAt?.toISOString() ?? null,
@@ -112,7 +176,12 @@ export default async function DashboardPage() {
             knowledge sources behind answer suggestions.
           </p>
         </div>
-        <CrispTabs />
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <CrispTabs />
+          {brands.length > 0 && (
+            <BrandSelector brands={brands} selectedBrandId={selectedBrandId} />
+          )}
+        </div>
       </header>
 
       <section
@@ -137,8 +206,14 @@ export default async function DashboardPage() {
         ))}
       </section>
 
+      {/* Remounted on brand change (key) so no per-brand click state (the
+          heatmap's month-click prefill) survives a brand switch — see
+          CrispSyncDashboard's doc comment. */}
       <CrispSyncDashboard
-        coverage={coverage}
+        key={selectedBrandId ?? "all"}
+        coverageView={coverageView}
+        brands={brands}
+        selectedBrandId={selectedBrandId}
         lastSync={lastSync}
         recentLogs={recentLogs}
         resumePage={resumePage}

@@ -336,6 +336,17 @@ interface RunSyncOptions {
    */
   dateStart?: Date;
   dateEnd?: Date;
+  /**
+   * Scope the run to ONE brand instead of every configured target. Only
+   * meaningful for kind "range" — full/incremental runs always cover every
+   * brand and must never set this (callers enforce that; see runFullSync /
+   * runIncrementalSync, whose public options have no brandId at all). An
+   * unknown brandId (no matching Brand row) fails the run with a clear error,
+   * same as the "nothing to sync" failure below — both surface as a `failed`
+   * SyncLog rather than a thrown rejection, so every attempted run leaves a
+   * history row.
+   */
+  brandId?: string;
 }
 
 /**
@@ -368,6 +379,7 @@ async function runSync(options: RunSyncOptions): Promise<SyncRunResult> {
       kind: options.kind,
       status: "running",
       pageFrom: options.startPage ?? 1,
+      brandId: options.brandId ?? null,
     },
   });
   // Range window: both bounds or neither (callers guarantee this).
@@ -388,7 +400,22 @@ async function runSync(options: RunSyncOptions): Promise<SyncRunResult> {
   let rangeStoppedNote: string | undefined;
 
   try {
-    const targets = await getSyncTargets();
+    const allTargets = await getSyncTargets();
+    // Brand-scoped range sync: narrow the walk to the one requested brand.
+    // Full/incremental never set brandId (see the RunSyncOptions doc comment),
+    // so this filter is a no-op for them. An id that matches no configured
+    // Brand fails the run with a clear message rather than silently walking
+    // every brand — caught below like any other failure, so it still leaves
+    // a `failed` SyncLog (with the requested brandId already on the row) for
+    // the owner to see, instead of a bare rejected promise.
+    const targets = options.brandId
+      ? allTargets.filter((target) => target.brandId === options.brandId)
+      : allTargets;
+    if (options.brandId && targets.length === 0) {
+      throw new Error(
+        `Unknown brand: ${options.brandId} — no configured Brand has this id.`
+      );
+    }
     // Remember which website a failed session belongs to for the retry pass,
     // and reuse one client per brand so each brand's requests queue and rate
     // limit independently.
@@ -721,17 +748,25 @@ export function runFullSync(options?: { startPage?: number }): Promise<SyncRunRe
  * guard in {@link runSync}). Lets the owner refill a specific gap the coverage
  * heatmap surfaced without spending quota on a full backfill. The window is
  * inclusive and interpreted exactly as passed (callers build a UTC day window).
+ *
+ * `brandId`, when given, scopes the walk to that one brand instead of every
+ * configured target and is written onto the resulting SyncLog row (see
+ * runSync's brandId handling) — an unknown id fails the run with a clear
+ * error. Full/incremental syncs have no such option; only a range sync can be
+ * scoped to one brand.
  */
 export function runRangeSync(options: {
   dateStart: Date;
   dateEnd: Date;
   startPage?: number;
+  brandId?: string;
 }): Promise<SyncRunResult> {
   return runSync({
     kind: "range",
     dateStart: options.dateStart,
     dateEnd: options.dateEnd,
     startPage: options.startPage,
+    brandId: options.brandId,
   });
 }
 

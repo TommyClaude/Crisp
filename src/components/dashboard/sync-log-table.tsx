@@ -26,6 +26,8 @@ export interface SerializedSyncLog {
   messagesSynced: number;
   failedSessions: string[];
   error: string | null;
+  /** Set only on brand-scoped range runs (see runRangeSync's brandId option); null otherwise. */
+  brandId: string | null;
 }
 
 const STATUS_STYLES: Record<string, string> = {
@@ -77,7 +79,23 @@ function formatPages(pageFrom: number | null, pageTo: number | null): string {
 
 const numberFormat = new Intl.NumberFormat("en-US");
 
-export function SyncLogTable({ logs }: { logs: SerializedSyncLog[] }) {
+/** brandId -> brand name for a range-run's badge; null (all brands) or an id no longer in `brands` (deleted since) get their own labels. */
+function brandBadgeLabel(
+  brandId: string | null,
+  brands: Array<{ id: string; name: string }>
+): string {
+  if (brandId === null) return "All brands";
+  return brands.find((b) => b.id === brandId)?.name ?? "removed brand";
+}
+
+export function SyncLogTable({
+  logs,
+  brands,
+}: {
+  logs: SerializedSyncLog[];
+  /** Every configured brand, to resolve a range run's brandId to a name (see brandBadgeLabel). */
+  brands: Array<{ id: string; name: string }>;
+}) {
   if (logs.length === 0) {
     return (
       <p className="text-muted-foreground py-8 text-center text-sm">
@@ -103,7 +121,19 @@ export function SyncLogTable({ logs }: { logs: SerializedSyncLog[] }) {
       <TableBody>
         {logs.map((log) => (
           <TableRow key={log.id}>
-            <TableCell className="font-medium capitalize">{log.kind}</TableCell>
+            <TableCell className="font-medium">
+              <div className="flex items-center gap-1.5">
+                <span className="capitalize">{log.kind}</span>
+                {log.kind === "range" && (
+                  <Badge
+                    variant="outline"
+                    className="text-muted-foreground px-1.5 py-0 text-[10px] font-normal"
+                  >
+                    {brandBadgeLabel(log.brandId, brands)}
+                  </Badge>
+                )}
+              </div>
+            </TableCell>
             <TableCell>
               <StatusBadge status={log.status} />
             </TableCell>

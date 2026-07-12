@@ -18,21 +18,28 @@ const bodySchema = z
     // start<=end cross-field checks live in validateRange (unit-tested).
     dateStart: isoDay.optional(),
     dateEnd: isoDay.optional(),
+    // Optional brand scope — only meaningful together with a date range (see
+    // the range-required check below); full/incremental always cover every
+    // brand.
+    brandId: z.string().min(1).optional(),
   })
   .default({ mode: "full" });
 
 /**
  * POST /api/sync/crisp/start
- * Body: { mode?, startPage?, dateStart?, dateEnd? } (dates = YYYY-MM-DD;
- * startPage is only valid without a date range — range page numbers index
- * Crisp's filtered list, not the full archive, so the combination is rejected
- * rather than silently misinterpreted)
+ * Body: { mode?, startPage?, dateStart?, dateEnd?, brandId? } (dates =
+ * YYYY-MM-DD; startPage is only valid without a date range — range page
+ * numbers index Crisp's filtered list, not the full archive, so the
+ * combination is rejected rather than silently misinterpreted; brandId is
+ * only valid WITH a date range — full/incremental always cover every brand,
+ * so a bare brandId is rejected the same way rather than silently dropped)
  *
  * Kicks off a background sync in this server process and returns immediately.
  * When both `dateStart` and `dateEnd` are given it runs a RANGE sync (Crisp's
- * date filter + early-stop guard); otherwise the usual full/incremental run.
- * Progress is exposed by /api/sync/crisp/status. For scheduled syncs, prefer
- * the CLI scripts (`npm run sync:crisp[:incremental]`).
+ * date filter + early-stop guard), optionally narrowed to one brand via
+ * `brandId`; otherwise the usual full/incremental run (which always covers
+ * every brand). Progress is exposed by /api/sync/crisp/status. For scheduled
+ * syncs, prefer the CLI scripts (`npm run sync:crisp[:incremental]`).
  */
 export async function POST(request: NextRequest) {
   let json: unknown = {};
@@ -50,7 +57,7 @@ export async function POST(request: NextRequest) {
     );
   }
 
-  const { mode, startPage, dateStart, dateEnd } = parsed.data;
+  const { mode, startPage, dateStart, dateEnd, brandId } = parsed.data;
 
   // Cross-field range validation (both-or-neither, start <= end). A requested
   // range resolves to an inclusive UTC window; no range → window is null.
@@ -63,6 +70,15 @@ export async function POST(request: NextRequest) {
       {
         error:
           "startPage cannot be combined with a date range — a range sync always walks Crisp's date-filtered pages from page 1.",
+      },
+      { status: 400 }
+    );
+  }
+  if (!rangeCheck.window && brandId != null) {
+    return NextResponse.json(
+      {
+        error:
+          "brandId cannot be used without a date range — full/incremental syncs always cover every configured brand; only a range sync can be scoped to one.",
       },
       { status: 400 }
     );
@@ -81,6 +97,7 @@ export async function POST(request: NextRequest) {
     ? runRangeSync({
         dateStart: rangeCheck.window.start,
         dateEnd: rangeCheck.window.end,
+        brandId,
       })
     : mode === "incremental"
       ? runIncrementalSync({ startPage })

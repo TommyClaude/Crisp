@@ -203,8 +203,18 @@ export async function getFilterOptions(): Promise<{
   };
 }
 
-/** Aggregate stats for the Crisp dashboard tab. */
-export async function getDashboardStats() {
+/**
+ * Aggregate stats for the Crisp dashboard tab. `brandId`, when given, scopes
+ * the conversation/message/resolved counts to that one brand — everything
+ * else (the brand count itself, and the run-centric lastSync/recentLogs,
+ * which describe sync JOBS rather than archived data) stays global regardless
+ * of the selected brand.
+ */
+export async function getDashboardStats(options?: { brandId?: string }) {
+  const brandId = options?.brandId;
+  const conversationWhere: Prisma.ConversationWhereInput = brandId
+    ? { brandId }
+    : {};
   const [
     totalConversations,
     totalMessages,
@@ -214,10 +224,22 @@ export async function getDashboardStats() {
     lastSync,
     recentLogs,
   ] = await Promise.all([
-    prisma.conversation.count(),
-    prisma.message.count(),
-    prisma.embeddingChunk.count(),
-    prisma.conversation.count({ where: { state: "resolved" } }),
+    prisma.conversation.count({ where: conversationWhere }),
+    prisma.message.count({
+      where: brandId ? { conversation: { brandId } } : {},
+    }),
+    // Chunks belong to a brand through EITHER parent: chat chunks via their
+    // conversation, docs/forum chunks via their plugin — same membership rule
+    // as ragSearch's brand filter, so this card agrees with what brand-scoped
+    // retrieval can actually see.
+    prisma.embeddingChunk.count({
+      where: brandId
+        ? { OR: [{ conversation: { brandId } }, { plugin: { brandId } }] }
+        : {},
+    }),
+    prisma.conversation.count({
+      where: { ...conversationWhere, state: "resolved" },
+    }),
     prisma.brand.count(),
     prisma.syncLog.findFirst({
       where: { status: "completed" },

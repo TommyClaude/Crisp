@@ -62,6 +62,14 @@ interface SyncProgress {
 export interface PrefillRange {
   start: string;
   end: string;
+  /**
+   * Which brand's grid the click came from — undefined when the click came
+   * from the legacy merged (no-Brand-rows) grid, which has no brand to
+   * attribute. In "All brands" mode this carries the specific brand even
+   * though no brand is selected in the URL, so the range sync it feeds still
+   * targets just that one brand (see the effective-brand resolution below).
+   */
+  brandId?: string;
   /** Changes on every click so re-selecting the same month re-applies it. */
   nonce: number;
 }
@@ -108,6 +116,10 @@ interface SyncPanelProps {
   resumePage: number;
   /** Set when a heatmap month cell is clicked, to prefill the range form. */
   prefillRange?: PrefillRange | null;
+  /** Every configured brand, for the recent-runs badge and the range-sync brand label. */
+  brands: Array<{ id: string; name: string }>;
+  /** The brand scoped by the URL's ?brand= selector, or undefined for "All brands". */
+  selectedBrandId?: string;
 }
 
 const numberFormat = new Intl.NumberFormat("en-US");
@@ -125,6 +137,8 @@ export function SyncPanel({
   recentLogs,
   resumePage: initialResumePage,
   prefillRange,
+  brands,
+  selectedBrandId,
 }: SyncPanelProps) {
   const router = useRouter();
   const [progress, setProgress] = React.useState<SyncProgress | null>(null);
@@ -133,6 +147,12 @@ export function SyncPanel({
   // Date-range sync inputs (YYYY-MM-DD). Prefilled by clicking a heatmap month.
   const [rangeStart, setRangeStart] = React.useState("");
   const [rangeEnd, setRangeEnd] = React.useState("");
+  // Which brand a heatmap month click came from (see PrefillRange.brandId) —
+  // only relevant in "All brands" mode, where selectedBrandId is undefined
+  // but a click still targets one specific brand's grid.
+  const [clickBrandId, setClickBrandId] = React.useState<string | undefined>(
+    undefined
+  );
   const rangeFormRef = React.useRef<HTMLDivElement>(null);
   // The furthest page any past run has reached, across all sync history —
   // the default "Continue" resume point. Kept separate from the input value
@@ -159,8 +179,20 @@ export function SyncPanel({
     if (!prefillRange) return;
     setRangeStart(prefillRange.start);
     setRangeEnd(prefillRange.end);
+    setClickBrandId(prefillRange.brandId);
     rangeFormRef.current?.scrollIntoView({ behavior: "smooth", block: "center" });
   }, [prefillRange]);
+
+  // The brand the NEXT range sync should target: the URL-selected brand when
+  // one is chosen (wins regardless of which grid a click came from — with one
+  // brand selected there's only that one grid anyway), otherwise whichever
+  // brand's grid the most recent month click came from ("All brands" mode).
+  // Neither set (typed dates, or a click on the legacy merged grid) means
+  // every brand, same as before this feature existed.
+  const effectiveBrandId = selectedBrandId ?? clickBrandId;
+  const effectiveBrandName = effectiveBrandId
+    ? (brands.find((b) => b.id === effectiveBrandId)?.name ?? "removed brand")
+    : null;
 
   // The most recent run that isn't still running. When it didn't complete
   // (paused/cancelled/failed — a failed run included, so a bad token never
@@ -283,7 +315,11 @@ export function SyncPanel({
       const res = await fetch("/api/sync/crisp/start", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ dateStart: rangeStart, dateEnd: rangeEnd }),
+        body: JSON.stringify({
+          dateStart: rangeStart,
+          dateEnd: rangeEnd,
+          ...(effectiveBrandId ? { brandId: effectiveBrandId } : {}),
+        }),
       });
       if (res.status === 409) {
         toast.error("A sync is already running");
@@ -306,7 +342,9 @@ export function SyncPanel({
       runningRef.current = true;
       setRunning(true);
       toast.success("Range sync started", {
-        description: `${rangeStart} → ${rangeEnd}`,
+        description: effectiveBrandName
+          ? `${effectiveBrandName} · ${rangeStart} → ${rangeEnd}`
+          : `${rangeStart} → ${rangeEnd}`,
       });
     } catch {
       toast.error("Failed to start range sync");
@@ -448,11 +486,20 @@ export function SyncPanel({
                   aria-label="Resume from page"
                   className="h-8 w-20 tabular-nums"
                 />
-                <HelpTip>
+                <HelpTip subject="continue from page">
                   Resumes the conversation-list backfill from this Crisp API
                   page instead of starting over. Defaults to the furthest
                   page any past sync run has reached.
                 </HelpTip>
+                {brands.length > 1 ? (
+                  <HelpTip subject="multi-brand resume">
+                    With more than one brand configured, this page number only
+                    resumes the FIRST brand — every other brand always walks
+                    its own list from page 1 regardless of what you enter here
+                    (a full/incremental sync always covers every brand, so
+                    there is no per-brand page to resume for the rest).
+                  </HelpTip>
+                ) : null}
                 <Button
                   size="sm"
                   disabled={busy}
@@ -662,14 +709,15 @@ export function SyncPanel({
               ) : (
                 <CalendarRange className="size-3.5" />
               )}
-              Sync range
+              Sync range — {effectiveBrandName ?? "all brands"}
             </Button>
             <HelpTip subject="range sync">
               Syncs only conversations Crisp reports in this date window, guarded
               so a wrongly-ignored filter can&apos;t run away into a full
-              backfill. Click a month on the coverage heatmap to fill these in.
-              The result reports how many fell in range by last-activity vs
-              created date.
+              backfill. Click a month on a brand&apos;s coverage grid to fill
+              these in AND scope the sync to that brand — or pick a brand
+              above to always scope it. The result reports how many fell in
+              range by last-activity vs created date.
             </HelpTip>
           </div>
         </CardContent>
@@ -686,7 +734,7 @@ export function SyncPanel({
           </CardDescription>
         </CardHeader>
         <CardContent>
-          <SyncLogTable logs={logs} />
+          <SyncLogTable logs={logs} brands={brands} />
         </CardContent>
       </Card>
     </div>
