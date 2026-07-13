@@ -12,6 +12,7 @@ import {
 } from "@/lib/notify/slack";
 import { daysSinceWaiting, silenceNudgeCutoff } from "@/lib/suggest/promise";
 import { needsResolvedWhere } from "@/lib/suggest/suggestions-view";
+import { refreshWaitingTopicsStandalone } from "@/lib/wporg/watcher";
 
 /**
  * Roughly-daily Slack digest of "Needs resolved" topics (owner-approved
@@ -164,6 +165,8 @@ export function buildNeedsResolvedDigestPayload(
  */
 export async function runNeedsResolvedDigestCheck(options?: {
   now?: Date;
+  /** Injectable for tests — defaults to the real standalone refresh pass. */
+  refresh?: () => Promise<void>;
 }): Promise<void> {
   const now = options?.now ?? new Date();
   try {
@@ -178,6 +181,22 @@ export async function runNeedsResolvedDigestCheck(options?: {
       ) {
         return;
       }
+    }
+
+    // Re-check the waiting topics against live wp.org BEFORE composing:
+    // "mark as resolved" emits no feed item and no notification email, so
+    // without this the digest nags about topics already resolved on the
+    // forum (owner report — a Resolved topic showed up "quiet for 17 days").
+    // The pass is capped/deadbanded (see refreshWaitingTopicsStandalone) and
+    // runs at most ~once a day here, right when its freshness matters most.
+    // Failure-isolated: a refresh problem must not block the digest itself.
+    try {
+      await (options?.refresh ?? refreshWaitingTopicsStandalone)();
+    } catch (error) {
+      console.error(
+        "[slack-digest] pre-send refresh failed:",
+        error instanceof Error ? error.message : error
+      );
     }
 
     const env = getEnv();

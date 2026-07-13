@@ -497,6 +497,44 @@ export function isWatcherRunning(): boolean {
   return isCheckRunning();
 }
 
+/**
+ * Standalone resolution-refresh for callers OUTSIDE a forum check — today the
+ * daily needs-resolved digest (src/lib/notify/digest.ts). wp.org's "mark as
+ * resolved" emits no feed item AND no notification email, so once the mail
+ * listener made manual/cron checks rare, wpResolved flags went stale and the
+ * digest nagged about topics already resolved on the forum (owner report).
+ * Runs the exact same pass a forum check runs (same cap, same 1-hour
+ * updatedAt deadband, same politeness delay); skips entirely while a real
+ * check is running — that check performs the pass itself. Never throws.
+ */
+export async function refreshWaitingTopicsStandalone(): Promise<void> {
+  if (isCheckRunning()) return;
+  const result: WatcherResult = {
+    pluginsChecked: 0,
+    newThreads: 0,
+    drafted: 0,
+    skippedOld: 0,
+    resurfaced: 0,
+    status: "completed",
+    lastIndex: null,
+    errors: [],
+  };
+  // Not a real check run — a detached object satisfies the pass's
+  // cancel/counter hooks without touching the live check-state singleton.
+  const state = { cancelRequested: false, resurfaced: 0 } as CheckProgress;
+  try {
+    await refreshSilentTopics(undefined, result, state);
+    for (const message of result.errors) {
+      console.error("[digest-refresh]", message);
+    }
+  } catch (error) {
+    console.error(
+      "[digest-refresh] pass failed:",
+      error instanceof Error ? error.message : error
+    );
+  }
+}
+
 /** Outcome of a {@link checkSingleTopic} call — for the mail listener's logs. */
 export interface SingleTopicResult {
   outcome: ThreadUpsertOutcome | "fetch_failed";
