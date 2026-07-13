@@ -155,6 +155,8 @@ The listener starts automatically from Next's `instrumentation.ts` when configur
 
 **Slack notifications** — set `SLACK_WEBHOOK_URL` and the support team's channel gets: a "new topic + ready draft" message the moment either path (email push or the `wporg:check` feed) creates a fresh customer-last topic, and a "new customer reply + suggested follow-up" message when a customer replies on an already-tracked topic (mail path only — the feed poll re-processes the same reply later, so notifying there too would double-post every reply). Unset, this is silently disabled.
 
+**Needs-resolved digest** — the same `SLACK_WEBHOOK_URL` also drives a roughly-daily digest (`src/lib/notify/digest.ts`, started from `instrumentation.ts` independently of the mail listener — it only needs Slack + DB) of the `/suggestions` "Needs resolved" tab: topics the team already answered where the customer has gone silent past `WPORG_SILENCE_NUDGE_DAYS`, each with a ready gentle-close draft nobody's looked at yet. A background check runs every 12h and posts one message listing the current topics (title, plugin, days quiet) whenever the tab isn't empty and it's been roughly a day since the last successful send — timing is intentionally imprecise, not a cron.
+
 A muted status line on `/suggestions` shows the listener's health (`Mail listener: listening · N events · M drafted` / `disabled` / `error: …`).
 
 ### Incremental sync

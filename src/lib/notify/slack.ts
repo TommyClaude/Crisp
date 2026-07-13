@@ -52,8 +52,10 @@ export interface SlackPayload {
 /** Excerpt quote cap — keeps the Slack message skimmable. */
 const EXCERPT_CAP = 300;
 /** Cap on the linked title — wp.org titles are short in practice, but the
- *  payload must stay bounded even for a pathological one. */
-const TITLE_CAP = 200;
+ *  payload must stay bounded even for a pathological one. Exported so other
+ *  notification builders (e.g. the Needs-resolved digest — digest.ts) cap
+ *  titles the same way instead of picking their own number. */
+export const TITLE_CAP = 200;
 /** Draft cap — Slack blocks have a ~3000-char text limit per section; this
  *  stays comfortably under it while still showing a useful chunk of the draft.
  *  Shared by the first-reply draft and the follow-up draft. */
@@ -66,15 +68,19 @@ export function slackConfigured(): boolean {
   return envSlackConfigured();
 }
 
-/** Truncate to at most `max` characters, appending an ellipsis when cut. */
-function truncate(text: string, max: number): string {
+/** Truncate to at most `max` characters, appending an ellipsis when cut.
+ *  Exported for reuse by other notification builders (see {@link TITLE_CAP}). */
+export function truncate(text: string, max: number): string {
   const trimmed = text.trim();
   if (trimmed.length <= max) return trimmed;
   return `${trimmed.slice(0, max).trimEnd()}…`;
 }
 
-/** Escape Slack mrkdwn's three reserved characters in user-supplied text. */
-function escapeMrkdwn(text: string): string {
+/** Escape Slack mrkdwn's three reserved characters in user-supplied text.
+ *  Exported so every Slack message builder in the app — not just this
+ *  module's own payloads — escapes user-influenced strings the same way
+ *  (see src/lib/notify/digest.ts). */
+export function escapeMrkdwn(text: string): string {
   return text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 }
 
@@ -183,23 +189,23 @@ async function postOnce(
 }
 
 /**
- * Notify the configured Slack channel of a wp.org topic event — a newly
- * created customer-last topic ("new_topic") or a fresh customer reply on an
- * already-tracked topic ("new_reply"). No-op (returns false, no network call)
- * when SLACK_WEBHOOK_URL isn't set. Retries ONCE on a network error or 5xx
- * response; a 4xx is treated as non-retryable (bad payload / revoked webhook
- * won't fix itself). NEVER throws — final failure is logged (tagged
- * "[slack]") and resolves false so callers can wrap this with plain failure
- * isolation, no try/catch required.
+ * Post a Slack payload with this module's shared network semantics: no-op
+ * (returns false, no network call) when SLACK_WEBHOOK_URL isn't set; retries
+ * ONCE on a network error or 5xx response (a 4xx is treated as non-retryable
+ * — a bad payload or revoked webhook won't fix itself); NEVER throws — final
+ * failure is logged (tagged with `logTag`, never the webhook URL itself) and
+ * resolves false. The one machinery both {@link notifySlackTopic} and
+ * {@link postSlackBlocks} funnel through, so a future timeout/retry tweak
+ * only has one place to change.
  */
-export async function notifySlackTopic(
-  input: SlackTopicNotificationInput
+async function postWithRetry(
+  payload: SlackPayload,
+  logTag: string
 ): Promise<boolean> {
   if (!slackConfigured()) return false;
   const webhookUrl = getEnv().SLACK_WEBHOOK_URL;
   if (!webhookUrl) return false;
 
-  const payload = buildSlackTopicPayload(input);
   let lastError: string | null = null;
 
   for (let attempt = 1; attempt <= 2; attempt++) {
@@ -213,11 +219,39 @@ export async function notifySlackTopic(
     }
   }
 
-  console.error(
-    `[slack] notify failed for thread ${input.threadId}: ${lastError}`
-  );
+  console.error(`[slack] ${logTag} failed: ${lastError}`);
   return false;
+}
+
+/**
+ * Notify the configured Slack channel of a wp.org topic event — a newly
+ * created customer-last topic ("new_topic") or a fresh customer reply on an
+ * already-tracked topic ("new_reply"). See {@link postWithRetry} for the
+ * shared no-op/retry/never-throw semantics.
+ */
+export async function notifySlackTopic(
+  input: SlackTopicNotificationInput
+): Promise<boolean> {
+  const payload = buildSlackTopicPayload(input);
+  return postWithRetry(payload, `notify for thread ${input.threadId}`);
 }
 
 /** Back-compat alias for the pre-`kind` notify name. */
 export const notifySlackNewTopic = notifySlackTopic;
+
+/**
+ * Post an arbitrary mrkdwn Slack payload (e.g. the Needs-resolved digest —
+ * see src/lib/notify/digest.ts) through this module's shared timeout/retry/
+ * never-throw/no-log-URL machinery ({@link postWithRetry}), instead of
+ * callers duplicating fetch code. Prefer a purpose-built payload builder
+ * (like {@link buildSlackTopicPayload}) to construct `payload` so escaping
+ * and capping stay consistent with the rest of the app.
+ */
+export async function postSlackBlocks(
+  payload: SlackPayload,
+  /** Names the caller in failure logs ("[slack] <logTag> failed: …") so
+   *  different senders (topic notify, digest, …) stay distinguishable. */
+  logTag = "post"
+): Promise<boolean> {
+  return postWithRetry(payload, logTag);
+}
