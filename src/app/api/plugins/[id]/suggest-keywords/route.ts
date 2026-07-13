@@ -137,7 +137,13 @@ Respond with STRICT JSON ONLY — no markdown code fences, no commentary before 
 - "add": new keywords worth adding, each with a short one-sentence reason.
 - "remove": keywords from the CURRENT KEYWORDS list that are too generic, redundant with the name, or risk cross-plugin false positives — "remove" may ONLY reference keywords that are in the current list you were given, each with a short one-sentence reason.
 - "keep": current keywords you reviewed and consider still good as-is (no reason needed).
-- If nothing needs to change, return empty "add"/"remove" arrays and "keep" listing the current keywords.`;
+- If nothing needs to change, return empty "add"/"remove" arrays and "keep" listing the current keywords.
+
+BE CONSERVATIVE — consistency between runs matters more than micro-optimizing:
+- The current keywords are deliberate human decisions. Propose a removal ONLY for one of: (a) clear cross-plugin false-positive risk (a generic word/phrase other products' customers also use), (b) exact case/spacing duplication of the auto-matching plugin name, (c) a keyword that can never match anything (malformed).
+- NEVER propose removing a keyword merely because a different phrasing exists or because you would have worded it differently. A keyword that is harmless-but-narrow stays.
+- NEVER suggest an addition that is just a rewording, case variant, or spacing variant of an existing keyword or of the name.
+- Empty "add" and "remove" arrays are a GOOD answer for a well-configured plugin — do not invent changes to appear helpful.`;
 
 function buildUserPrompt(
   plugin: { name: string; wpOrgSlug: string | null; detectionKeywords: string[] },
@@ -273,7 +279,15 @@ export async function POST(
   );
 
   async function attempt(prompt: string): Promise<Suggestion> {
-    const draft = await generateDraftFor(provider!, SYSTEM_PROMPT, prompt);
+    // temperature 0: this is a judgement call the owner re-runs — the same
+    // plugin state should get the same suggestions, not flip-flop per click.
+    const draft = await generateDraftFor(
+      provider!,
+      SYSTEM_PROMPT,
+      prompt,
+      undefined,
+      0
+    );
     return parseSuggestion(draft.text);
   }
 
@@ -293,30 +307,53 @@ export async function POST(
     }
   }
 
+  // Matching treats spaces as optional and case as irrelevant (see
+  // keywordPattern in src/lib/rag/products.ts), so "brandy sites" and
+  // "BrandySites" are the SAME matcher — normalize both ways when comparing.
+  // Hyphens stay literal, so a hyphenated variant is NOT a duplicate.
+  const matcherKey = (s: string) => s.toLowerCase().replace(/\s+/g, "");
+  const nameKey = matcherKey(plugin.name);
+  const currentKeys = new Set(plugin.detectionKeywords.map(matcherKey));
+
   // Never trust the model's echo of the keyword lists — filter both sides:
   // "remove" may only reference keywords actually on the plugin, and "add"
   // must drop anything that would be useless or hostile downstream: blanks,
   // keywords longer than the PATCH schema's max(100) cap (one oversized item
   // would make the whole Apply request fail atomically with a generic error),
-  // duplicates of existing keywords or of the plugin name (both already
-  // auto-match — suggesting them back just confuses the human reviewer), and
-  // duplicates within the add list itself.
+  // case/spacing duplicates of existing keywords or of the plugin name (both
+  // already auto-match — suggesting them back just confuses the human
+  // reviewer), and duplicates within the add list itself.
   const currentLower = new Set(plugin.detectionKeywords.map((k) => k.toLowerCase()));
   const remove = suggestion.remove.filter((item) => currentLower.has(item.keyword.toLowerCase()));
   const seenAdds = new Set<string>();
   const add = suggestion.add.filter((item) => {
     const keyword = item.keyword.trim();
-    const lower = keyword.toLowerCase();
+    const key = matcherKey(keyword);
     if (keyword.length < 2 || keyword.length > 100) return false;
-    if (currentLower.has(lower)) return false;
-    if (lower === plugin.name.toLowerCase()) return false;
-    if (seenAdds.has(lower)) return false;
-    seenAdds.add(lower);
+    if (currentKeys.has(key)) return false;
+    if (key === nameKey) return false;
+    if (seenAdds.has(key)) return false;
+    seenAdds.add(key);
     return true;
   });
 
+  // A current keyword that is a case/spacing variant of the plugin name is
+  // ALWAYS redundant (the name auto-matches on its own) — that's a mechanical
+  // fact, not a judgement call, so it must not depend on the model noticing.
+  // Owner-reported: keyword "brandy sites" on plugin "Brandy Sites" survived
+  // several AI passes. Prepend it deterministically unless the model already
+  // flagged it.
+  const flaggedForRemoval = new Set(remove.map((item) => matcherKey(item.keyword)));
+  const nameDuplicates = plugin.detectionKeywords
+    .filter((k) => matcherKey(k) === nameKey && !flaggedForRemoval.has(matcherKey(k)))
+    .map((keyword) => ({
+      keyword,
+      reason:
+        "Case/spacing duplicate of the plugin name, which always auto-matches on its own — this keyword adds nothing.",
+    }));
+
   return NextResponse.json({
-    suggestion: { add, remove, keep: suggestion.keep },
+    suggestion: { add, remove: [...nameDuplicates, ...remove], keep: suggestion.keep },
     grounding,
   });
 }

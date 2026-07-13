@@ -92,7 +92,8 @@ async function postJson(
 async function draftWithAnthropic(
   system: string,
   userPrompt: string,
-  maxTokens: number = MAX_DRAFT_TOKENS
+  maxTokens: number = MAX_DRAFT_TOKENS,
+  temperature?: number
 ): Promise<DraftResult> {
   const env = getEnv();
   const model = env.ANTHROPIC_MODEL;
@@ -107,6 +108,7 @@ async function draftWithAnthropic(
       max_tokens: maxTokens,
       system,
       messages: [{ role: "user", content: userPrompt }],
+      ...(temperature != null ? { temperature } : {}),
     }
   );
 
@@ -125,10 +127,14 @@ async function draftWithAnthropic(
 async function draftWithOpenAI(
   system: string,
   userPrompt: string,
-  maxTokens: number = MAX_DRAFT_TOKENS
+  maxTokens: number = MAX_DRAFT_TOKENS,
+  temperature?: number
 ): Promise<DraftResult> {
   const env = getEnv();
   const model = env.OPENAI_CHAT_MODEL;
+  // gpt-5.x / o-series reject a non-default `temperature` outright (like
+  // `max_tokens` below) — silently skip it there rather than 400 the call.
+  const supportsTemperature = !/^(gpt-5|o\d)/i.test(model);
   const body = await postJson(
     "https://api.openai.com/v1/chat/completions",
     { Authorization: `Bearer ${env.OPENAI_API_KEY}` },
@@ -141,6 +147,7 @@ async function draftWithOpenAI(
         { role: "system", content: system },
         { role: "user", content: userPrompt },
       ],
+      ...(temperature != null && supportsTemperature ? { temperature } : {}),
     }
   );
   const text = body.choices?.[0]?.message?.content?.trim();
@@ -151,17 +158,20 @@ async function draftWithOpenAI(
 /**
  * Generate a draft from a specific provider. `maxTokens` defaults to the full
  * draft budget; pass a small cap (e.g. {@link MAX_CLASSIFY_TOKENS}) for a terse
- * one-word triage call.
+ * one-word triage call. `temperature` is optional and omitted from the request
+ * when undefined (and always omitted for OpenAI models that reject it); pass 0
+ * for judgement-style calls that should answer the same way every run.
  */
 export function generateDraftFor(
   provider: SuggesterProvider,
   system: string,
   userPrompt: string,
-  maxTokens?: number
+  maxTokens?: number,
+  temperature?: number
 ): Promise<DraftResult> {
   return provider === "anthropic"
-    ? draftWithAnthropic(system, userPrompt, maxTokens)
-    : draftWithOpenAI(system, userPrompt, maxTokens);
+    ? draftWithAnthropic(system, userPrompt, maxTokens, temperature)
+    : draftWithOpenAI(system, userPrompt, maxTokens, temperature);
 }
 
 /** Generate a draft with whichever provider is configured (first available). */
