@@ -121,6 +121,7 @@ const SYSTEM_PROMPT = `You are helping curate "detection keywords" for a WordPre
 
 Matching rules you MUST respect when suggesting keywords:
 - The plugin's NAME always auto-matches on its own — never suggest adding it again.
+- The plugin's wordpress.org SLUG (the hyphenated form, e.g. "ninjateam-telegram") ALSO auto-matches as a whole — it catches pasted plugin URLs and error paths by itself. Never suggest the bare slug as a keyword, and a current keyword identical to the slug is redundant.
 - Matching is case-insensitive and word-boundary (a keyword must appear as a whole word, not as a substring of a longer word).
 - Spaces inside a keyword become OPTIONAL when matching, so "Yay Mail" and "YayMail" match the same text — you never need both forms.
 - Hyphens are LITERAL, NOT equivalent to spaces or removed: "multi-currency" will NOT match "multi currency" in the text, and vice versa. If a spaced and a hyphenated (or slug-style) variant both occur in the wild, suggest them as separate keywords.
@@ -313,6 +314,9 @@ export async function POST(
   // Hyphens stay literal, so a hyphenated variant is NOT a duplicate.
   const matcherKey = (s: string) => s.toLowerCase().replace(/\s+/g, "");
   const nameKey = matcherKey(plugin.name);
+  // The full wp.org slug auto-matches too (defsFromPlugins) — a keyword or
+  // suggestion identical to it is just as redundant as a name duplicate.
+  const slugKey = plugin.wpOrgSlug?.trim() ? matcherKey(plugin.wpOrgSlug) : null;
   const currentKeys = new Set(plugin.detectionKeywords.map(matcherKey));
 
   // Never trust the model's echo of the keyword lists — filter both sides:
@@ -332,6 +336,7 @@ export async function POST(
     if (keyword.length < 2 || keyword.length > 100) return false;
     if (currentKeys.has(key)) return false;
     if (key === nameKey) return false;
+    if (slugKey && key === slugKey) return false;
     if (seenAdds.has(key)) return false;
     seenAdds.add(key);
     return true;
@@ -344,16 +349,22 @@ export async function POST(
   // several AI passes. Prepend it deterministically unless the model already
   // flagged it.
   const flaggedForRemoval = new Set(remove.map((item) => matcherKey(item.keyword)));
-  const nameDuplicates = plugin.detectionKeywords
-    .filter((k) => matcherKey(k) === nameKey && !flaggedForRemoval.has(matcherKey(k)))
+  const autoDuplicates = plugin.detectionKeywords
+    .filter((k) => {
+      const key = matcherKey(k);
+      if (flaggedForRemoval.has(key)) return false;
+      return key === nameKey || (slugKey !== null && key === slugKey);
+    })
     .map((keyword) => ({
       keyword,
       reason:
-        "Case/spacing duplicate of the plugin name, which always auto-matches on its own — this keyword adds nothing.",
+        matcherKey(keyword) === nameKey
+          ? "Case/spacing duplicate of the plugin name, which always auto-matches on its own — this keyword adds nothing."
+          : "Identical to the wp.org slug, which now auto-matches on its own (it catches pasted plugin URLs and error paths) — this keyword adds nothing.",
     }));
 
   return NextResponse.json({
-    suggestion: { add, remove: [...nameDuplicates, ...remove], keep: suggestion.keep },
+    suggestion: { add, remove: [...autoDuplicates, ...remove], keep: suggestion.keep },
     grounding,
   });
 }

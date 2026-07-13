@@ -46,19 +46,34 @@ const PLATFORM_NAMES = new Set(["WooCommerce", "WordPress"]);
 
 /** Build detection definitions from Plugin rows (id + name + keywords). */
 export function defsFromPlugins(
-  plugins: Array<{ id: string; name: string; detectionKeywords: string[] }>
+  plugins: Array<{
+    id: string;
+    name: string;
+    detectionKeywords: string[];
+    /** wp.org slug — auto-matched as a whole when present (see below). */
+    wpOrgSlug?: string | null;
+  }>
 ): ProductDef[] {
-  return plugins.map((plugin) => ({
-    name: plugin.name,
-    patterns: [
-      keywordPattern(plugin.name),
-      ...plugin.detectionKeywords
-        .filter((k) => k.trim().length > 1)
-        .map(keywordPattern),
-    ],
-    isPlatform: PLATFORM_NAMES.has(plugin.name),
-    pluginId: plugin.id,
-  }));
+  return plugins.map((plugin) => {
+    const slug = plugin.wpOrgSlug?.trim();
+    return {
+      name: plugin.name,
+      patterns: [
+        keywordPattern(plugin.name),
+        // The FULL wp.org slug auto-matches like the name does: nobody types
+        // "ninjateam-telegram" in prose, but pasted plugin URLs and error
+        // paths (wp-content/plugins/<slug>/...) contain it verbatim, and the
+        // whole slug is unique per plugin so there's no generic-token risk
+        // (unlike splitting it into pieces like "wp"/"telegram").
+        ...(slug && slug.length > 1 ? [keywordPattern(slug)] : []),
+        ...plugin.detectionKeywords
+          .filter((k) => k.trim().length > 1)
+          .map(keywordPattern),
+      ],
+      isPlatform: PLATFORM_NAMES.has(plugin.name),
+      pluginId: plugin.id,
+    };
+  });
 }
 
 // Order matters: specific plugins first, platforms last (used as tiebreaker).

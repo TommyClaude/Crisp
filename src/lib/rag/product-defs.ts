@@ -20,7 +20,7 @@ export async function getProductDefinitions(): Promise<ProductDef[]> {
   if (cache && Date.now() - cache.loadedAt < CACHE_TTL_MS) return cache.defs;
   try {
     const plugins = await prisma.plugin.findMany({
-      select: { id: true, name: true, detectionKeywords: true },
+      select: { id: true, name: true, detectionKeywords: true, wpOrgSlug: true },
       orderBy: { createdAt: "asc" },
     });
     const defs =
