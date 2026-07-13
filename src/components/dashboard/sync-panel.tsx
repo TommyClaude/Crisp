@@ -235,6 +235,9 @@ export function SyncPanel({
   // "override targets that brand automatically" behavior.
   const targetBrandKey = selectedBrandId ?? firstBrandKey;
   const targetResumePage = targetBrandKey ? (resumePages[targetBrandKey] ?? 1) : 1;
+  // Shown as a small label on the override input so it's visible (not just
+  // in the HelpTip) WHICH brand a hand-typed page number would apply to.
+  const targetBrandName = brands.find((b) => b.id === targetBrandKey)?.name;
   // Kept as a string so the field can be freely edited (including a brief
   // empty state) without fighting the user on every keystroke; parsed and
   // clamped to an integer >= 1 on blur and again right before starting.
@@ -675,22 +678,29 @@ export function SyncPanel({
                   )}
                   Sync from start
                 </Button>
-                <Input
-                  type="number"
-                  min={1}
-                  step={1}
-                  value={resumeFrom}
-                  disabled={busy}
-                  onChange={(e) => {
-                    setResumeFrom(e.target.value);
-                    setResumeDirty(true);
-                  }}
-                  onBlur={() =>
-                    setResumeFrom(String(clampResumePage(resumeFrom)))
-                  }
-                  aria-label="Resume from page"
-                  className="h-8 w-20 tabular-nums"
-                />
+                <div className="flex items-center gap-1.5">
+                  {targetBrandName ? (
+                    <span className="text-muted-foreground max-w-32 truncate text-xs whitespace-nowrap">
+                      {targetBrandName} · page
+                    </span>
+                  ) : null}
+                  <Input
+                    type="number"
+                    min={1}
+                    step={1}
+                    value={resumeFrom}
+                    disabled={busy}
+                    onChange={(e) => {
+                      setResumeFrom(e.target.value);
+                      setResumeDirty(true);
+                    }}
+                    onBlur={() =>
+                      setResumeFrom(String(clampResumePage(resumeFrom)))
+                    }
+                    aria-label="Resume from page"
+                    className="h-8 w-20 tabular-nums"
+                  />
+                </div>
                 <HelpTip subject="continue from page">
                   Each brand automatically continues from its own furthest
                   synced page — Continue already does this for every brand
@@ -706,6 +716,11 @@ export function SyncPanel({
                 <Button
                   size="sm"
                   disabled={busy}
+                  title={
+                    brands.length > 1
+                      ? `Resumes every brand from its own saved page: ${formatResumePagesSummary(resumePages, brands)}`
+                      : undefined
+                  }
                   onClick={() => {
                     // The manual override (startPage + startPageBrandId) is
                     // only sent when the user actually edited the input —
