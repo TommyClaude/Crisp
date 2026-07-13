@@ -403,10 +403,13 @@ async function resurfaceReplies(
 async function refreshSilentTopics(
   pluginId: string | undefined,
   result: WatcherResult,
-  state: CheckProgress
+  state: CheckProgress,
+  /** Restrict the pass to specific rows (digest pre-send verification). */
+  threadIds?: string[]
 ): Promise<void> {
   const waiting = await prisma.supportThread.findMany({
     where: {
+      ...(threadIds ? { id: { in: threadIds } } : {}),
       waitingSince: { not: null },
       wpResolved: false,
       // Cost guard (review finding): a row touched within the last hour —
@@ -506,9 +509,17 @@ export function isWatcherRunning(): boolean {
  * Runs the exact same pass a forum check runs (same cap, same 1-hour
  * updatedAt deadband, same politeness delay); skips entirely while a real
  * check is running — that check performs the pass itself. Never throws.
+ *
+ * `threadIds` scopes the pass to specific rows — the digest passes exactly
+ * the candidates it is about to announce (owner request: verify what you're
+ * about to send, not the whole waiting set — 2 stale candidates should cost
+ * 2 fetches, not 20).
  */
-export async function refreshWaitingTopicsStandalone(): Promise<void> {
+export async function refreshWaitingTopicsStandalone(
+  threadIds?: string[]
+): Promise<void> {
   if (isCheckRunning()) return;
+  if (threadIds && threadIds.length === 0) return;
   const result: WatcherResult = {
     pluginsChecked: 0,
     newThreads: 0,
@@ -523,7 +534,7 @@ export async function refreshWaitingTopicsStandalone(): Promise<void> {
   // cancel/counter hooks without touching the live check-state singleton.
   const state = { cancelRequested: false, resurfaced: 0 } as CheckProgress;
   try {
-    await refreshSilentTopics(undefined, result, state);
+    await refreshSilentTopics(undefined, result, state, threadIds);
     for (const message of result.errors) {
       console.error("[digest-refresh]", message);
     }

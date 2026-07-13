@@ -51,6 +51,10 @@ const MIN_GAP_MS = 22 * 60 * 60 * 1000;
 
 /** Cap on how many topics are listed by name before collapsing into "+K more". */
 const MAX_DIGEST_LINES = 15;
+/** Cap on pre-send verification fetches — matches the refresh pass's own
+ *  SILENT_REFRESH_CAP; candidates beyond it go unverified rather than
+ *  unbounded (they'd only matter for the header count anyway). */
+const MAX_REFRESH_CANDIDATES = 20;
 
 /** Persisted shape of the DIGEST_STAMP_KEY AppMeta row. */
 interface DigestStamp {
@@ -166,7 +170,7 @@ export function buildNeedsResolvedDigestPayload(
 export async function runNeedsResolvedDigestCheck(options?: {
   now?: Date;
   /** Injectable for tests — defaults to the real standalone refresh pass. */
-  refresh?: () => Promise<void>;
+  refresh?: (threadIds: string[]) => Promise<void>;
 }): Promise<void> {
   const now = options?.now ?? new Date();
   try {
@@ -183,25 +187,36 @@ export async function runNeedsResolvedDigestCheck(options?: {
       }
     }
 
-    // Re-check the waiting topics against live wp.org BEFORE composing:
-    // "mark as resolved" emits no feed item and no notification email, so
-    // without this the digest nags about topics already resolved on the
-    // forum (owner report — a Resolved topic showed up "quiet for 17 days").
-    // The pass is capped/deadbanded (see refreshWaitingTopicsStandalone) and
-    // runs at most ~once a day here, right when its freshness matters most.
+    const env = getEnv();
+    const silenceCutoff = silenceNudgeCutoff(env.WPORG_SILENCE_NUDGE_DAYS, now);
+    const where = needsResolvedWhere(silenceCutoff);
+
+    // Verify EXACTLY the topics about to be announced against live wp.org
+    // BEFORE composing: "mark as resolved" emits no feed item and no
+    // notification email, so without this the digest nags about topics
+    // already resolved on the forum (owner report — a Resolved topic showed
+    // up "quiet for 17 days"). Scoped to the candidates themselves (owner
+    // request): 2 candidates cost at most 2 fetches — not a blanket pass
+    // over the whole waiting set — and an empty candidate list costs zero.
+    // The pass's own 1-hour deadband skips candidates refreshed recently.
     // Failure-isolated: a refresh problem must not block the digest itself.
     try {
-      await (options?.refresh ?? refreshWaitingTopicsStandalone)();
+      const candidates = await prisma.supportThread.findMany({
+        where,
+        select: { id: true },
+        orderBy: [{ waitingSince: { sort: "asc", nulls: "last" } }],
+        take: MAX_REFRESH_CANDIDATES,
+      });
+      if (candidates.length === 0) return;
+      await (options?.refresh ?? refreshWaitingTopicsStandalone)(
+        candidates.map((row) => row.id)
+      );
     } catch (error) {
       console.error(
         "[slack-digest] pre-send refresh failed:",
         error instanceof Error ? error.message : error
       );
     }
-
-    const env = getEnv();
-    const silenceCutoff = silenceNudgeCutoff(env.WPORG_SILENCE_NUDGE_DAYS, now);
-    const where = needsResolvedWhere(silenceCutoff);
     // Only the rows that will actually render are fetched; the header count
     // and "+K more" line use the separate count() so a pathological backlog
     // never gets pulled wholesale into memory just to show 15 lines.
