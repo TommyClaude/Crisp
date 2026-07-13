@@ -6,6 +6,7 @@ import { formatDistanceToNow } from "date-fns";
 import {
   BookOpen,
   Check,
+  ChevronDown,
   Download,
   LifeBuoy,
   LoaderCircle,
@@ -19,7 +20,7 @@ import {
 import { toast } from "sonner";
 
 import { HelpTip } from "@/components/help-tip";
-import { Badge } from "@/components/ui/badge";
+import { Badge, badgeVariants } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
   Card,
@@ -36,6 +37,13 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuLabel,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import {
@@ -46,6 +54,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { Separator } from "@/components/ui/separator";
+import { detectSourceType, type DocsSourceType } from "@/lib/docs/source-type";
 import {
   hasForumSource,
   isPluginStatusFilter,
@@ -121,6 +130,23 @@ const SOURCE_TYPE_LABELS: Record<string, string> = {
   sitemap: "Sitemap",
   wporg_forum: "Forum Q&A",
 };
+
+/**
+ * Labels for the auto-detected-type badge in the Add-source form — distinct
+ * wording from SOURCE_TYPE_LABELS above (which decorates already-added
+ * sources) since this badge is explaining a *guess* the user can override.
+ */
+const DETECTED_TYPE_BADGE_LABELS: Record<DocsSourceType, string> = {
+  url: "Crawl",
+  sitemap: "Sitemap",
+  wporg_forum: "wp.org forum Q&A",
+};
+
+const SOURCE_TYPE_OPTIONS: Array<{ value: DocsSourceType; label: string }> = [
+  { value: "url", label: "Crawl" },
+  { value: "sitemap", label: "Sitemap" },
+  { value: "wporg_forum", label: "wp.org forum Q&A" },
+];
 
 export function PluginManager({
   brands,
@@ -442,9 +468,16 @@ function AddPluginCard({
 function PluginCard({ plugin }: { plugin: PluginItem }) {
   const router = useRouter();
   const [sourceUrl, setSourceUrl] = React.useState("");
-  const [sourceType, setSourceType] = React.useState<
-    "url" | "sitemap" | "wporg_forum"
-  >("url");
+  // Auto-detected from the URL as the user types; null while the input is
+  // empty (no badge shown). A manual pick from the override dropdown wins
+  // over detection until the URL text changes again.
+  const [typeOverride, setTypeOverride] = React.useState<DocsSourceType | null>(
+    null
+  );
+  const detectedType = sourceUrl.trim()
+    ? detectSourceType(sourceUrl.trim())
+    : null;
+  const effectiveType: DocsSourceType = typeOverride ?? detectedType ?? "url";
   const [busy, setBusy] = React.useState<string | null>(null);
   const [editingKeywords, setEditingKeywords] = React.useState(false);
   const [keywordsInput, setKeywordsInput] = React.useState("");
@@ -495,12 +528,15 @@ function PluginCard({ plugin }: { plugin: PluginItem }) {
           body: JSON.stringify({
             pluginId: plugin.id,
             url: sourceUrl.trim(),
-            type: sourceType,
+            type: effectiveType,
           }),
         }),
       "Docs source added — click Ingest to crawl it"
     );
-    if (ok) setSourceUrl("");
+    if (ok) {
+      setSourceUrl("");
+      setTypeOverride(null);
+    }
   };
 
   const startEditingKeywords = () => {
@@ -872,36 +908,68 @@ function PluginCard({ plugin }: { plugin: PluginItem }) {
           <Input
             placeholder="https://docs.example.com/filebird/"
             value={sourceUrl}
-            onChange={(e) => setSourceUrl(e.target.value)}
+            onChange={(e) => {
+              setSourceUrl(e.target.value);
+              // A new URL invalidates any manual override from the previous
+              // one — re-detect fresh each time the text changes.
+              setTypeOverride(null);
+            }}
             className="min-w-56 flex-1"
             type="url"
             required
           />
-          <Select
-            value={sourceType}
-            onValueChange={(v) =>
-              setSourceType(v as "url" | "sitemap" | "wporg_forum")
-            }
-          >
-            <SelectTrigger className="w-36">
-              <SelectValue />
-            </SelectTrigger>
-            <SelectContent>
-              <SelectItem value="url">Crawl URL</SelectItem>
-              <SelectItem value="sitemap">Sitemap</SelectItem>
-              <SelectItem value="wporg_forum">wp.org forum</SelectItem>
-            </SelectContent>
-          </Select>
-          <HelpTip>
-            Crawl URL/Sitemap fetch documentation pages. wp.org forum instead
-            watches the plugin&rsquo;s support forum — its Ingest button
-            crawls the newest <em>answered</em> topics for the AI to learn
-            from, rather than crawling docs pages.
+          {detectedType ? (
+            <DropdownMenu>
+              <DropdownMenuTrigger asChild>
+                <button
+                  type="button"
+                  className={cn(
+                    badgeVariants({ variant: "outline" }),
+                    "cursor-pointer gap-1"
+                  )}
+                  title="Detected source type — click to override"
+                >
+                  {DETECTED_TYPE_BADGE_LABELS[effectiveType]}
+                  <ChevronDown className="size-3" />
+                </button>
+              </DropdownMenuTrigger>
+              <DropdownMenuContent align="start" className="min-w-44">
+                <DropdownMenuLabel>Source type</DropdownMenuLabel>
+                {SOURCE_TYPE_OPTIONS.map((option) => (
+                  <DropdownMenuItem
+                    key={option.value}
+                    onSelect={() => setTypeOverride(option.value)}
+                  >
+                    <Check
+                      className={cn(
+                        "size-3.5",
+                        option.value === effectiveType
+                          ? "opacity-100"
+                          : "opacity-0"
+                      )}
+                    />
+                    {option.label}
+                    {option.value === detectedType ? (
+                      <span className="text-muted-foreground ml-auto text-[10px]">
+                        detected
+                      </span>
+                    ) : null}
+                  </DropdownMenuItem>
+                ))}
+              </DropdownMenuContent>
+            </DropdownMenu>
+          ) : null}
+          <HelpTip subject="source type detection">
+            The type is auto-detected from the URL: a wordpress.org
+            support-forum link becomes a Forum Q&amp;A source, a URL ending
+            in a sitemap file (e.g. sitemap.xml) becomes a Sitemap source,
+            and anything else is crawled as a docs URL. Click the badge next
+            to the input to override the detected type for this submission.
           </HelpTip>
           <Button
             type="submit"
             variant="outline"
-            disabled={busy === "add-source" || !sourceUrl}
+            disabled={busy === "add-source" || !sourceUrl.trim()}
           >
             {busy === "add-source" ? (
               <LoaderCircle className="size-4 animate-spin" />
