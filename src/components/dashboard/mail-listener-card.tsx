@@ -56,6 +56,10 @@ interface MailListenerStatusResponse {
    * renders correctly whether or not the field has landed yet.
    */
   drafted?: number;
+  /** Count of topics/replies pushed to Slack — optional for the same reason;
+   *  rendered whenever present (like drafted), 0 until Slack is configured
+   *  and something fires. */
+  notified?: number;
 }
 
 const POLL_INTERVAL_MS = 15000;
@@ -234,6 +238,9 @@ export function MailListenerCard() {
                       {numberFormat.format(status.eventsProcessed)} processed
                       {typeof status.drafted === "number"
                         ? ` · ${numberFormat.format(status.drafted)} drafted`
+                        : ""}
+                      {typeof status.notified === "number"
+                        ? ` · ${numberFormat.format(status.notified)} notified`
                         : ""}
                     </dd>
                   </div>

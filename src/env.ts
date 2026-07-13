@@ -66,6 +66,15 @@ const envSchema = z.object({
   WPORG_MAIL_PORT: z.coerce.number().int().positive().default(993),
   WPORG_MAIL_USER: z.string().optional().or(z.literal("")),
   WPORG_MAIL_PASSWORD: z.string().optional().or(z.literal("")),
+  // ── Slack notifications (optional) ──────────────────────────────────────
+  // Slack Incoming Webhook URL. When set, the configured Slack channel gets:
+  //   - a "new topic + ready draft" message for every freshly created
+  //     customer-last wp.org topic (both the feed and mail ingestion paths);
+  //   - a "new customer reply + suggested follow-up" message when a customer
+  //     replies on an already-tracked topic (mail path only — the feed path
+  //     re-processes the same reply and would double-post; see watcher.ts).
+  // See src/lib/notify/slack.ts. Silently disabled when unset.
+  SLACK_WEBHOOK_URL: z.string().url().optional().or(z.literal("")),
   BASIC_AUTH_USER: z.string().optional(),
   BASIC_AUTH_PASSWORD: z.string().optional(),
   CRISP_REQUEST_INTERVAL_MS: z.coerce.number().int().positive().default(150),
@@ -112,4 +121,15 @@ export function mailListenerConfigured(): boolean {
   return Boolean(
     env.WPORG_MAIL_ENABLED && env.WPORG_MAIL_USER && env.WPORG_MAIL_PASSWORD
   );
+}
+
+/**
+ * True when a Slack Incoming Webhook URL is configured, i.e. new-topic
+ * notifications (src/lib/notify/slack.ts) should be sent. The single source
+ * of truth for "should Slack notifications fire" — mirrors
+ * {@link mailListenerConfigured}.
+ */
+export function slackConfigured(): boolean {
+  const env = getEnv();
+  return Boolean(env.SLACK_WEBHOOK_URL && env.SLACK_WEBHOOK_URL.length > 0);
 }

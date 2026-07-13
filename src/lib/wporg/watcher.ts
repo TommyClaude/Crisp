@@ -1,5 +1,6 @@
 import { prisma } from "@/lib/db";
 import { getEnv } from "@/env";
+import { notifySlackTopic, slackConfigured } from "@/lib/notify/slack";
 import { classifyFollowupPromise } from "@/lib/suggest/promise";
 import { generateSuggestionForThread } from "@/lib/suggest/suggester";
 import {
@@ -517,9 +518,11 @@ export interface SingleTopicResult {
  * row when the topic is untracked (new-topic notifications land here), including
  * the support-last case. This function itself never drafts — the caller
  * (mail-listener.ts) auto-drafts a freshly created CUSTOMER-LAST row (see
- * {@link ThreadUpsertResult.customerLast}); everything else (a reply on an
- * already-tracked topic, or a support-last topic merely recorded into its
- * waiting state) is left for the manual Regenerate action. Idempotent:
+ * {@link ThreadUpsertResult.customerLast}) and, for a customer reply on an
+ * already-tracked topic ("flagged"), generates a whole-thread follow-up draft
+ * for its Slack "new reply" notification; a support-last topic merely
+ * recorded into its waiting state is left for the manual Regenerate action.
+ * Idempotent:
  * re-processing the same notification is a no-op upsert, and it is safe to run
  * concurrently with a full forum check (both are idempotent upserts on the
  * same rows).
@@ -562,6 +565,45 @@ export async function checkSingleTopic(
     existing,
     exactReplyDate: null,
     createOnSupportLast: true,
+  });
+}
+
+/**
+ * Push a Slack notification for a newly created customer-last topic found by
+ * this run's feed pass (see the `withSuggestions` drafting phase in
+ * {@link checkPluginForums}). Every row in `newThreadIds` is customer-last by
+ * construction — a feed topic item is always a fresh customer question, never
+ * a support-team reply — so unlike the mail listener's
+ * {@link SingleTopicResult.customerLast} check, no extra filtering is needed
+ * here. Re-reads the thread's freshest fields (including plugin name, via a
+ * minimal relation select) rather than threading them through from the topic-
+ * creation loop, so a draft written just before this call — success or
+ * failure — is always reflected. No-op (skips the DB read) when Slack isn't
+ * configured. Callers are responsible for failure isolation.
+ */
+async function notifyNewTopicSlack(threadId: string): Promise<void> {
+  if (!slackConfigured()) return;
+  const thread = await prisma.supportThread.findUnique({
+    where: { id: threadId },
+    select: {
+      title: true,
+      url: true,
+      author: true,
+      excerpt: true,
+      draftAnswer: true,
+      plugin: { select: { name: true } },
+    },
+  });
+  if (!thread) return;
+  await notifySlackTopic({
+    kind: "new_topic",
+    pluginName: thread.plugin.name,
+    title: thread.title,
+    url: thread.url,
+    author: thread.author,
+    excerpt: thread.excerpt,
+    threadId,
+    draftAnswer: thread.draftAnswer,
   });
 }
 
@@ -735,6 +777,16 @@ export async function checkPluginForums(options?: {
     // Draft suggestions for the topics just found — but skip drafting entirely
     // on a graceful halt (keep it cheap; the new threads stay status "new" for
     // the "Generate missing drafts" action or a later check to pick up).
+    //
+    // Slack scope: ONLY the newly created topics below notify — resurfaced/
+    // flagged customer replies deliberately do NOT notify from the feed path.
+    // The mail listener owns reply notifications, and because the mail path
+    // never advances the lastReplyAt feed dedupe watermark (the HYBRID
+    // invariant in applyThreadFromFetch), this feed poll later re-processes
+    // the very same reply the mail path already announced — notifying on
+    // flagged/resurfaced outcomes here would post every reply to Slack twice.
+    // New-topic notifications are safe on both paths: the existing-row lookup
+    // means each topic is only ever CREATED (and hence announced) once.
     if (!halted && (options?.withSuggestions ?? true)) {
       state.phase = "drafting";
       for (const threadId of newThreadIds) {
@@ -758,6 +810,18 @@ export async function checkPluginForums(options?: {
           );
         } finally {
           state.draftsDone += 1;
+        }
+
+        // Slack push for this newly created topic — failure-isolated per
+        // thread, and deliberately no extra retry loop here beyond
+        // notifySlackTopic's own single retry (keep the drafting loop from
+        // slowing down on a flaky webhook).
+        try {
+          await notifyNewTopicSlack(threadId);
+        } catch (error) {
+          result.errors.push(
+            `slack notify ${threadId}: ${error instanceof Error ? error.message : String(error)}`
+          );
         }
       }
     }
