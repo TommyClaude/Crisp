@@ -12,6 +12,7 @@ import {
   Package,
   Pencil,
   Plus,
+  Sparkles,
   Trash2,
   X,
 } from "lucide-react";
@@ -27,6 +28,14 @@ import {
   CardHeader,
   CardTitle,
 } from "@/components/ui/card";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import {
@@ -73,6 +82,28 @@ export interface PluginItem {
   brand: { id: string; name: string };
   chunkCount: number;
   docsSources: DocsSourceItem[];
+}
+
+export interface KeywordSuggestionItem {
+  keyword: string;
+  reason: string;
+}
+
+export interface KeywordSuggestion {
+  add: KeywordSuggestionItem[];
+  remove: KeywordSuggestionItem[];
+  keep: string[];
+}
+
+export interface SuggestKeywordsResponse {
+  suggestion: KeywordSuggestion;
+  grounding: {
+    wporg: boolean;
+    threads: boolean;
+    docs: boolean;
+    /** Orphan Crisp segments (tags no plugin claims) were in the grounding. */
+    orphanSegments: boolean;
+  };
 }
 
 const SOURCE_STATUS_STYLES: Record<string, string> = {
@@ -417,6 +448,12 @@ function PluginCard({ plugin }: { plugin: PluginItem }) {
   const [busy, setBusy] = React.useState<string | null>(null);
   const [editingKeywords, setEditingKeywords] = React.useState(false);
   const [keywordsInput, setKeywordsInput] = React.useState("");
+  const [suggestOpen, setSuggestOpen] = React.useState(false);
+  const [suggestion, setSuggestion] = React.useState<SuggestKeywordsResponse | null>(
+    null
+  );
+  const [checkedAdds, setCheckedAdds] = React.useState<Set<string>>(new Set());
+  const [checkedRemoves, setCheckedRemoves] = React.useState<Set<string>>(new Set());
   // Matches the forum source by type OR by a wp.org forum listing URL (see
   // lib/plugins/filters), so a legacy "url"-typed forum row (healed to
   // "wporg_forum" only on its next ingest) still hides the "Add forum
@@ -493,6 +530,87 @@ function PluginCard({ plugin }: { plugin: PluginItem }) {
     );
     if (ok) setEditingKeywords(false);
   };
+
+  const requestSuggestions = async () => {
+    setBusy("suggest-keywords");
+    try {
+      const res = await fetch(`/api/plugins/${plugin.id}/suggest-keywords`, {
+        method: "POST",
+      });
+      const body = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        toast.error(body.error ?? "Failed to generate keyword suggestions");
+        return;
+      }
+      const result = body as SuggestKeywordsResponse;
+      setSuggestion(result);
+      // Additions default checked (opt-out), removals default unchecked
+      // (opt-in) — conservative, since removing an existing keyword can stop
+      // matching real conversations.
+      setCheckedAdds(new Set(result.suggestion.add.map((item) => item.keyword)));
+      setCheckedRemoves(new Set());
+      setSuggestOpen(true);
+    } catch {
+      toast.error("Failed to generate keyword suggestions");
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const toggleAdd = (keyword: string, checked: boolean) => {
+    setCheckedAdds((prev) => {
+      const next = new Set(prev);
+      if (checked) next.add(keyword);
+      else next.delete(keyword);
+      return next;
+    });
+  };
+
+  const toggleRemove = (keyword: string, checked: boolean) => {
+    setCheckedRemoves((prev) => {
+      const next = new Set(prev);
+      if (checked) next.add(keyword);
+      else next.delete(keyword);
+      return next;
+    });
+  };
+
+  const applySuggestions = async () => {
+    if (!suggestion) return;
+    const removeLower = new Set(
+      suggestion.suggestion.remove
+        .filter((item) => checkedRemoves.has(item.keyword))
+        .map((item) => item.keyword.toLowerCase())
+    );
+    const merged = [
+      ...plugin.detectionKeywords.filter((k) => !removeLower.has(k.toLowerCase())),
+      ...suggestion.suggestion.add
+        .filter((item) => checkedAdds.has(item.keyword))
+        .map((item) => item.keyword),
+    ];
+    const ok = await call(
+      "suggest-apply",
+      () =>
+        fetch(`/api/plugins/${plugin.id}`, {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ detectionKeywords: merged }),
+        }),
+      "Keywords updated"
+    );
+    if (ok) setSuggestOpen(false);
+  };
+
+  const groundingLabel = suggestion
+    ? [
+        suggestion.grounding.wporg && "wp.org listing",
+        suggestion.grounding.threads && "recent support threads",
+        suggestion.grounding.docs && "docs sources",
+        suggestion.grounding.orphanSegments && "orphan segments",
+      ]
+        .filter(Boolean)
+        .join(", ") || "plugin name only"
+    : "";
 
   return (
     <Card>
@@ -614,6 +732,20 @@ function PluginCard({ plugin }: { plugin: PluginItem }) {
                 onClick={startEditingKeywords}
               >
                 <Pencil className="size-3" />
+              </Button>
+              <Button
+                variant="ghost"
+                size="icon"
+                className="size-5 text-muted-foreground hover:text-foreground"
+                title="AI suggest keywords"
+                disabled={busy === "suggest-keywords"}
+                onClick={() => void requestSuggestions()}
+              >
+                {busy === "suggest-keywords" ? (
+                  <LoaderCircle className="size-3 animate-spin" />
+                ) : (
+                  <Sparkles className="size-3" />
+                )}
               </Button>
             </>
           )}
@@ -812,6 +944,103 @@ function PluginCard({ plugin }: { plugin: PluginItem }) {
           </Button>
         ) : null}
       </CardContent>
+
+      <Dialog open={suggestOpen} onOpenChange={setSuggestOpen}>
+        <DialogContent className="max-w-lg">
+          <DialogHeader>
+            <DialogTitle>AI keyword suggestions — {plugin.name}</DialogTitle>
+            <DialogDescription>
+              Review before applying. Additions start checked, removals start
+              unchecked — nothing changes until you hit Apply.
+            </DialogDescription>
+          </DialogHeader>
+          {suggestion ? (
+            <div className="space-y-4">
+              {suggestion.suggestion.add.length === 0 &&
+              suggestion.suggestion.remove.length === 0 ? (
+                <p className="text-muted-foreground text-sm">
+                  No changes suggested — current keywords look good.
+                </p>
+              ) : null}
+              {suggestion.suggestion.add.length > 0 ? (
+                <div className="space-y-1.5">
+                  <p className="text-muted-foreground text-xs font-medium uppercase">
+                    Add
+                  </p>
+                  {suggestion.suggestion.add.map((item) => (
+                    <label
+                      key={item.keyword}
+                      className="flex items-start gap-2 text-sm"
+                    >
+                      <input
+                        type="checkbox"
+                        className="mt-0.5 size-3.5 shrink-0 rounded border-input"
+                        checked={checkedAdds.has(item.keyword)}
+                        onChange={(e) => toggleAdd(item.keyword, e.target.checked)}
+                      />
+                      <span>
+                        <span className="font-mono text-xs">{item.keyword}</span>
+                        {item.reason ? (
+                          <span className="text-muted-foreground"> — {item.reason}</span>
+                        ) : null}
+                      </span>
+                    </label>
+                  ))}
+                </div>
+              ) : null}
+              {suggestion.suggestion.remove.length > 0 ? (
+                <div className="space-y-1.5">
+                  <p className="text-muted-foreground text-xs font-medium uppercase">
+                    Remove
+                  </p>
+                  {suggestion.suggestion.remove.map((item) => (
+                    <label
+                      key={item.keyword}
+                      className="flex items-start gap-2 text-sm"
+                    >
+                      <input
+                        type="checkbox"
+                        className="mt-0.5 size-3.5 shrink-0 rounded border-input"
+                        checked={checkedRemoves.has(item.keyword)}
+                        onChange={(e) => toggleRemove(item.keyword, e.target.checked)}
+                      />
+                      <span>
+                        <span className="font-mono text-xs">{item.keyword}</span>
+                        {item.reason ? (
+                          <span className="text-muted-foreground"> — {item.reason}</span>
+                        ) : null}
+                      </span>
+                    </label>
+                  ))}
+                </div>
+              ) : null}
+              <p className="text-muted-foreground text-xs">
+                Grounded on: {groundingLabel}
+              </p>
+            </div>
+          ) : null}
+          <DialogFooter>
+            <Button
+              type="button"
+              variant="ghost"
+              disabled={busy === "suggest-apply"}
+              onClick={() => setSuggestOpen(false)}
+            >
+              Cancel
+            </Button>
+            <Button
+              type="button"
+              disabled={busy === "suggest-apply" || !suggestion}
+              onClick={() => void applySuggestions()}
+            >
+              {busy === "suggest-apply" ? (
+                <LoaderCircle className="size-4 animate-spin" />
+              ) : null}
+              Apply
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </Card>
   );
 }
