@@ -28,6 +28,54 @@ function sleep(ms: number): Promise<void> {
 }
 
 /**
+ * Crisp request telemetry — visibility into why a sync is slower than the
+ * ~1s/conversation design rate (the owner's ~9h/3,600-convo full sync had
+ * none of this to point at). Counted at TWO scopes:
+ *   - per-{@link CrispClient} instance (`client.telemetry`) — what the sync
+ *     progress display uses: the run registers its own shared client's
+ *     counters (registerSyncTelemetrySource in sync-state.ts), so a
+ *     concurrent manual resync/detect-start with its own client can't
+ *     pollute the running sync's throttle numbers (review finding);
+ *   - a process-wide module aggregate (below, globalThis so it survives dev
+ *     hot-reloads) — debugging convenience across ALL clients.
+ * Cheap on purpose: plain counters, no async, no DB.
+ */
+export interface CrispTelemetry {
+  /** Every fetch attempt, retries included. */
+  requests: number;
+  /** Responses with HTTP 429 specifically. */
+  status429s: number;
+  /** Any retryable failure — 429, other retryable 5xx/408/425, or a network error. */
+  retryableFailures: number;
+  /**
+   * Cumulative ms slept in the exponential-backoff retry wait (honouring
+   * Retry-After, capped at 60s per wait) — NOT the routine
+   * `CRISP_REQUEST_INTERVAL_MS` inter-request pacing sleep, which is expected
+   * on every request and isn't "throttling."
+   */
+  backoffWaitMs: number;
+}
+
+function freshCrispTelemetry(): CrispTelemetry {
+  return { requests: 0, status429s: 0, retryableFailures: 0, backoffWaitMs: 0 };
+}
+
+const globalForCrispTelemetry = globalThis as unknown as {
+  crispTelemetry?: CrispTelemetry;
+};
+
+/** Live telemetry counters for the current process (see {@link CrispTelemetry}). */
+export function getCrispTelemetry(): CrispTelemetry {
+  globalForCrispTelemetry.crispTelemetry ??= freshCrispTelemetry();
+  return globalForCrispTelemetry.crispTelemetry;
+}
+
+/** Zero every counter — called once per run, from beginSyncProgress in sync-state.ts. */
+export function resetCrispTelemetry(): void {
+  Object.assign(getCrispTelemetry(), freshCrispTelemetry());
+}
+
+/**
  * Thin, isolated wrapper around the Crisp REST API v1.
  *
  * - Authenticates with HTTP Basic (token identifier:key) + `X-Crisp-Tier: plugin`.
@@ -44,6 +92,8 @@ export class CrispClient {
   private readonly maxRetries: number;
   private lastRequestAt = 0;
   private queue: Promise<unknown> = Promise.resolve();
+  /** This instance's own counters — see the CrispTelemetry doc above. */
+  readonly telemetry: CrispTelemetry = freshCrispTelemetry();
 
   constructor(options?: {
     identifier?: string;
@@ -100,6 +150,8 @@ export class CrispClient {
       const wait = this.lastRequestAt + this.minIntervalMs - Date.now();
       if (wait > 0) await sleep(wait);
       this.lastRequestAt = Date.now();
+      this.telemetry.requests += 1;
+      getCrispTelemetry().requests += 1;
 
       let response: Response | null = null;
       let networkError: unknown = null;
@@ -132,6 +184,14 @@ export class CrispClient {
 
       const status = response?.status ?? 0;
       const retryable = networkError !== null || RETRYABLE_STATUS.has(status);
+      if (status === 429) {
+        this.telemetry.status429s += 1;
+        getCrispTelemetry().status429s += 1;
+      }
+      if (retryable) {
+        this.telemetry.retryableFailures += 1;
+        getCrispTelemetry().retryableFailures += 1;
+      }
 
       if (!retryable || attempt >= this.maxRetries) {
         if (networkError) {
@@ -162,8 +222,17 @@ export class CrispClient {
         ? Number(retryAfterHeader) * 1000
         : 0;
       const backoffMs = Math.max(2000 * 2 ** attempt, retryAfterMs);
+      const actualWaitMs = Math.min(backoffMs, 60_000);
+      if (status === 429) {
+        console.warn(
+          `[crisp] 429 on ${path} — waiting ${(actualWaitMs / 1000).toFixed(1)}s ` +
+            `(Retry-After: ${retryAfterHeader ?? "none"})`
+        );
+      }
+      this.telemetry.backoffWaitMs += actualWaitMs;
+      getCrispTelemetry().backoffWaitMs += actualWaitMs;
       attempt += 1;
-      await sleep(Math.min(backoffMs, 60_000));
+      await sleep(actualWaitMs);
     }
   }
 

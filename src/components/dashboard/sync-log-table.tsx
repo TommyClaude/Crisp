@@ -12,6 +12,7 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import { cn } from "@/lib/utils";
+import type { BrandPagesMap } from "@/lib/sync/sync-service";
 
 /** A SyncLog row with Date fields serialized to ISO strings. */
 export interface SerializedSyncLog {
@@ -28,6 +29,14 @@ export interface SerializedSyncLog {
   error: string | null;
   /** Set only on brand-scoped range runs (see runRangeSync's brandId option); null otherwise. */
   brandId: string | null;
+  /**
+   * Raw SyncLog.brandPages JSON (see BrandPagesMap in sync-service.ts) — per-
+   * brand page ranges for this run, or null/absent on legacy rows written
+   * before this column existed. Parsed defensively by parseBrandPages below
+   * (this component never imports sync-service.ts itself — that's a server
+   * module reaching into Prisma — so the tiny parser is duplicated locally).
+   */
+  brandPages?: unknown;
 }
 
 const STATUS_STYLES: Record<string, string> = {
@@ -77,6 +86,84 @@ function formatPages(pageFrom: number | null, pageTo: number | null): string {
   return `${pageFrom ?? "?"} → ${pageTo ?? "?"}`;
 }
 
+/**
+ * Mirrors parseBrandPages in sync-service.ts. Duplicated (not imported) on
+ * purpose: sync-service.ts pulls in Prisma and other server-only modules,
+ * which this "use client" table must never bundle. Coerces the raw JSON
+ * column into a typed map, or null when absent/malformed/empty.
+ */
+function parseBrandPages(value: unknown): BrandPagesMap | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const result: BrandPagesMap = {};
+  for (const [key, entry] of Object.entries(value as Record<string, unknown>)) {
+    const from = (entry as { from?: unknown } | null)?.from;
+    const to = (entry as { to?: unknown } | null)?.to;
+    if (typeof from === "number" && typeof to === "number") {
+      result[key] = { from, to, synced: 0 };
+    }
+  }
+  return Object.keys(result).length > 0 ? result : null;
+}
+
+/** brandId (or "default") -> display name for a Pages-column range. */
+function brandPagesLabel(
+  key: string,
+  brands: Array<{ id: string; name: string }>
+): string {
+  if (key === "default") return "default";
+  return brands.find((b) => b.id === key)?.name ?? key;
+}
+
+/**
+ * The Pages column's cell content. When the run recorded per-brand progress
+ * (SyncLog.brandPages — see BrandPagesMap), show each brand's own range, e.g.
+ * "NinjaTeam 197→376 · YayCommerce 1→12" — the single legacy "from → to" text
+ * hid exactly this (a resumed run's true per-brand start pages). A lone
+ * "default" entry (the legacy env-only fallback, one implicit target) renders
+ * as the plain single-range form instead, since there's no second brand to
+ * disambiguate from. Falls back to the legacy pageFrom/pageTo text entirely
+ * when brandPages is absent (old rows, written before this column existed).
+ */
+function formatPagesCell(
+  log: Pick<SerializedSyncLog, "pageFrom" | "pageTo" | "brandPages">,
+  brands: Array<{ id: string; name: string }>
+): { text: string; title?: string } {
+  const brandPages = parseBrandPages(log.brandPages);
+  if (!brandPages) return { text: formatPages(log.pageFrom, log.pageTo) };
+
+  const remainingKeys = new Set(Object.keys(brandPages));
+  if (remainingKeys.size === 1 && remainingKeys.has("default")) {
+    const entry = brandPages.default;
+    return { text: `${entry.from} → ${entry.to}` };
+  }
+
+  // Stable, predictable order: known brands in the SAME order as the
+  // `brands` prop (the dashboard page's name-asc order), then any leftover
+  // keys (a since-deleted brand, or the legacy "default" key) in whatever
+  // order remains. Needed because jsonb does NOT preserve insertion order —
+  // without this, a run's brand list could shuffle on every read.
+  const orderedKeys: string[] = [];
+  for (const brand of brands) {
+    if (remainingKeys.has(brand.id)) {
+      orderedKeys.push(brand.id);
+      remainingKeys.delete(brand.id);
+    }
+  }
+  orderedKeys.push(...remainingKeys);
+
+  const text = orderedKeys
+    .map((key) => {
+      const entry = brandPages[key];
+      return `${brandPagesLabel(key, brands)} ${entry.from}→${entry.to}`;
+    })
+    .join(" · ");
+  // Always carry the full text as a hover title — even 2 brands' worth of
+  // "Name NNN→NNN" routinely overflows the cell's max-width (see the
+  // TableCell's truncate class), so the multi-brand case can never rely on
+  // the text alone to be readable.
+  return { text, title: text };
+}
+
 const numberFormat = new Intl.NumberFormat("en-US");
 
 /** brandId -> brand name for a range-run's badge; null (all brands) or an id no longer in `brands` (deleted since) get their own labels. */
@@ -119,7 +206,9 @@ export function SyncLogTable({
         </TableRow>
       </TableHeader>
       <TableBody>
-        {logs.map((log) => (
+        {logs.map((log) => {
+          const pagesCell = formatPagesCell(log, brands);
+          return (
           <TableRow key={log.id}>
             <TableCell className="font-medium">
               <div className="flex items-center gap-1.5">
@@ -149,7 +238,12 @@ export function SyncLogTable({
               {formatDuration(log.startedAt, log.finishedAt)}
             </TableCell>
             <TableCell className="text-muted-foreground tabular-nums">
-              {formatPages(log.pageFrom, log.pageTo)}
+              <span
+                title={pagesCell.title}
+                className="block max-w-56 truncate"
+              >
+                {pagesCell.text}
+              </span>
             </TableCell>
             <TableCell className="text-right tabular-nums">
               {numberFormat.format(log.conversationsSynced)}
@@ -170,7 +264,8 @@ export function SyncLogTable({
               )}
             </TableCell>
           </TableRow>
-        ))}
+          );
+        })}
       </TableBody>
     </Table>
   );

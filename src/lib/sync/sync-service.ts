@@ -15,6 +15,7 @@ import {
   endSyncProgress,
   getSyncProgress,
   isQueueHeld,
+  registerSyncTelemetrySource,
   setQueueHeld,
   shiftQueueEntry,
   type QueueEntry,
@@ -467,6 +468,44 @@ interface RunSyncOptions {
 }
 
 /**
+ * The `pageFrom` value to record on the SyncLog row for a run, given its
+ * fully-resolved per-brand start pages and the brand-key order it will
+ * actually walk (see `getOrderedBrandKeys`/the `targets` array in `runSync`).
+ *
+ * Before this existed, `runSync` recorded `pageFrom: options.startPage ?? 1`
+ * at creation time — correct for the legacy single-number resume (which only
+ * ever targets the first brand), but WRONG the moment per-brand resume
+ * entered the picture: a Continue run whose start pages were derived by
+ * `resolveStartPages`/`getResumePages` (or overridden for a brand other than
+ * the first) recorded `pageFrom: 1` even though the first brand actually
+ * resumed at, say, page 197 — the Recent-runs table then showed a misleading
+ * "1 → 376" for a run that never touched pages 1-196.
+ *
+ * `effectiveStartPages` must be the SAME map `runSync`'s loop indexes into
+ * (after the legacy-startPage merge, if any) so this reports the page the
+ * walk will actually start from, not a stale pre-merge guess.
+ * `orderedBrandKeys` must be in walk order (`targets.map(t => t.brandId ??
+ * "default")`) — the first key is "the first brand processed," matching the
+ * convention `resolveStartPages`'s legacy-override handling already uses.
+ *
+ * Range runs are a fixed exception, unchanged from before: a range walk
+ * always starts every scoped brand at page 1 (its page numbers index Crisp's
+ * date-filtered list, a different numbering space — see the RunSyncOptions
+ * doc comments), so `pageFrom` is always 1 regardless of any of the above.
+ *
+ * Pure and exported for unit testing — no DB access.
+ */
+export function derivePageFrom(
+  kind: SyncKind,
+  effectiveStartPages: Record<string, number>,
+  orderedBrandKeys: string[]
+): number {
+  if (kind === "range") return 1;
+  const firstKey = orderedBrandKeys[0] ?? "default";
+  return effectiveStartPages[firstKey] ?? 1;
+}
+
+/**
  * Grace window before {@link reconcileStaleSyncRuns} closes an orphaned
  * "running" SyncLog row. Long enough that a cron/CLI incremental sync in a
  * SEPARATE process (which this process cannot see) normally finishes inside
@@ -598,7 +637,13 @@ async function runSync(options: RunSyncOptions): Promise<SyncRunResult> {
     // inter-request pacing state — no burst at brand boundaries.
     let sharedClient: CrispClient | null = null;
     const clientFor = (): CrispClient => {
-      sharedClient ??= crispClientForTarget();
+      if (!sharedClient) {
+        sharedClient = crispClientForTarget();
+        // Scope the throttle display to THIS run's own counters — a
+        // concurrent manual resync/detect-start builds its own client and
+        // can no longer pollute the running sync's numbers (review finding).
+        registerSyncTelemetrySource(sharedClient.telemetry);
+      }
       return sharedClient;
     };
 
@@ -637,6 +682,27 @@ async function runSync(options: RunSyncOptions): Promise<SyncRunResult> {
       // per-brand resume existed.
       effectiveStartPages[targets[0].brandId ?? "default"] = options.startPage;
     }
+
+    // Now that the per-brand start pages AND the walk order are both known,
+    // correct the SyncLog row's pageFrom to the first processed brand's
+    // ACTUAL starting page (see derivePageFrom's doc comment for why the
+    // value picked at syncLog.create() above can be wrong for a resumed or
+    // brand-overridden run). Skipped when it already matches — the common
+    // case (no resume, no override) needs no extra write.
+    const orderedBrandKeys = targets.map((target) => target.brandId ?? "default");
+    const recordedPageFrom = derivePageFrom(
+      options.kind,
+      effectiveStartPages,
+      orderedBrandKeys
+    );
+    if (recordedPageFrom !== syncLog.pageFrom) {
+      syncLog.pageFrom = recordedPageFrom;
+      await prisma.syncLog.update({
+        where: { id: syncLog.id },
+        data: { pageFrom: recordedPageFrom },
+      });
+    }
+
     for (let t = 0; t < targets.length; t++) {
       const target = targets[t];
       if (state.cancelRequested) {
@@ -757,10 +823,17 @@ async function runSync(options: RunSyncOptions): Promise<SyncRunResult> {
             // were already purged from the index above (if they just flipped
             // to junk) and must never re-enter it.
             if (conversation.state === "resolved" && !result.isJunk) {
+              const chunkStart = Date.now();
               try {
                 await rebuildChunksForConversation(result.conversationId);
               } catch (error) {
                 console.warn(`Chunk rebuild failed for ${sessionId}:`, error);
+              } finally {
+                // Wall-clock, not just the success path — a slow FAILED
+                // rebuild (e.g. a timing-out embedding call) is exactly the
+                // kind of per-conversation cost this counter exists to
+                // surface (see SyncProgress.chunkBuildMs's doc comment).
+                state.chunkBuildMs += Date.now() - chunkStart;
               }
             }
           } catch (error) {
@@ -832,10 +905,13 @@ async function runSync(options: RunSyncOptions): Promise<SyncRunResult> {
           if (retryEntry) retryEntry.synced += 1;
           // Junk conversations never re-enter the RAG index (see the main loop).
           if (conversation.state === "resolved" && !result.isJunk) {
+            const chunkStart = Date.now();
             try {
               await rebuildChunksForConversation(result.conversationId);
             } catch (error) {
               console.warn(`Chunk rebuild failed for ${sessionId}:`, error);
+            } finally {
+              state.chunkBuildMs += Date.now() - chunkStart;
             }
           }
         } catch (error) {

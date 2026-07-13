@@ -55,6 +55,7 @@ function serializeSyncLog(log: SyncLog): SerializedSyncLog {
     failedSessions: log.failedSessions,
     error: log.error,
     brandId: log.brandId,
+    brandPages: log.brandPages,
   };
 }
 

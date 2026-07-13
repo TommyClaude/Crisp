@@ -4,6 +4,11 @@
  * this singleton only powers live progress reporting and cancellation.
  */
 
+import {
+  resetCrispTelemetry,
+  type CrispTelemetry,
+} from "@/lib/crisp/client";
+
 export type SyncKind = "full" | "incremental" | "single" | "range";
 
 /** Terminal status recorded when a run is halted on request. */
@@ -45,6 +50,28 @@ export interface SyncProgress {
   cancelReason: CancelReason;
   /** Populated only for kind === "range" runs; otherwise all zero/null. */
   range: RangeProgress;
+  /**
+   * Crisp request/backoff telemetry for the CURRENT run — visibility into why
+   * a run is slower than the ~1s/conversation design rate (a 429-throttled
+   * backfill has nothing else to point at). Live values from client.ts's
+   * process-wide {@link CrispTelemetry} counters, merged in on every
+   * {@link getSyncProgress} read (same pattern as `queue`/`held` below) —
+   * always current, no per-page copy needed. Reset to zero at the start of
+   * every run (see beginSyncProgress → resetCrispTelemetry).
+   */
+  crispRequests: number;
+  /** Responses with HTTP 429, this run. */
+  crisp429s: number;
+  /** Cumulative ms slept in Crisp's backoff retry wait, this run (NOT routine inter-request pacing). */
+  throttleWaitMs: number;
+  /**
+   * Cumulative ms spent in chunk-rebuild/embedding calls this run — the other
+   * big per-conversation cost besides Crisp round-trips. Unlike the Crisp
+   * counters above, this one IS owned directly by sync-service.ts (a plain
+   * timer around its `rebuildChunksForConversation` call sites), the same way
+   * `conversationsSynced` is — there's no separate module singleton to merge.
+   */
+  chunkBuildMs: number;
   /**
    * FIFO queue of validated start requests waiting for the running sync to
    * finish (see enqueueSync below and the start route). Process-memory only,
@@ -124,12 +151,30 @@ function freshProgress(): Omit<SyncProgress, "queue" | "held"> {
     cancelRequested: false,
     cancelReason: "cancelled",
     range: freshRange(),
+    // Mirrors the reset the real counters get via resetCrispTelemetry() in
+    // beginSyncProgress — kept here too so this object is a fully valid
+    // SyncProgress the instant it's created, before the first live-merge read.
+    crispRequests: 0,
+    crisp429s: 0,
+    throttleWaitMs: 0,
+    chunkBuildMs: 0,
   };
 }
 
 const globalForSync = globalThis as unknown as {
   crispSyncProgress?: SyncProgress;
+  /** The RUNNING sync's own client counters (registered by runSync when it
+   *  creates its shared client) — null before the first request. Scoping the
+   *  display to the run's instance keeps a concurrent manual resync or
+   *  detect-start (which build their own clients) from polluting the run's
+   *  throttle numbers. */
+  crispSyncTelemetrySource?: CrispTelemetry | null;
 };
+
+/** Point the progress display at the running sync's own client counters. */
+export function registerSyncTelemetrySource(source: CrispTelemetry): void {
+  globalForSync.crispSyncTelemetrySource = source;
+}
 
 export function getSyncProgress(): SyncProgress {
   const queueState = getQueueState();
@@ -144,6 +189,15 @@ export function getSyncProgress(): SyncProgress {
   // needing to re-fetch this object.
   state.queue = queueState.entries;
   state.held = queueState.held;
+  // Same live-merge treatment for the Crisp telemetry counters (see the
+  // SyncProgress doc comments) — but scoped to the RUNNING sync's own client
+  // instance (registered in runSync), NOT the process-wide aggregate, so an
+  // unrelated concurrent Crisp call can't inflate the run's numbers. Null
+  // until the run's client makes its first request.
+  const telemetry = globalForSync.crispSyncTelemetrySource;
+  state.crispRequests = telemetry?.requests ?? 0;
+  state.crisp429s = telemetry?.status429s ?? 0;
+  state.throttleWaitMs = telemetry?.backoffWaitMs ?? 0;
   return state;
 }
 
@@ -153,6 +207,12 @@ export function beginSyncProgress(
   range?: { start: Date; end: Date }
 ): SyncProgress {
   const state = getSyncProgress();
+  // Detach the previous run's counter source — the new run registers its own
+  // client's counters on first request (registerSyncTelemetrySource), so a
+  // brand-new run never starts with the previous run's 429 count showing.
+  // The process-wide aggregate is reset too, purely for debugging hygiene.
+  globalForSync.crispSyncTelemetrySource = null;
+  resetCrispTelemetry();
   Object.assign(state, freshProgress(), {
     running: true,
     kind,

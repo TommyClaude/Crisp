@@ -76,6 +76,37 @@ interface SyncProgress {
   queue: QueuedSyncEntry[];
   /** True when the queue is held after a Stop/Pause — see sync-state.ts. */
   held: boolean;
+  /** Crisp request/backoff telemetry for the CURRENT run — see sync-state.ts's SyncProgress doc comments. */
+  crispRequests: number;
+  crisp429s: number;
+  throttleWaitMs: number;
+  chunkBuildMs: number;
+}
+
+/** Compact "Xm Ys" / "Ns" duration, for the throttle-notice line. */
+function formatShortDuration(ms: number): string {
+  const totalSeconds = Math.round(ms / 1000);
+  const minutes = Math.floor(totalSeconds / 60);
+  const seconds = totalSeconds % 60;
+  return minutes > 0 ? `${minutes}m ${seconds}s` : `${seconds}s`;
+}
+
+/**
+ * Whether the running sync has spent a large-enough share of its elapsed
+ * time waiting on Crisp's 429/5xx backoff to be worth calling out — either a
+ * flat 60s+ or more than 10% of the run's wall-clock time so far, whichever
+ * flags first (a brand-new run with a single 30s wait shouldn't yet alarm,
+ * but it should once that wait dominates the run). Zero throttling never
+ * shows anything, regardless of elapsed time.
+ */
+function isThrottleNoticeworthy(
+  throttleWaitMs: number,
+  startedAt: string | null
+): boolean {
+  if (throttleWaitMs <= 0) return false;
+  if (throttleWaitMs > 60_000) return true;
+  const elapsedMs = startedAt ? Date.now() - new Date(startedAt).getTime() : 0;
+  return elapsedMs > 0 && throttleWaitMs > elapsedMs * 0.1;
 }
 
 /** Plain-language one-liner for a queued entry, for the "Queued" list. */
@@ -433,6 +464,14 @@ export function SyncPanel({
     }
     if (rangeStart > rangeEnd) {
       toast.error("From date must be on or before To date");
+      return;
+    }
+    // Range syncs are brand-scoped only (no more "all brands" range) — the
+    // button is disabled without an effective brand, but guard here too in
+    // case that ever drifts (same defensive-double-check pattern as the date
+    // guards above).
+    if (!effectiveBrandId) {
+      toast.error("Select a brand before running a range sync");
       return;
     }
     setStarting("range");
@@ -875,6 +914,23 @@ export function SyncPanel({
                   </dd>
                 </div>
               </dl>
+              {/* Crisp 429/backoff visibility — a run stuck retrying is
+                  otherwise indistinguishable from one just processing pages
+                  slowly (see client.ts's CrispTelemetry / sync-state.ts's
+                  throttleWaitMs). Only shown once it's actually eating a
+                  meaningful share of the run's time (isThrottleNoticeworthy);
+                  silent at zero. */}
+              {isThrottleNoticeworthy(
+                progress.throttleWaitMs,
+                progress.startedAt
+              ) && (
+                <p className="mt-3 flex items-center gap-1.5 text-xs text-amber-600 dark:text-amber-400">
+                  <TriangleAlert className="size-3.5 shrink-0" />
+                  Throttled by Crisp: 429 ×{numberFormat.format(progress.crisp429s)}
+                  {" — spent "}
+                  {formatShortDuration(progress.throttleWaitMs)} waiting
+                </p>
+              )}
             </div>
           )}
 
@@ -1007,24 +1063,36 @@ export function SyncPanel({
             <Button
               variant="outline"
               size="sm"
-              disabled={busy || !rangeStart || !rangeEnd}
+              disabled={busy || !rangeStart || !rangeEnd || !effectiveBrandId}
               onClick={startRangeSync}
+              title={
+                !effectiveBrandId
+                  ? "Select a brand above (or click a month on a brand's heatmap) to run a range sync."
+                  : undefined
+              }
             >
               {starting === "range" ? (
                 <LoaderCircle className="size-3.5 animate-spin" />
               ) : (
                 <CalendarRange className="size-3.5" />
               )}
-              Sync range — {effectiveBrandName ?? "all brands"}
+              Sync range{effectiveBrandName ? ` — ${effectiveBrandName}` : ""}
             </Button>
             <HelpTip subject="range sync">
-              Syncs only conversations Crisp reports in this date window, guarded
-              so a wrongly-ignored filter can&apos;t run away into a full
-              backfill. Click a month on a brand&apos;s coverage grid to fill
-              these in AND scope the sync to that brand — or pick a brand
-              above to always scope it. The result reports how many fell in
-              range by last-activity vs created date.
+              Range syncs are brand-scoped — there&apos;s no &quot;all
+              brands&quot; range. Pick a brand above, or click a month on a
+              brand&apos;s coverage grid (which fills in these dates AND scopes
+              the sync to that brand). Guarded so a wrongly-ignored date
+              filter can&apos;t run away into a full backfill; the result
+              reports how many fell in range by last-activity vs created
+              date.
             </HelpTip>
+            {!effectiveBrandId && (
+              <p className="text-muted-foreground w-full text-xs">
+                Select a brand above (or click a month on a brand&apos;s
+                heatmap) to run a range sync.
+              </p>
+            )}
           </div>
         </CardContent>
       </Card>

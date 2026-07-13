@@ -30,9 +30,12 @@ const bodySchema = z
     // start<=end cross-field checks live in validateRange (unit-tested).
     dateStart: isoDay.optional(),
     dateEnd: isoDay.optional(),
-    // Optional brand scope — only meaningful together with a date range (see
-    // the range-required check below); full/incremental always cover every
-    // brand.
+    // Brand scope — REQUIRED with a date range (a range sync is always
+    // brand-scoped now; the manual "rangeCheck.window && brandId == null"
+    // check below 400s a bare range), and rejected without one; full/
+    // incremental always cover every brand regardless. Kept optional at the
+    // Zod layer (not `.refine`d here) so the cross-field checks below can
+    // return the specific, clear 400 message for each combination.
     brandId: z.string().min(1).optional(),
   })
   .default({ mode: "full" });
@@ -45,14 +48,17 @@ const bodySchema = z
  * filtered list, not the full archive, so the combination is rejected rather
  * than silently misinterpreted; `brandId` is only valid WITH a date range —
  * full/incremental always cover every brand, so a bare `brandId` is rejected
- * the same way rather than silently dropped)
+ * the same way rather than silently dropped — and, going the other way, a
+ * date range REQUIRES `brandId`: range syncs are brand-scoped only, there is
+ * no more "all brands" range, so a range request without one 400s)
  *
  * Kicks off a background sync in this server process and returns immediately.
  * When both `dateStart` and `dateEnd` are given it runs a RANGE sync (Crisp's
- * date filter + early-stop guard), optionally narrowed to one brand via
- * `brandId`; otherwise the usual full/incremental run (which always covers
- * every brand). Progress is exposed by /api/sync/crisp/status. For scheduled
- * syncs, prefer the CLI scripts (`npm run sync:crisp[:incremental]`).
+ * date filter + early-stop guard), scoped to the one brand named by
+ * `brandId` (required — see above); otherwise the usual full/incremental run
+ * (which always covers every brand). Progress is exposed by
+ * /api/sync/crisp/status. For scheduled syncs, prefer the CLI scripts
+ * (`npm run sync:crisp[:incremental]`).
  *
  * **Per-brand resume** — `resume: true` tells the server to derive each
  * brand's own starting page from its furthest page across all history (see
@@ -129,6 +135,17 @@ export async function POST(request: NextRequest) {
       {
         error:
           "startPageBrandId cannot be combined with a date range — it only scopes the startPage override for a full/incremental resume (a range sync is already brand-scoped via brandId).",
+      },
+      { status: 400 }
+    );
+  }
+  if (rangeCheck.window && brandId == null) {
+    // Range syncs are brand-scoped only — the "Sync range — all brands" mode
+    // is gone (owner request): every range walk must name one Brand.
+    return NextResponse.json(
+      {
+        error:
+          "Select a brand before running a range sync — range syncs are brand-scoped.",
       },
       { status: 400 }
     );
