@@ -79,6 +79,9 @@ const envSchema = z.object({
   BASIC_AUTH_PASSWORD: z.string().optional(),
   CRISP_REQUEST_INTERVAL_MS: z.coerce.number().int().positive().default(150),
   CRISP_MAX_RETRIES: z.coerce.number().int().min(0).max(10).default(5),
+  // Per-source cap on crawled docs pages ("url" and "sitemap" modes). The
+  // coverage panel warns when a source hits it. Raise for large docs sites.
+  DOCS_CRAWL_MAX_PAGES: z.coerce.number().int().positive().default(300),
   NODE_ENV: z
     .enum(["development", "test", "production"])
     .default("development"),

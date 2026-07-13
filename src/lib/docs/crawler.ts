@@ -1,5 +1,7 @@
+import { getEnv } from "@/env";
+
 /**
- * Minimal, dependency-free documentation crawler.
+ * Minimal documentation crawler (no parser dependencies).
  *
  * Two modes:
  *   - "url":     breadth-first crawl starting at the URL, restricted to the
@@ -25,11 +27,19 @@ export interface CrawlOptions {
   timeoutMs?: number;
 }
 
-const DEFAULTS: Required<CrawlOptions> = {
-  maxPages: 200,
+const DEFAULTS: Required<Omit<CrawlOptions, "maxPages">> = {
   delayMs: 300,
   timeoutMs: 15_000,
 };
+
+/**
+ * Per-source page cap, env-tunable (DOCS_CRAWL_MAX_PAGES, default 300) so a
+ * large docs site can be covered without a code change. Read at call time —
+ * stats.ts surfaces the same number in the coverage panel's cap warning.
+ */
+export function docsCrawlCap(): number {
+  return getEnv().DOCS_CRAWL_MAX_PAGES;
+}
 
 /** Minimum extracted characters for a page to be worth indexing. */
 const MIN_CONTENT_CHARS = 120;
@@ -212,7 +222,12 @@ export async function crawlDocs(
     onProgress?: (fetched: number, queued: number) => void;
   }
 ): Promise<CrawledPage[]> {
-  const options = { ...DEFAULTS, ...crawlOptions };
+  const options = {
+    maxPages: crawlOptions?.maxPages ?? docsCrawlCap(),
+    delayMs: crawlOptions?.delayMs ?? DEFAULTS.delayMs,
+    timeoutMs: crawlOptions?.timeoutMs ?? DEFAULTS.timeoutMs,
+    onProgress: crawlOptions?.onProgress,
+  };
   const start = new URL(startUrl);
   const pages: CrawledPage[] = [];
   const visited = new Set<string>();

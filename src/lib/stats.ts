@@ -1,13 +1,12 @@
 import { Prisma } from "@prisma/client";
 import { prisma } from "@/lib/db";
 import { embeddingsConfigured } from "@/env";
+import { docsCrawlCap } from "@/lib/docs/crawler";
 import { hasPgvector } from "@/lib/rag/search";
 
-// Crawl caps mirrored from their source of truth (not exported there, so we
-// duplicate the literal + a comment rather than importing internals):
-//   - docs pages:  src/lib/docs/crawler.ts        DEFAULTS.maxPages   = 200
-//   - forum topics: src/lib/wporg/forum-crawler.ts DEFAULTS.maxThreads = 200
-const DOCS_PAGE_CRAWL_CAP = 200;
+// Docs cap comes from its source of truth (env-tunable, DOCS_CRAWL_MAX_PAGES).
+// The forum cap is still mirrored from src/lib/wporg/forum-crawler.ts
+// DEFAULTS.maxThreads (not exported there).
 const FORUM_THREAD_CRAWL_CAP = 200;
 
 /**
@@ -208,7 +207,7 @@ export async function getKnowledgeCoverage(): Promise<KnowledgeCoverage> {
     prisma.docsSource.findMany({
       where: {
         type: { not: "wporg_forum" },
-        pageCount: { gte: DOCS_PAGE_CRAWL_CAP },
+        pageCount: { gte: docsCrawlCap() },
         // A failed source already surfaces via failedSources; a stale
         // pageCount from an earlier successful crawl must not ALSO claim
         // "hit the cap" — the two warnings would contradict each other.
@@ -267,7 +266,7 @@ export async function getKnowledgeCoverage(): Promise<KnowledgeCoverage> {
         url: s.url,
         pageCount: s.pageCount,
       })),
-      pageCrawlCap: DOCS_PAGE_CRAWL_CAP,
+      pageCrawlCap: docsCrawlCap(),
     },
     forum: {
       sourceCount: forumAgg._count._all,
