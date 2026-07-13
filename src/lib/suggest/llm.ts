@@ -89,6 +89,24 @@ async function postJson(
   }
 }
 
+// Newer models on either provider reject/deprecate `temperature` with an HTTP
+// 400 (owner hit this live: Anthropic — "`temperature` is deprecated for this
+// model"). Model-name guessing is fragile, so instead: try WITH the field,
+// and on a 400 that names it, retry once WITHOUT and remember per provider
+// for the rest of the process lifetime.
+const temperatureRejectedBy: Record<"anthropic" | "openai", boolean> = {
+  anthropic: false,
+  openai: false,
+};
+
+function isTemperatureRejection(error: unknown): boolean {
+  return (
+    error instanceof Error &&
+    error.message.includes("HTTP 400") &&
+    /temperature/i.test(error.message)
+  );
+}
+
 async function draftWithAnthropic(
   system: string,
   userPrompt: string,
@@ -97,20 +115,30 @@ async function draftWithAnthropic(
 ): Promise<DraftResult> {
   const env = getEnv();
   const model = env.ANTHROPIC_MODEL;
-  const body = await postJson(
-    "https://api.anthropic.com/v1/messages",
-    {
-      "x-api-key": env.ANTHROPIC_API_KEY!,
-      "anthropic-version": "2023-06-01",
-    },
-    {
-      model,
-      max_tokens: maxTokens,
-      system,
-      messages: [{ role: "user", content: userPrompt }],
-      ...(temperature != null ? { temperature } : {}),
-    }
-  );
+  const url = "https://api.anthropic.com/v1/messages";
+  const headers = {
+    "x-api-key": env.ANTHROPIC_API_KEY!,
+    "anthropic-version": "2023-06-01",
+  };
+  const payload = {
+    model,
+    max_tokens: maxTokens,
+    system,
+    messages: [{ role: "user", content: userPrompt }],
+  };
+  const withTemp = temperature != null && !temperatureRejectedBy.anthropic;
+  let body;
+  try {
+    body = await postJson(
+      url,
+      headers,
+      withTemp ? { ...payload, temperature } : payload
+    );
+  } catch (error) {
+    if (!withTemp || !isTemperatureRejection(error)) throw error;
+    temperatureRejectedBy.anthropic = true;
+    body = await postJson(url, headers, payload);
+  }
 
   if (body.stop_reason === "refusal") {
     throw new Error("The model declined to draft a reply for this topic");
@@ -133,23 +161,35 @@ async function draftWithOpenAI(
   const env = getEnv();
   const model = env.OPENAI_CHAT_MODEL;
   // gpt-5.x / o-series reject a non-default `temperature` outright (like
-  // `max_tokens` below) — silently skip it there rather than 400 the call.
+  // `max_tokens` below) — skip it there up front; the catch below covers any
+  // future model this prefix guess misses.
   const supportsTemperature = !/^(gpt-5|o\d)/i.test(model);
-  const body = await postJson(
-    "https://api.openai.com/v1/chat/completions",
-    { Authorization: `Bearer ${env.OPENAI_API_KEY}` },
-    {
-      model,
-      // gpt-5.x / o-series reject `max_tokens`; `max_completion_tokens` is
-      // the replacement and is accepted by older chat models too.
-      max_completion_tokens: maxTokens,
-      messages: [
-        { role: "system", content: system },
-        { role: "user", content: userPrompt },
-      ],
-      ...(temperature != null && supportsTemperature ? { temperature } : {}),
-    }
-  );
+  const url = "https://api.openai.com/v1/chat/completions";
+  const headers = { Authorization: `Bearer ${env.OPENAI_API_KEY}` };
+  const payload = {
+    model,
+    // gpt-5.x / o-series reject `max_tokens`; `max_completion_tokens` is
+    // the replacement and is accepted by older chat models too.
+    max_completion_tokens: maxTokens,
+    messages: [
+      { role: "system", content: system },
+      { role: "user", content: userPrompt },
+    ],
+  };
+  const withTemp =
+    temperature != null && supportsTemperature && !temperatureRejectedBy.openai;
+  let body;
+  try {
+    body = await postJson(
+      url,
+      headers,
+      withTemp ? { ...payload, temperature } : payload
+    );
+  } catch (error) {
+    if (!withTemp || !isTemperatureRejection(error)) throw error;
+    temperatureRejectedBy.openai = true;
+    body = await postJson(url, headers, payload);
+  }
   const text = body.choices?.[0]?.message?.content?.trim();
   if (!text) throw new Error("LLM returned an empty draft");
   return { text, model: body.model ?? model };
