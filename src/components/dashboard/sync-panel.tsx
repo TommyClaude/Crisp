@@ -142,12 +142,35 @@ function formatQueueEntry(
 /** Compact "Brand → page" summary across every configured brand, e.g.
  *  "YayCommerce → 164 · Ninja Team → 37" — shown instead of a single resume
  *  number once more than one brand is configured, since each brand now
- *  resumes independently (see resumePages / getResumePages). */
+ *  resumes independently (see resumePages / getResumePages). A brand whose
+ *  entry is `null` (ceiling-complete — see computeResumePages) shows "done"
+ *  instead of a page number, since there's nothing left to resume there. */
 function formatResumePagesSummary(
-  resumePages: Record<string, number>,
+  resumePages: Record<string, number | null>,
   brands: Array<{ id: string; name: string }>
 ): string {
-  return brands.map((b) => `${b.name} → ${resumePages[b.id] ?? 1}`).join(" · ");
+  return brands
+    .map((b) => {
+      const page = resumePages[b.id];
+      return `${b.name} → ${page == null ? "done" : page}`;
+    })
+    .join(" · ");
+}
+
+/**
+ * Brand names (or a generic label for the legacy env-only fallback) whose
+ * resumePages entry is `null` — i.e. that brand's LATEST run hit Crisp's
+ * page-pagination ceiling (see computeResumePages' CEILING RULE) and has
+ * nothing left to page-walk without a date-range sync.
+ */
+function ceilingBrandNames(
+  resumePages: Record<string, number | null>,
+  brands: Array<{ id: string; name: string }>
+): string[] {
+  if (brands.length === 0) {
+    return resumePages.default === null ? ["This workspace"] : [];
+  }
+  return brands.filter((b) => resumePages[b.id] === null).map((b) => b.name);
 }
 
 /** A month cell click from the coverage heatmap, to prefill the range form. */
@@ -191,7 +214,7 @@ interface StatusResponse {
   lastCompleted: SerializedSyncLog | null;
   recentLogs: SerializedSyncLog[];
   resumePage: number;
-  resumePages: Record<string, number>;
+  resumePages: Record<string, number | null>;
 }
 
 export interface LastSyncSummary {
@@ -207,8 +230,14 @@ interface SyncPanelProps {
   recentLogs: SerializedSyncLog[];
   /** The furthest page any past sync run has reached (see getResumePage). Kept for back-compat; resumePages is per-brand. */
   resumePage: number;
-  /** Each configured brand's own furthest page across history, keyed by brand id — or "default" for the legacy env-only fallback (see getResumePages). Object key order is createdAt asc, so the first key is "the first brand". */
-  resumePages: Record<string, number>;
+  /**
+   * Each configured brand's own furthest page across history, keyed by
+   * brand id — or "default" for the legacy env-only fallback (see
+   * getResumePages). Object key order is createdAt asc, so the first key is
+   * "the first brand". A `null` entry means that brand's LATEST run hit
+   * Crisp's page-pagination ceiling — see ceilingBrandNames.
+   */
+  resumePages: Record<string, number | null>;
   /** Set when a heatmap month cell is clicked, to prefill the range form. */
   prefillRange?: PrefillRange | null;
   /** Every configured brand, for the recent-runs badge and the range-sync brand label. */
@@ -254,7 +283,8 @@ export function SyncPanel({
   // kept for back-compat (the single-number "Earlier runs reached" line when
   // 0-1 brands are configured). resumePages is the per-brand source of truth.
   const [resumePage, setResumePage] = React.useState(initialResumePage);
-  const [resumePages, setResumePages] = React.useState(initialResumePages);
+  const [resumePages, setResumePages] =
+    React.useState<Record<string, number | null>>(initialResumePages);
   // Object key order matches getResumePages' orderedBrandKeys (createdAt
   // asc) — the first key is always "the first brand" (see its doc comment).
   const firstBrandKey = React.useMemo(
@@ -265,14 +295,24 @@ export function SyncPanel({
   // when one is chosen, else the first brand — matching the Continue flow's
   // "override targets that brand automatically" behavior.
   const targetBrandKey = selectedBrandId ?? firstBrandKey;
-  const targetResumePage = targetBrandKey ? (resumePages[targetBrandKey] ?? 1) : 1;
+  const targetEntry = targetBrandKey ? resumePages[targetBrandKey] : undefined;
+  // The target brand hit Crisp's pagination ceiling — nothing left to
+  // page-walk. The input must NOT collapse this to "1" (review finding: a
+  // "page 1" prefill under a "Ninja Team → done" line both misleads and, if
+  // nudged, orders a wasted ~1000-page re-walk of a finished brand). It
+  // prefills empty with a "done" placeholder instead; typing a number is
+  // still allowed as a deliberate force-re-walk escape hatch.
+  const targetCeilingDone = targetEntry === null;
+  const targetResumePage = targetEntry ?? 1;
   // Shown as a small label on the override input so it's visible (not just
   // in the HelpTip) WHICH brand a hand-typed page number would apply to.
   const targetBrandName = brands.find((b) => b.id === targetBrandKey)?.name;
   // Kept as a string so the field can be freely edited (including a brief
   // empty state) without fighting the user on every keystroke; parsed and
   // clamped to an integer >= 1 on blur and again right before starting.
-  const [resumeFrom, setResumeFrom] = React.useState(String(targetResumePage));
+  const [resumeFrom, setResumeFrom] = React.useState(
+    targetCeilingDone ? "" : String(targetResumePage)
+  );
   // True once the user has actually typed in the resume-from input — a
   // prefill (from a fresh status poll, or the initial per-brand default) is
   // NOT an edit. Only an edited value is sent as an explicit startPage
@@ -293,10 +333,13 @@ export function SyncPanel({
   const [startingNext, setStartingNext] = React.useState(false);
 
   // The input tracks the latest computed resume page for its target brand
-  // until the user edits it (see resumeDirty).
+  // until the user edits it (see resumeDirty). A ceiling-complete target
+  // prefills EMPTY (with a "done" placeholder) — never "1".
   React.useEffect(() => {
-    if (!resumeDirty) setResumeFrom(String(targetResumePage));
-  }, [targetResumePage, resumeDirty]);
+    if (!resumeDirty) {
+      setResumeFrom(targetCeilingDone ? "" : String(targetResumePage));
+    }
+  }, [targetResumePage, targetCeilingDone, resumeDirty]);
 
   // Apply a heatmap month click to the range inputs and scroll them into view.
   React.useEffect(() => {
@@ -651,12 +694,32 @@ export function SyncPanel({
                 Interrupted at page {latestHaltedPage} — continue where it
                 left off.
                 {brands.length > 1
-                  ? Object.values(resumePages).some((page) => page > 1) &&
+                  ? Object.values(resumePages).some(
+                      (page) => page != null && page > 1
+                    ) &&
                     ` Earlier runs reached: ${formatResumePagesSummary(resumePages, brands)}.`
                   : resumePage > (latestHaltedPage ?? 1) &&
                     ` Earlier runs reached page ${resumePage}.`}
               </span>
             )}
+            {/* Ceiling-complete brands, shown independently of latestHalted —
+                a run that stopped ONLY because it hit Crisp's page ceiling
+                finishes "completed" (see runSync's isPageCeilingError
+                handling), not "interrupted," so it never sets latestHalted.
+                This line is the sole affordance telling the owner why
+                Continue has nothing further to do for that brand. */}
+            {(() => {
+              const names = ceilingBrandNames(resumePages, brands);
+              if (names.length === 0) return null;
+              return (
+                <span className="text-muted-foreground block w-full text-xs">
+                  {names.join(", ")}{" "}
+                  {names.length > 1 ? "have" : "has"} reached Crisp&apos;s
+                  1,000-page API ceiling — older conversations need a
+                  date-range sync (From/To above, or a heatmap month).
+                </span>
+              );
+            })()}
           </CardDescription>
           <CardAction className="flex flex-wrap items-center gap-2">
             {running && (
@@ -728,14 +791,19 @@ export function SyncPanel({
                     min={1}
                     step={1}
                     value={resumeFrom}
+                    placeholder={targetCeilingDone ? "done" : undefined}
                     disabled={busy}
                     onChange={(e) => {
                       setResumeFrom(e.target.value);
                       setResumeDirty(true);
                     }}
-                    onBlur={() =>
-                      setResumeFrom(String(clampResumePage(resumeFrom)))
-                    }
+                    onBlur={() => {
+                      // An empty input on a ceiling-complete brand stays
+                      // empty ("done") — clamping would turn it into the
+                      // misleading "1" this fix removes.
+                      if (resumeFrom.trim() === "" && targetCeilingDone) return;
+                      setResumeFrom(String(clampResumePage(resumeFrom)));
+                    }}
                     aria-label="Resume from page"
                     className="h-8 w-20 tabular-nums"
                   />
@@ -780,7 +848,10 @@ export function SyncPanel({
                           ? "incremental"
                           : "full",
                       resume: true,
-                      ...(resumeDirty
+                      // Dirty AND non-empty: typing then clearing the field
+                      // must not send a clamped "page 1" override — an empty
+                      // input always means "no override", ceiling or not.
+                      ...(resumeDirty && resumeFrom.trim() !== ""
                         ? {
                             startPage: clampResumePage(resumeFrom),
                             startPageBrandId: overrideBrandId,

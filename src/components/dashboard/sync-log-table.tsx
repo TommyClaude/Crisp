@@ -98,8 +98,14 @@ function parseBrandPages(value: unknown): BrandPagesMap | null {
   for (const [key, entry] of Object.entries(value as Record<string, unknown>)) {
     const from = (entry as { from?: unknown } | null)?.from;
     const to = (entry as { to?: unknown } | null)?.to;
+    const ceiling = (entry as { ceiling?: unknown } | null)?.ceiling;
     if (typeof from === "number" && typeof to === "number") {
-      result[key] = { from, to, synced: 0 };
+      result[key] = {
+        from,
+        to,
+        synced: 0,
+        ...(ceiling === true ? { ceiling: true } : {}),
+      };
     }
   }
   return Object.keys(result).length > 0 ? result : null;
@@ -134,7 +140,13 @@ function formatPagesCell(
   const remainingKeys = new Set(Object.keys(brandPages));
   if (remainingKeys.size === 1 && remainingKeys.has("default")) {
     const entry = brandPages.default;
-    return { text: `${entry.from} → ${entry.to}` };
+    const text = `${entry.from} → ${entry.to}${entry.ceiling ? " (ceiling)" : ""}`;
+    return {
+      text,
+      title: entry.ceiling
+        ? "Reached Crisp's 1,000-page pagination ceiling — older conversations need a date-range sync."
+        : undefined,
+    };
   }
 
   // Stable, predictable order: known brands in the SAME order as the
@@ -154,7 +166,8 @@ function formatPagesCell(
   const text = orderedKeys
     .map((key) => {
       const entry = brandPages[key];
-      return `${brandPagesLabel(key, brands)} ${entry.from}→${entry.to}`;
+      const suffix = entry.ceiling ? " (ceiling)" : "";
+      return `${brandPagesLabel(key, brands)} ${entry.from}→${entry.to}${suffix}`;
     })
     .join(" · ");
   // Always carry the full text as a hover title — even 2 brands' worth of

@@ -338,9 +338,12 @@ model SyncLog {
   // survive the brand being deleted later.
   brandId             String?
   // Per-brand page progress for THIS run — {[brandId | "default"]: {from,
-  // to, synced}} — updated as the walk advances (same cadence as pageTo),
-  // one entry per brand the run has reached so far; `synced` counts that
-  // brand's conversations synced this run. The per-brand resume suggestion
+  // to, synced, ceiling?}} — updated as the walk advances (same cadence as
+  // pageTo), one entry per brand the run has reached so far; `synced` counts
+  // that brand's conversations synced this run; `ceiling: true` records that
+  // the walk hit Crisp's page-1000 pagination cap (see isPageCeilingError in
+  // crisp/client.ts) — the brand is walk-complete until a later full/
+  // incremental run says otherwise. The per-brand resume suggestion
   // (see computeResumePages/getResumePages in sync-service.ts) is derived
   // from this across all of history; legacy rows from before this column
   // existed have no entry here and fall back to the old first-brand-only

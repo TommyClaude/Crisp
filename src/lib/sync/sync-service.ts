@@ -1,7 +1,7 @@
 import type { Prisma } from "@prisma/client";
 import { prisma } from "@/lib/db";
 import { getEnv } from "@/env";
-import { CrispApiError, CrispClient } from "@/lib/crisp/client";
+import { CrispApiError, CrispClient, isPageCeilingError } from "@/lib/crisp/client";
 import type { CrispConversation, CrispMessage } from "@/lib/crisp/types";
 import { classifyJunk } from "@/lib/crisp/junk";
 import { rebuildChunksForConversation } from "@/lib/rag/rebuild";
@@ -40,6 +40,21 @@ export interface BrandPageProgress {
    * poison a sibling brand's resume point (review finding).
    */
   synced: number;
+  /**
+   * True when this brand's walk stopped because Crisp's conversation-list
+   * pagination ceiling was hit (page 1000, currently — see
+   * isPageCeilingError in client.ts), NOT because the archive genuinely ran
+   * out of pages. `to` is the last page Crisp actually returned data for
+   * (the ceiling page itself, 1001, is never recorded anywhere — it 400s and
+   * is treated as if it were never requested). Absent/false on every normal
+   * "ran out of conversations" or in-progress entry. Read by
+   * computeResumePages: the LATEST run's entry for a brand decides whether
+   * that brand's resume suggestion is a page number or null (see that
+   * function's doc comment for the exact rule) — a brand flagged here has
+   * nothing left to page-walk until the owner runs a date-range sync for
+   * older history.
+   */
+  ceiling?: boolean;
 }
 
 /**
@@ -64,8 +79,14 @@ function parseBrandPages(value: unknown): BrandPagesMap | null {
     const from = (entry as { from?: unknown } | null)?.from;
     const to = (entry as { to?: unknown } | null)?.to;
     const synced = (entry as { synced?: unknown } | null)?.synced;
+    const ceiling = (entry as { ceiling?: unknown } | null)?.ceiling;
     if (typeof from === "number" && typeof to === "number") {
-      result[key] = { from, to, synced: typeof synced === "number" ? synced : 0 };
+      result[key] = {
+        from,
+        to,
+        synced: typeof synced === "number" ? synced : 0,
+        ...(ceiling === true ? { ceiling: true } : {}),
+      };
     }
   }
   return Object.keys(result).length > 0 ? result : null;
@@ -441,11 +462,15 @@ interface RunSyncOptions {
    * Per-brand resume: each target's walk starts at `startPages[brandId ??
    * "default"] ?? 1`, independent of every other brand — see
    * computeResumePages/getResumePages for how the suggested map is derived.
+   * A brand key mapped to `null` (rather than a number, or simply absent)
+   * means that brand's LATEST run hit Crisp's page-pagination ceiling (see
+   * BrandPageProgress.ceiling) — runSync skips that brand's walk entirely
+   * for this run instead of defaulting it to page 1 (see the target loop).
    * Ignored for kind "range": range page numbers index Crisp's date-filtered
    * list, a different numbering space, and a range walk always starts every
    * scoped brand at page 1.
    */
-  startPages?: Record<string, number>;
+  startPages?: Record<string, number | null>;
   /** Only sync conversations updated at/after this time (incremental). */
   updatedSince?: Date | null;
   /**
@@ -497,11 +522,16 @@ interface RunSyncOptions {
  */
 export function derivePageFrom(
   kind: SyncKind,
-  effectiveStartPages: Record<string, number>,
+  effectiveStartPages: Record<string, number | null>,
   orderedBrandKeys: string[]
 ): number {
   if (kind === "range") return 1;
   const firstKey = orderedBrandKeys[0] ?? "default";
+  // `null` (the first brand's latest run hit the page ceiling — see
+  // RunSyncOptions.startPages) has nothing meaningful to report here either;
+  // falling back to 1 is the same harmless default as "no resume entry at
+  // all" — the real per-brand detail lives on brandPages, not this legacy
+  // single-number field.
   return effectiveStartPages[firstKey] ?? 1;
 }
 
@@ -675,7 +705,7 @@ async function runSync(options: RunSyncOptions): Promise<SyncRunResult> {
     // starts every scoped brand at page 1 (its page numbers index Crisp's
     // date-filtered list, a different numbering space; see computeResumePage/
     // computeResumePages for the same exclusion on the read side).
-    const effectiveStartPages: Record<string, number> =
+    const effectiveStartPages: Record<string, number | null> =
       options.kind === "range" ? {} : { ...(options.startPages ?? {}) };
     if (options.kind !== "range" && options.startPage != null && targets[0]) {
       // Legacy startPage resumes the FIRST brand only, same as before
@@ -710,6 +740,27 @@ async function runSync(options: RunSyncOptions): Promise<SyncRunResult> {
         break;
       }
 
+      // Each brand resumes independently from its own entry in
+      // effectiveStartPages (see above) — defaulting to page 1 for a brand
+      // with no resume entry at all.
+      const brandKey = target.brandId ?? "default";
+
+      // A brand whose LATEST run hit Crisp's page-pagination ceiling (see
+      // BrandPageProgress.ceiling / computeResumePages) has an explicit
+      // `null` entry here instead of a page number — resolveStartPages/
+      // getResumePages deliberately never default it to 1 (that would
+      // silently re-walk the whole brand from scratch) or to the ceiling
+      // page itself (that would just 400 again). Skip the brand entirely —
+      // including its roster sync, not just the page walk — and move on to
+      // the next one; other brands are untouched by this. Only ever true on
+      // a RESUMED run: a plain "Sync from start"/non-resumed run never
+      // populates startPages with this key at all, so `?? 1` below applies
+      // as usual for it.
+      if (effectiveStartPages[brandKey] === null) {
+        state.statusMessage = `[${target.name}] already at Crisp's page ceiling — skipping (use a date-range sync for older history)`;
+        continue;
+      }
+
       let client: CrispClient;
       try {
         client = clientFor();
@@ -730,15 +781,15 @@ async function runSync(options: RunSyncOptions): Promise<SyncRunResult> {
         );
       }
 
-      // Each brand resumes independently from its own entry in
-      // effectiveStartPages (see above) — defaulting to page 1 for a brand
-      // with no resume entry at all.
-      const brandKey = target.brandId ?? "default";
       // This brand's own synced count for the run — see BrandPageProgress.synced.
       let brandSynced = 0;
       let page = effectiveStartPages[brandKey] ?? 1;
       const brandStartPage = page;
       let reachedCheckpoint = false;
+      // Set when this brand's walk stops because Crisp's page ceiling was
+      // hit (see isPageCeilingError) rather than a genuine empty page —
+      // persisted onto brandPages[brandKey] right after the loop below.
+      let brandCeilingHit = false;
 
       while (page < MAX_PAGES && !reachedCheckpoint) {
         if (state.cancelRequested) {
@@ -748,13 +799,34 @@ async function runSync(options: RunSyncOptions): Promise<SyncRunResult> {
 
         state.currentPage = page;
         state.statusMessage = `[${target.name}] fetching page ${page}`;
-        const conversations = await client.listConversations(
-          target.websiteId,
-          page,
-          rangeWindow
-            ? { dateStart: rangeWindow.start, dateEnd: rangeWindow.end }
-            : undefined
-        );
+        let conversations: CrispConversation[];
+        try {
+          conversations = await client.listConversations(
+            target.websiteId,
+            page,
+            rangeWindow
+              ? { dateStart: rangeWindow.start, dateEnd: rangeWindow.end }
+              : undefined
+          );
+        } catch (error) {
+          if (isPageCeilingError(error)) {
+            // Crisp hard-caps conversation-list pagination at page 1000 —
+            // page 1001+ always 400s "page_number_too_high". Treat that
+            // EXACTLY like the natural "empty page" end of this brand's walk
+            // (the `break` right below the try/catch, on a genuinely empty
+            // page): stop walking THIS brand, leave `status` alone (the run
+            // still completes normally), and let the next brand proceed.
+            // Never retried — the client already treats 400 as
+            // non-retryable, and retrying a page number that will 400 forever
+            // would just waste quota.
+            brandCeilingHit = true;
+            state.statusMessage =
+              `[${target.name}] reached Crisp's page ceiling at page ${page} — ` +
+              "this brand's reachable window is fully synced; older history needs a date-range sync";
+            break;
+          }
+          throw error;
+        }
         if (!conversations || conversations.length === 0) break;
 
         // Range mode SAFETY GUARD: classify the page by the coverage basis and
@@ -862,6 +934,28 @@ async function runSync(options: RunSyncOptions): Promise<SyncRunResult> {
           reachedCheckpoint = true;
         }
         page += 1;
+      }
+
+      // Durably record the ceiling so resume never loops on it (see
+      // computeResumePages/resolveStartPages, which read this back). The
+      // normal per-page persist above already covers `from`/`to`/`synced`
+      // for every page this brand actually completed THIS run; this only
+      // needs to add the flag — except when the ceiling hit on the very
+      // FIRST page attempted this run (a brand resumed from/near the
+      // ceiling), in which case brandPages has no entry for this brand yet
+      // and one is created here from brandStartPage/brandSynced instead.
+      if (brandCeilingHit) {
+        const existing = brandPages[brandKey];
+        brandPages[brandKey] = {
+          from: existing?.from ?? brandStartPage,
+          to: existing?.to ?? brandStartPage - 1,
+          synced: existing?.synced ?? brandSynced,
+          ceiling: true,
+        };
+        await prisma.syncLog.update({
+          where: { id: syncLog.id },
+          data: { brandPages: brandPages as unknown as Prisma.InputJsonValue },
+        });
       }
     }
 
@@ -1028,7 +1122,8 @@ export async function getResumePage(): Promise<number> {
  * ordered by createdAt asc — the same "first brand" convention runSync's
  * legacy `startPage` handling has always used; falls back to `["default"]`
  * when empty, matching the legacy env-only fallback target), returns the
- * furthest page any run's walk of THAT brand reached, across all of history.
+ * furthest page any run's walk of THAT brand reached, across all of history —
+ * OR `null` for a brand whose ceiling status (see below) is currently set.
  *
  * Same made-progress rule as computeResumePage (conversationsSynced > 0 || to
  * > from) — applied PER BRAND for a run that recorded `brandPages` (using
@@ -1041,6 +1136,21 @@ export async function getResumePage(): Promise<number> {
  * first-brand-only semantics those runs actually had. Falls back to 1 for
  * any brand with no qualifying history.
  *
+ * CEILING RULE (chosen so the owner's runaway resume loop from the NinjaTeam
+ * incident can never recur — see BrandPageProgress.ceiling / the walk's
+ * isPageCeilingError handling in runSync): a brand's result is `null` —
+ * meaning "nothing to resume, skip this brand" — exactly when the
+ * CHRONOLOGICALLY LATEST run that recorded a brandPages entry for that brand
+ * has `ceiling: true` on it. `runs` MUST be supplied oldest-first (see
+ * {@link getResumePages}' `orderBy: { startedAt: "asc" }`) — later entries in
+ * the array win, ceiling or not, regardless of the furthest-page reduction
+ * above. This makes the rule self-healing: if a LATER run for the same brand
+ * (e.g. a fresh full sync run after Crisp lifts the cap, or simply a re-walk
+ * that this time stopped on a genuinely empty page before reaching the
+ * ceiling) records a non-ceiling entry, that clears the flag — the brand
+ * resumes normally again from its furthest page. A brand never touched by any
+ * brandPages-recording run is never flagged (no entry ever sets `ceiling`).
+ *
  * Pure — takes the ordered brand keys as a parameter instead of querying
  * Brand itself, so it stays testable without a database (see
  * {@link getResumePages} for the DB-backed wrapper).
@@ -1048,24 +1158,33 @@ export async function getResumePage(): Promise<number> {
 export function computeResumePages(
   runs: ResumeCandidate[],
   orderedBrandKeys: string[]
-): Record<string, number> {
+): Record<string, number | null> {
   const keys = orderedBrandKeys.length > 0 ? orderedBrandKeys : ["default"];
   const firstKey = keys[0];
   const furthest: Record<string, number> = {};
   const bump = (key: string, page: number) => {
     if (page > (furthest[key] ?? 0)) furthest[key] = page;
   };
+  // Per-brand ceiling flag as of the LATEST brandPages-recording run seen so
+  // far — see the CEILING RULE above. `runs` must be oldest-first so "last
+  // write wins" here means "most recent run's own reading."
+  const ceiling: Record<string, boolean> = {};
 
   for (const run of runs) {
     if (run.kind === "range") continue;
     const brandPages = parseBrandPages(run.brandPages);
     if (brandPages) {
-      for (const [key, { from, to, synced }] of Object.entries(brandPages)) {
+      for (const [key, entry] of Object.entries(brandPages)) {
+        const { from, to, synced } = entry;
         // The brand's OWN progress only — the run-level conversationsSynced
         // would let brand A's progress mark brand B's stalled walk as
         // progressed and silently skip B's pages (review finding).
         const madeProgress = synced > 0 || to > from;
         if (madeProgress) bump(key, to);
+        // Tracked independently of madeProgress — a ceiling hit on the very
+        // first page attempted (to === from - 1, see the runSync doc
+        // comment on that edge case) would otherwise never flip the flag.
+        ceiling[key] = entry.ceiling === true;
       }
       continue;
     }
@@ -1075,9 +1194,9 @@ export function computeResumePages(
     if (madeProgress) bump(firstKey, pageTo);
   }
 
-  const result: Record<string, number> = {};
+  const result: Record<string, number | null> = {};
   for (const key of keys) {
-    result[key] = Math.max(furthest[key] ?? 0, 1);
+    result[key] = ceiling[key] ? null : Math.max(furthest[key] ?? 0, 1);
   }
   return result;
 }
@@ -1103,11 +1222,14 @@ async function getOrderedBrandKeys(): Promise<string[]> {
  * so `Object.keys(result)[0]` is always the "first brand" — relied on by the
  * dashboard's default (no `?brand=` selected) prefill.
  */
-export async function getResumePages(): Promise<Record<string, number>> {
+export async function getResumePages(): Promise<Record<string, number | null>> {
   const [orderedBrandKeys, runs] = await Promise.all([
     getOrderedBrandKeys(),
     prisma.syncLog.findMany({
       where: { status: { not: "running" } },
+      // Oldest-first — computeResumePages' CEILING RULE relies on "latest
+      // entry in array order wins" to decide each brand's ceiling flag.
+      orderBy: { startedAt: "asc" },
       select: {
         kind: true,
         pageFrom: true,
@@ -1139,16 +1261,23 @@ export async function getResumePages(): Promise<Record<string, number>> {
  * per-brand resume existed. Shared by the start route (fresh requests) and
  * startQueuedEntry (queued replays) so both compute the exact same thing the
  * exact same way.
+ *
+ * A brand's entry from `getResumePages()` may be `null` (that brand's latest
+ * run hit Crisp's page ceiling — see computeResumePages' CEILING RULE);
+ * `runSync` reads that as "skip this brand entirely" rather than defaulting
+ * it to page 1. An explicit `startPage`/`startPageBrandId` override always
+ * wins over a `null` for that one brand — a manual override is a deliberate
+ * action and is never second-guessed here.
  */
 export async function resolveStartPages(options: {
   resume?: boolean;
   startPage?: number;
   startPageBrandId?: string;
-}): Promise<{ startPage?: number; startPages?: Record<string, number> }> {
+}): Promise<{ startPage?: number; startPages?: Record<string, number | null> }> {
   if (!options.resume && options.startPageBrandId == null) {
     return { startPage: options.startPage };
   }
-  const startPages: Record<string, number> = options.resume
+  const startPages: Record<string, number | null> = options.resume
     ? await getResumePages()
     : {};
   if (options.startPage != null) {
@@ -1161,7 +1290,7 @@ export async function resolveStartPages(options: {
 /** Full sync of all conversations, oldest data included. Resumable via startPage/startPages. */
 export function runFullSync(options?: {
   startPage?: number;
-  startPages?: Record<string, number>;
+  startPages?: Record<string, number | null>;
 }): Promise<SyncRunResult> {
   return runSync({
     kind: "full",
@@ -1205,7 +1334,7 @@ export function runRangeSync(options: {
  */
 export async function runIncrementalSync(options?: {
   startPage?: number;
-  startPages?: Record<string, number>;
+  startPages?: Record<string, number | null>;
 }): Promise<SyncRunResult> {
   const lastSuccess = await prisma.syncLog.findFirst({
     where: { status: "completed", kind: { in: ["full", "incremental"] } },

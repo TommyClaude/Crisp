@@ -49,8 +49,12 @@ interface CrispSyncDashboardProps {
   lastSync: LastSyncSummary | null;
   recentLogs: SerializedSyncLog[];
   resumePage: number;
-  /** Each configured brand's own furthest page across history — see getResumePages. */
-  resumePages: Record<string, number>;
+  /**
+   * Each configured brand's own furthest page across history — see
+   * getResumePages. `null` means that brand's latest run hit Crisp's page
+   * ceiling — nothing left to page-walk without a date-range sync.
+   */
+  resumePages: Record<string, number | null>;
 }
 
 /**

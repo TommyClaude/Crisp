@@ -23,6 +23,35 @@ export class CrispApiError extends Error {
 
 const RETRYABLE_STATUS = new Set([408, 425, 429, 500, 502, 503, 504]);
 
+/**
+ * Crisp's `reason` string when a conversation-list page number exceeds its
+ * pagination ceiling. Crisp hard-caps `listConversations` pagination at page
+ * 1000 (undocumented, discovered live on the owner's >20k-conversation
+ * NinjaTeam brand) — page 1001+ always 400s with this reason, forever, for
+ * that website. Not retryable (see RETRYABLE_STATUS above — 400 isn't in it)
+ * and not really a failure either: it just means the walk reached the end of
+ * what Crisp's API will hand back page-by-page.
+ */
+export const CRISP_PAGE_CEILING_REASON = "page_number_too_high";
+
+/**
+ * True when `error` is Crisp's documented "beyond the pagination ceiling"
+ * failure (see {@link CRISP_PAGE_CEILING_REASON}). Matched primarily on the
+ * reason string — the specific, intentional signal a caller wants to treat
+ * as "normal end of this brand's walk" rather than a real failure — and
+ * secondarily on status 400 (every real occurrence of this reason IS a 400;
+ * requiring both is cheap insurance against ever matching some other
+ * status/reason combination that happens to share the string). A 400 with
+ * any OTHER reason must NOT match here — it's a genuine failure.
+ */
+export function isPageCeilingError(error: unknown): boolean {
+  return (
+    error instanceof CrispApiError &&
+    error.status === 400 &&
+    error.reason === CRISP_PAGE_CEILING_REASON
+  );
+}
+
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
