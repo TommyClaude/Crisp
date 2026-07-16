@@ -441,6 +441,12 @@ async function refreshSilentTopics(
     take: SILENT_REFRESH_CAP,
   });
 
+  // The id-scoped mode (digest pre-send verification) logs every step —
+  // owner escalation: the same resolved topic survived multiple "fixes"
+  // because every failure in this loop was a silent `continue`, leaving no
+  // trace of WHY a candidate kept its stale flags.
+  const verbose = threadIds != null;
+
   for (const thread of waiting) {
     // Honour Pause/Stop promptly — each candidate costs a fetch.
     if (state.cancelRequested) break;
@@ -456,7 +462,37 @@ async function refreshSilentTopics(
       );
       continue;
     }
-    if (!fetched || fetched.posts.length === 0) continue;
+    if (!fetched) {
+      if (verbose) {
+        console.warn(
+          `[digest-refresh] ${thread.url}: page fetch FAILED (network/HTTP) — flags left as-is`
+        );
+      }
+      continue;
+    }
+    if (fetched.posts.length === 0) {
+      // The page loaded but no posts parsed (markup drift, layout change).
+      // The RESOLVED flag comes from the page head, not the posts — update
+      // it anyway so a resolved topic still drops out of "Needs resolved"
+      // even when the post markup defeats the parser.
+      if (verbose) {
+        console.warn(
+          `[digest-refresh] ${thread.url}: page loaded but 0 posts parsed — ` +
+            `updating wpResolved=${fetched.resolved} only`
+        );
+      }
+      await prisma.supportThread.update({
+        where: { id: thread.id },
+        data: { wpResolved: fetched.resolved },
+      });
+      continue;
+    }
+    if (verbose) {
+      console.log(
+        `[digest-refresh] ${thread.url}: fetched ${fetched.posts.length} posts, ` +
+          `resolved=${fetched.resolved}, lastPostRole=${fetched.posts[fetched.posts.length - 1].role ?? "customer"}`
+      );
+    }
 
     const lastPost = fetched.posts[fetched.posts.length - 1];
     const customerLast = lastPost.role == null;
