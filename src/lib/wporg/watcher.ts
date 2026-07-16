@@ -412,14 +412,27 @@ async function refreshSilentTopics(
       ...(threadIds ? { id: { in: threadIds } } : {}),
       waitingSince: { not: null },
       wpResolved: false,
-      // Cost guard (review finding): a row touched within the last hour —
-      // synced, regenerated, or refreshed by the previous check — has nothing
-      // new to learn from another fetch. Without this, every check re-fetched
-      // up to 20 pages even when all clocks were young.
-      updatedAt: { lt: new Date(Date.now() - ONE_HOUR_MS) },
-      // A human already acting on it (reviewed/dismissed) opts it out.
-      status: { notIn: ["dismissed", "reviewed"] },
-      plugin: { wpOrgSlug: { not: null } },
+      // The two modes deliberately filter differently (owner-reported bug:
+      // a digest candidate that never matched the check-time filters below
+      // was announced daily but NEVER re-verified, so its stale wpResolved
+      // stuck forever):
+      //  - id-scoped (digest pre-send verification): the caller has already
+      //    decided these rows are about to be ANNOUNCED — verify every one
+      //    of them. No deadband (≤20 fetches/day is cheap next to a wrong
+      //    nag), no reviewed-exclusion (the digest includes reviewed rows),
+      //    no plugin-slug requirement (the fetch uses thread.url directly).
+      //  - full pass (forum checks): keep the cost guards as designed.
+      ...(threadIds
+        ? { status: { not: "dismissed" } }
+        : {
+            // Cost guard (review finding): a row touched within the last
+            // hour — synced, regenerated, or refreshed by the previous
+            // check — has nothing new to learn from another fetch.
+            updatedAt: { lt: new Date(Date.now() - ONE_HOUR_MS) },
+            // A human already acting on it (reviewed/dismissed) opts it out.
+            status: { notIn: ["dismissed", "reviewed"] },
+            plugin: { wpOrgSlug: { not: null } },
+          }),
       ...(pluginId ? { pluginId } : {}),
     },
     select: { id: true, url: true, waitingSince: true, followupPromisedAt: true },
