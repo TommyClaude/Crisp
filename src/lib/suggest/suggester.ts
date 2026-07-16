@@ -149,7 +149,10 @@ export const HUMAN_VOICE_RULE =
   "Write like a busy human support engineer on a forum, not like an AI. " +
   "NEVER use em dashes (—) or en dashes (–) as punctuation; use commas, periods, or parentheses instead, the way a normal forum poster would. " +
   'Avoid phrasing that makes readers suspect a bot wrote it: reflex openers like "Great question!", "Certainly!" or "Thank you for reaching out", closers like "I hope this helps!", transition words like "delve", "furthermore", "moreover" or "additionally", formulaic three-item parallel lists, and relentlessly uniform sentence lengths. ' +
-  "Use plain wording, vary your sentence length, and let a little informality through. The support team's real replies in the context and thread are your best guide.";
+  "Use plain wording, vary your sentence length, and let a little informality through. The support team's real replies in the context and thread are your best guide. " +
+  // Owner feedback on a live draft: echoing "4+ years" and the customer's
+  // playful "hiccup" back at them read as unnatural parroting.
+  "NEVER PARROT THE CUSTOMER: respond to the substance of what they wrote, not with their own words. Do not repeat their slang, jokes or playful phrasing back at them, do not quote their usage durations or history back ('4+ years', 'since 2019'), and do not retell their story to them; when you must reference their situation, paraphrase it briefly and neutrally in the team's own voice.";
 
 /**
  * Append the brand's free-text house-style instructions as a clearly delimited
@@ -197,6 +200,10 @@ export function buildPrompt(
       " " +
       HUMAN_VOICE_RULE +
       " " +
+      // wp.org reviews arrive through the same pipeline as support topics; a
+      // support-ticket-style reply (restating their setup, troubleshooting
+      // tone) reads oddly under a five-star review (owner feedback).
+      "REVIEWS AND PRAISE: when the post is a positive review or a thank-you with no open question, do NOT answer it like a support ticket. Reply with a short, warm thank-you only, shaped like: greet briefly; thank them for choosing the product; one line that reviews like this make the team's day; pass their thanks along to any teammate they mentioned by name; invite them to open a thread if they ever hit an issue; sign off. Four or five short lines total, no troubleshooting, no restating what they experienced. " +
       "Write plain text suitable for a forum reply (no markdown headings). Do not mention the context, Crisp, or that you are an AI.",
     replyStyle
   );
