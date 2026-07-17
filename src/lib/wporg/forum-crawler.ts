@@ -369,7 +369,24 @@ export function parseTopicPage(html: string): ForumThreadPage {
     : html;
   const resolved =
     /\[\s*resolved\s*\]/i.test(extractTitle(html) ?? "") ||
-    looksResolved(headRegion);
+    looksResolved(headRegion) ||
+    // wp.org's CURRENT support theme renders the status in the SIDEBAR —
+    // AFTER the posts in the DOM, outside headRegion — with classes the
+    // token scan above also misses (verified against the live page of the
+    // owner's stuck topic):
+    //   <span class="topic-resolved-indicator">Resolved</span>
+    //   <li class="topic-resolved">Status: resolved</li>
+    // Match those STATUS ELEMENTS anywhere in the page: class must carry the
+    // topic-resolved token AND the element's text must start with
+    // "Resolved"/"Status: resolved". Both conditions together keep out the
+    // dangerous false positives (the worse direction — hiding an open
+    // topic): prose mentions of "resolved" in og:description, the
+    // "Unresolved Topics" sidebar link, a "Not resolved" indicator variant,
+    // and class="topic-not-resolved" (which does not contain the
+    // "topic-resolved" substring).
+    /class="[^"]*\btopic-resolved\b[^"]*"[^>]*>\s*(?:status:\s*)?resolved\b/i.test(
+      html
+    );
 
   // Reply pagination present at all (any /page/N/ topic link). The crawl loop
   // uses hasTopicPage() for the precise "is there a NEXT page of THIS topic"
