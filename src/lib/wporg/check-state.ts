@@ -28,11 +28,25 @@ export interface CheckProgress {
   currentFeedTopics: number | null;
   newThreads: number;
   drafted: number;
-  /** Threads processed in the drafting phase (denominator is newThreads). */
+  /** Threads processed in the drafting phase (denominator is draftsTotal). */
   draftsDone: number;
+  /**
+   * Threads queued for the drafting phase this run. Not the same as
+   * newThreads: rows the fetch-before-create page check gated (resolved or
+   * support-answered-last) are created but never queued, so a
+   * draftsDone/newThreads fraction would stall below 1.
+   */
+  draftsTotal: number;
   skippedOld: number;
   /** Old topics resurfaced by a fresh customer reply this run. */
   resurfaced: number;
+  /**
+   * New-topic rows created this run that the fetch-before-create page check
+   * found NOT actionable (already resolved on wp.org, or support answered
+   * last) — stored, but never drafted or Slack-notified. Live-progress-only:
+   * not a ForumCheckLog column (see WatcherResult.skippedHandled).
+   */
+  skippedHandled: number;
   startedAt: string | null;
   cancelRequested: boolean;
   /** Whether an in-flight halt records the run as paused vs cancelled. */
@@ -52,8 +66,10 @@ function freshProgress(): CheckProgress {
     newThreads: 0,
     drafted: 0,
     draftsDone: 0,
+    draftsTotal: 0,
     skippedOld: 0,
     resurfaced: 0,
+    skippedHandled: 0,
     startedAt: null,
     cancelRequested: false,
     cancelReason: "cancelled",

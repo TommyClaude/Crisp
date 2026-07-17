@@ -44,6 +44,16 @@ export interface WatcherResult {
    * flagged, or a thread created for a customer-last old topic.
    */
   resurfaced: number;
+  /**
+   * New-topic rows created this run whose fetch-before-create page check
+   * found them NOT actionable — already resolved on wp.org, or support
+   * answered last. Counted separately from `newThreads` (which counts every
+   * row created, actionable or not): these rows are stored with correct
+   * flags but deliberately never drafted or Slack-notified. Not persisted to
+   * ForumCheckLog (no schema column — see the check-status live progress /
+   * server logs instead).
+   */
+  skippedHandled: number;
   /** Terminal status of the run. */
   status: "completed" | "paused" | "cancelled" | "failed";
   /** Highest 1-based plugin index fully processed (the resume point). */
@@ -173,6 +183,14 @@ async function applyThreadFromFetch(opts: {
   exactReplyDate: Date | null;
   /** Create a row when a support-last topic is untracked (mail path only). */
   createOnSupportLast: boolean;
+  /**
+   * Whether a customer-last CREATE carries the "New reply" badge (default
+   * true — reply-triggered callers). The feed's new-TOPIC discovery passes
+   * false: a topic seen for the first time has no "new reply", and nothing
+   * downstream is guaranteed to clear the flag (drafting is skipped for gated
+   * rows, --no-suggest runs, and graceful halts). Updates are unaffected.
+   */
+  flagCreateAsNewReply?: boolean;
 }): Promise<ThreadUpsertResult> {
   const { fetched } = opts;
   const lastPost = fetched.posts[fetched.posts.length - 1];
@@ -268,7 +286,7 @@ async function applyThreadFromFetch(opts: {
       excerpt: firstPost.text.slice(0, RESURFACE_EXCERPT_CHARS),
       publishedAt: firstPost.postedAt ?? null,
       status: "new",
-      hasNewReply: true,
+      hasNewReply: opts.flagCreateAsNewReply ?? true,
       ...watermark,
       lastActivityAt: effectiveDate,
       // Customer posted last — ball is with the team, not waiting on them.
@@ -575,6 +593,7 @@ export async function refreshWaitingTopicsStandalone(
     drafted: 0,
     skippedOld: 0,
     resurfaced: 0,
+    skippedHandled: 0,
     status: "completed",
     lastIndex: null,
     errors: [],
@@ -743,6 +762,7 @@ export async function checkPluginForums(options?: {
     drafted: 0,
     skippedOld: 0,
     resurfaced: 0,
+    skippedHandled: 0,
     status: "completed",
     lastIndex: null,
     errors: [],
@@ -804,6 +824,13 @@ export async function checkPluginForums(options?: {
         const { topics, replies } = await fetchForumFeed(plugin.wpOrgSlug);
         state.currentFeedTopics = topics.length;
         for (const topic of topics) {
+          // Honour Pause/Stop promptly — same convention as resurfaceReplies
+          // and refreshSilentTopics, and for the same reason: each NEW topic
+          // now costs a politeness sleep plus a live page fetch. The
+          // mid-plugin-halt check after the try/catch below keeps this
+          // plugin's lastIndex un-advanced, so Continue redoes it (idempotent
+          // — the existing-row lookup skips rows already created).
+          if (state.cancelRequested) break;
           // Skip topics older than the cutoff. Topics with no publish date
           // are kept — their age is unknown, so we can't rule them out.
           if (topic.publishedAt && topic.publishedAt.getTime() < ageCutoffMs) {
@@ -824,23 +851,136 @@ export async function checkPluginForums(options?: {
             select: { id: true },
           });
           if (existing) continue;
-          const thread = await prisma.supportThread.create({
-            data: {
-              pluginId: plugin.id,
-              guid: canonicalGuid,
-              url: canonicalUrl,
-              title: topic.title,
-              author: topic.author,
-              excerpt: topic.excerpt,
-              publishedAt: topic.publishedAt,
-              // lastActivityAt drives the "Recent" tab: the publish date for a
-              // fresh topic (falling back to now when the feed omits it).
-              lastActivityAt: topic.publishedAt ?? new Date(),
-            },
+
+          // FETCH-BEFORE-CREATE (owner incident): a feed item alone can't
+          // tell a genuinely new topic from an old, already-answered one
+          // still sitting in a quiet forum's RSS — the feed carries no
+          // resolution or reply-role information, so blindly creating from
+          // it once produced a draft + "New wp.org topic" Slack post for a
+          // topic that was actually RESOLVED with 3 support replies. Fetch
+          // the live page ONCE, exactly like the mail path
+          // (checkSingleTopic) and the resurface pass do, and let
+          // applyThreadFromFetch decide the row's real state.
+          await sleep(FEED_POLITENESS_MS);
+          let fetched: FetchedTopicThread | null = null;
+          try {
+            fetched = await fetchTopicThread(canonicalUrl);
+          } catch (error) {
+            // Same as resurfaceReplies: fetchTopicThread's own fetchHtml
+            // swallows network/HTTP failures and returns null (handled
+            // below); this catch only fires on an unexpected throw (e.g. a
+            // parser bug) — belt and braces, not the ordinary failure path.
+            result.errors.push(
+              `feed new-topic fetch ${canonicalUrl}: ${error instanceof Error ? error.message : String(error)}`
+            );
+          }
+
+          if (!fetched || fetched.posts.length === 0) {
+            // FALLBACK: availability over perfection. A fetch hiccup (503,
+            // timeout, markup drift) must not silently swallow a genuinely
+            // new topic — create straight from the feed item exactly like
+            // this branch always did before this change, so it still gets
+            // drafted and Slack-notified.
+            console.warn(
+              `[wporg] feed new-topic page fetch failed for ${canonicalUrl} — ` +
+                "falling back to feed-only creation (today's behavior)"
+            );
+            const thread = await prisma.supportThread.create({
+              data: {
+                pluginId: plugin.id,
+                guid: canonicalGuid,
+                url: canonicalUrl,
+                title: topic.title,
+                author: topic.author,
+                excerpt: topic.excerpt,
+                publishedAt: topic.publishedAt,
+                // lastActivityAt drives the "Recent" tab: the publish date for a
+                // fresh topic (falling back to now when the feed omits it).
+                lastActivityAt: topic.publishedAt ?? new Date(),
+              },
+            });
+            result.newThreads += 1;
+            state.newThreads += 1;
+            newThreadIds.push(thread.id);
+            continue;
+          }
+
+          // Page fetched successfully — apply the SAME state transitions the
+          // mail path uses (createOnSupportLast: true creates the row
+          // whichever side posted last). No exact reply date: this is a NEW
+          // topic, not a reply, so — same HYBRID-watermark reasoning as
+          // checkSingleTopic — lastReplyAt is left untouched.
+          const applied = await applyThreadFromFetch({
+            pluginId: plugin.id,
+            topicGuid: canonicalGuid,
+            topicUrl: canonicalUrl,
+            fetched,
+            existing: null,
+            exactReplyDate: null,
+            createOnSupportLast: true,
+            // New-topic discovery, not a reply event — see the option's doc.
+            flagCreateAsNewReply: false,
           });
+          // Count every row created (actionable or not) — mirrors today's
+          // newThreads semantics.
           result.newThreads += 1;
           state.newThreads += 1;
-          newThreadIds.push(thread.id);
+
+          if (applied.threadId) {
+            // Backfill fields the FEED knows better than the page, so a
+            // page-parse gap can never leave the row worse than today's
+            // feed-only creation:
+            //  - title: applyThreadFromFetch falls back to the bare topic
+            //    URL when the page's <title> didn't parse; the feed's own
+            //    title is always the better fallback.
+            //  - author: the page parser's own "nothing found" placeholder
+            //    is the literal string "anonymous" (see parseTopicPage in
+            //    forum-crawler.ts); the feed's dc:creator, when present, is
+            //    a real name and wins over that placeholder.
+            //  - publishedAt: the feed's pubDate is an exact timestamp; the
+            //    page only offers a coarse "N days ago" relative parse (or
+            //    nothing), so the feed date wins whenever the feed has one.
+            //  - lastActivityAt: only overridden when the page gave NOTHING
+            //    (the last post's relative-time parse failed, so
+            //    applyThreadFromFetch fell all the way back to "now") — the
+            //    feed's publish date is a better guess than "now" for a
+            //    freshly-created topic.
+            const firstPost = fetched.posts[0];
+            const lastPost = fetched.posts[fetched.posts.length - 1];
+            const backfill: Prisma.SupportThreadUpdateInput = {};
+            if (!fetched.title && topic.title) backfill.title = topic.title;
+            if (firstPost.author === "anonymous" && topic.author) {
+              backfill.author = topic.author;
+            }
+            if (topic.publishedAt) {
+              backfill.publishedAt = topic.publishedAt;
+              if (!lastPost.postedAt) backfill.lastActivityAt = topic.publishedAt;
+            }
+            if (Object.keys(backfill).length > 0) {
+              await prisma.supportThread.update({
+                where: { id: applied.threadId },
+                data: backfill,
+              });
+            }
+
+            // Draft + Slack-notify gate (owner incident): only an actionable
+            // topic — freshly created, the ball genuinely with the team, and
+            // NOT already resolved on wp.org — gets a draft and a
+            // notification. A resolved or support-last topic is stored with
+            // correct flags (and still shows up in the right /suggestions
+            // tab) but is never drafted or announced, matching what the mail
+            // path already does for a support-last topic.
+            if (
+              applied.outcome === "created" &&
+              applied.customerLast &&
+              !fetched.resolved
+            ) {
+              newThreadIds.push(applied.threadId);
+            } else {
+              result.skippedHandled += 1;
+              state.skippedHandled += 1;
+            }
+          }
         }
         // Resurface old topics bumped by a fresh customer reply (reply items).
         await resurfaceReplies(plugin, replies, ageCutoffMs, result, state, flaggedIds);
@@ -848,6 +988,15 @@ export async function checkPluginForums(options?: {
         const message = `${plugin.name}: ${error instanceof Error ? error.message : String(error)}`;
         console.error("Forum check failed for", message);
         result.errors.push(message);
+      }
+      // A halt that landed MID-plugin (topics loop or resurfaceReplies both
+      // break per item) must not count this plugin as processed — advancing
+      // lastIndex here would make Continue silently skip its remaining
+      // topics. Leaving it un-advanced is safe: redoing the plugin is
+      // idempotent (existing-row lookup + lastReplyAt dedupe).
+      if (state.cancelRequested) {
+        halted = state.cancelReason;
+        break;
       }
       state.pluginsDone += 1;
       lastIndex = index;
@@ -887,6 +1036,10 @@ export async function checkPluginForums(options?: {
     // means each topic is only ever CREATED (and hence announced) once.
     if (!halted && (options?.withSuggestions ?? true)) {
       state.phase = "drafting";
+      // The drafting denominator is the QUEUE length, not newThreads — rows
+      // gated by the fetch-before-create check are created but never queued,
+      // and a draftsDone/newThreads fraction would visibly stall below 1.
+      state.draftsTotal = newThreadIds.length;
       for (const threadId of newThreadIds) {
         try {
           const suggestion = await generateSuggestionForThread(threadId);
@@ -941,7 +1094,7 @@ export async function checkPluginForums(options?: {
     console.log(
       `[wporg] check ${result.status}: ${result.pluginsChecked} plugins, ${result.newThreads} new, ` +
         `${result.resurfaced} resurfaced, ${result.drafted} drafted, ${result.skippedOld} skipped (old), ` +
-        `${result.errors.length} error(s)`
+        `${result.skippedHandled} skipped (resolved/support-last), ${result.errors.length} error(s)`
     );
     return result;
   } catch (error) {

@@ -140,8 +140,12 @@ interface CheckProgress {
   newThreads: number;
   drafted: number;
   draftsDone: number;
+  /** Drafting-queue length — newThreads minus rows the page check gated. */
+  draftsTotal: number;
   skippedOld: number;
   resurfaced: number;
+  /** New rows stored silently (already resolved / support answered last). */
+  skippedHandled: number;
   startedAt: string | null;
   cancelRequested: boolean;
   cancelReason: "cancelled" | "paused";
@@ -754,7 +758,7 @@ export function SuggestionsManager({
           {checkProgress.phase === "drafting" ? (
             <span>
               Drafting replies {checkProgress.draftsDone}/
-              {checkProgress.newThreads}
+              {checkProgress.draftsTotal}
             </span>
           ) : (
             <span>
@@ -770,6 +774,12 @@ export function SuggestionsManager({
           )}
           <span aria-hidden>·</span>
           <span>{checkProgress.newThreads} new</span>
+          {checkProgress.skippedHandled > 0 ? (
+            <>
+              <span aria-hidden>·</span>
+              <span>{checkProgress.skippedHandled} already handled</span>
+            </>
+          ) : null}
           <span aria-hidden>·</span>
           <span>{checkProgress.resurfaced} resurfaced</span>
           <span aria-hidden>·</span>
