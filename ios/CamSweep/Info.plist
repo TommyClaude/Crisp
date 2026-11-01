@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>NSCameraUsageDescription</key>
+	<string>CamSweep uses the camera so you can spot infrared lights and lens reflections from hidden cameras.</string>
+	<key>NSLocalNetworkUsageDescription</key>
+	<string>CamSweep scans the Wi-Fi network you are connected to for devices that behave like network cameras.</string>
+	<key>NSBonjourServices</key>
+	<array>
+		<string>_rtsp._tcp</string>
+		<string>_http._tcp</string>
+		<string>_axis-video._tcp</string>
+	</array>
+</dict>
+</plist>
