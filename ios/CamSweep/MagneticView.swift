@@ -5,27 +5,52 @@ struct MagneticView: View {
     @State private var showHelp = false
 
     var body: some View {
-        ZStack {
-            Theme.background.ignoresSafeArea()
-
+        Group {
             if sensor.isAvailable {
-                VStack(spacing: 32) {
-                    Spacer()
-                    gauge
-                    Headline(title: title, detail: detail, color: color)
-                    Spacer()
-                    Button("Reset") { sensor.resetBaseline() }
-                        .buttonStyle(SecondaryButtonStyle())
+                Stage {
+                    RingGauge(fraction: sensor.fraction, isLead: isLead) {
+                        VStack(spacing: 0) {
+                            Text("\(Int(sensor.microtesla))")
+                                .font(.system(size: 80, weight: .bold, design: .rounded))
+                                .monospacedDigit()
+                                .contentTransition(.numericText())
+                            Text("µT")
+                                .font(.headline)
+                                .foregroundStyle(Theme.secondary)
+                        }
+                    }
+                    .accessibilityLabel("Magnetic field")
+                    .accessibilityValue("\(Int(sensor.microtesla)) microtesla")
+                    status
+                } actions: {
+                    Button {
+                        sensor.resetBaseline()
+                    } label: {
+                        Label("Reset", systemImage: "arrow.counterclockwise")
+                    }
+                    .buttonStyle(CapsuleButtonStyle())
                 }
-                .padding(20)
+                // The sensor sits at the top of the phone; say so where it is.
+                .overlay(alignment: .top) {
+                    VStack(spacing: 2) {
+                        Image(systemName: "chevron.compact.up")
+                            .font(.title2.weight(.semibold))
+                            .foregroundStyle(Theme.accent)
+                        Text("Sweep with this edge")
+                            .font(.subheadline.weight(.medium))
+                    }
+                    .padding(.top, 4)
+                    .accessibilityElement(children: .combine)
+                }
             } else {
-                ContentUnavailableView("No magnetic sensor",
-                                       systemImage: "exclamationmark.triangle",
-                                       description: Text("This device can't run the magnetic check."))
+                Stage {
+                    Halo(size: 72, isLead: false) { Image(systemName: "exclamationmark.triangle") }
+                    StatusBlock(title: "No magnetic sensor", detail: "This device can't run this check.")
+                } actions: {
+                    EmptyView()
+                }
             }
         }
-        .navigationTitle("Magnetic")
-        .navigationBarTitleDisplayMode(.inline)
         .toolbar {
             ToolbarItem(placement: .topBarTrailing) {
                 Button {
@@ -37,77 +62,39 @@ struct MagneticView: View {
             }
         }
         .sheet(isPresented: $showHelp) {
-            HelpSheet(title: "Magnetic check", steps: [
-                .init(symbol: "scope", text: "Stand in the middle of the room and tap Reset."),
-                .init(symbol: "iphone", text: "Move the top edge of the phone slowly along objects, 2–5 cm away."),
-                .init(symbol: "waveform.path.ecg", text: "A sudden jump means electronics or a magnet inside."),
-                .init(symbol: "info.circle", text: "Metal, speakers and TVs do this too. A jump is a lead, not proof."),
-            ])
+            HelpSheet(title: "Sweep for electronics",
+                      steps: ["Stand in the middle of the room and tap Reset.",
+                              "Move the top edge of the phone slowly along objects, 2–5 cm away.",
+                              "A sudden jump means electronics or a magnet inside."],
+                      tip: "Metal, speakers and TVs do this too.")
         }
         .sensoryFeedback(trigger: sensor.level) { _, new in
             new == .strong ? .warning : nil
         }
+        .onChange(of: sensor.level) { _, new in
+            if new == .strong { AccessibilityNotification.Announcement("Strong field").post() }
+        }
         .onAppear { sensor.start() }
         .onDisappear { sensor.stop() }
-        .keepsScreenAwake()
     }
 
-    private var gauge: some View {
-        ZStack {
-            Circle()
-                .stroke(Theme.surface, lineWidth: 16)
-            Circle()
-                .trim(from: 0, to: sensor.fraction)
-                .stroke(color, style: StrokeStyle(lineWidth: 16, lineCap: .round))
-                .rotationEffect(.degrees(-90))
-                .animation(.easeOut(duration: 0.2), value: sensor.fraction)
-            VStack(spacing: 0) {
-                Text("\(Int(sensor.microtesla))")
-                    .font(.system(size: 84, weight: .bold, design: .rounded))
-                    .monospacedDigit()
-                    .contentTransition(.numericText())
-                Text("µT")
-                    .font(.title3.weight(.semibold))
-                    .foregroundStyle(Theme.dim)
-            }
-        }
-        .frame(width: 248, height: 248)
-        .background {
-            // A soft glow in the status color; it must not affect layout.
-            Circle()
-                .fill(RadialGradient(colors: [color.opacity(0.22), .clear],
-                                     center: .center, startRadius: 40, endRadius: 170))
-                .frame(width: 340, height: 340)
-        }
-        .accessibilityElement(children: .ignore)
-        .accessibilityLabel("Magnetic field")
-        .accessibilityValue("\(Int(sensor.microtesla)) microtesla")
+    private var isLead: Bool {
+        sensor.level == .elevated || sensor.level == .strong
     }
 
-    private var color: Color {
+    @ViewBuilder private var status: some View {
         switch sensor.level {
-        case .calibrating: Theme.dim
-        case .normal: Theme.accent
-        case .elevated: Theme.caution
-        case .strong: Theme.alert
-        }
-    }
-
-    private var title: LocalizedStringKey {
-        switch sensor.level {
-        case .calibrating: "Calibrating"
-        case .normal: "Normal"
-        case .elevated: "Something nearby"
-        case .strong: "Strong field"
-        }
-    }
-
-    private var detail: LocalizedStringKey {
-        switch sensor.level {
-        case .calibrating: "Hold the phone still."
-        case .normal: "Move the top of the phone close to objects."
-        case .elevated: "Slow down and circle this spot."
-        case .strong: "Could be electronics or a magnet."
+        case .calibrating:
+            StatusBlock(title: "Calibrating", detail: "Move the phone around slowly.")
+        case .normal:
+            StatusBlock(title: "Nothing strong here",
+                        detail: "Reset mid-room, then trace objects slowly with the top edge.")
+        case .elevated:
+            StatusBlock(symbol: "dot.radiowaves.left.and.right", title: "Raised field",
+                        detail: "Slow down and circle this spot.", isLead: true)
+        case .strong:
+            StatusBlock(symbol: "exclamationmark.circle.fill", title: "Strong field",
+                        detail: "Electronics, a magnet or metal. Look closer.", isLead: true)
         }
     }
 }

@@ -9,14 +9,13 @@ struct Finding: Identifiable {
     /// IP address, or the advertised name of a video service.
     let name: String
     let isLikelyCamera: Bool
-    let ports: [UInt16]
     /// The device's own web page, when it has one.
     let url: URL?
 }
 
 /// Scans the Wi-Fi network the phone is on for devices that behave like
-/// network cameras: it tries the ports cameras listen on at every address of
-/// the local /24 subnet, and browses for advertised video services.
+/// network cameras: it tries the ports cameras listen on at the addresses
+/// around the phone, and browses for advertised video services.
 @MainActor
 final class WiFiScanner: ObservableObject {
     enum Phase { case idle, asking, scanning, finished, denied, noWiFi }
@@ -24,13 +23,18 @@ final class WiFiScanner: ObservableObject {
     @Published private(set) var phase: Phase = .idle
     @Published private(set) var progress: Double = 0
     @Published private(set) var findings: [Finding] = []
+    /// False when the network is larger than the part that gets swept.
+    @Published private(set) var sweepsWholeNetwork = true
 
+    var isBusy: Bool { phase == .asking || phase == .scanning }
     var foundLikelyCamera: Bool { findings.contains(where: \.isLikelyCamera) }
 
     /// RTSP, the streaming protocol nearly every network camera speaks.
     private static let videoPorts: Set<UInt16> = [554, 8554]
-    private static let ports: [UInt16] = [80, 443, 554, 8080, 8554]
+    private static let ports: [UInt16] = [554, 8554, 80, 8080, 443]
     private static let videoServices = ["_rtsp._tcp", "_axis-video._tcp"]
+    /// The sweep covers at most a /22: the 1022 addresses around the phone.
+    private static let widestMask: UInt32 = 0xFFFF_FC00
 
     private var openPorts: [String: Set<UInt16>] = [:]
     private var advertised: Set<String> = []
@@ -47,8 +51,8 @@ final class WiFiScanner: ObservableObject {
     }
 
     func start() {
-        guard phase != .asking, phase != .scanning, !Demo.isOn else { return }
-        guard let address = Self.wifiAddress() else {
+        guard !isBusy, !Demo.isOn else { return }
+        guard let network = Self.wifiNetwork() else {
             phase = .noWiFi
             return
         }
@@ -56,15 +60,16 @@ final class WiFiScanner: ObservableObject {
         advertised = []
         findings = []
         progress = 0
-        phase = .asking
+        sweepsWholeNetwork = network.mask >= Self.widestMask
 
-        // The very first check has to wait for the person to answer the
-        // system prompt, however long that takes. Later ones never should.
+        // Only the very first check can have the system prompt in front of
+        // it, and that one has to wait for an answer however long it takes.
         let askedBefore = UserDefaults.standard.bool(forKey: "askedLocalNetwork")
-        UserDefaults.standard.set(true, forKey: "askedLocalNetwork")
+        phase = askedBefore ? .scanning : .asking
 
         task = Task { [weak self] in
             let allowed = await WiFiScanner.localNetworkAllowed(patience: askedBefore ? 3 : nil)
+            UserDefaults.standard.set(true, forKey: "askedLocalNetwork")
             guard let self, !Task.isCancelled else { return }
             guard allowed else {
                 self.phase = .denied
@@ -72,90 +77,119 @@ final class WiFiScanner: ObservableObject {
             }
             self.phase = .scanning
             self.browse()
-            await self.sweep(around: address)
+            let blocked = await self.sweep(network)
             guard !Task.isCancelled else { return }
             self.stopBrowsing()
-            self.phase = .finished
+
+            if blocked {
+                self.phase = .denied
+            } else if WiFiScanner.wifiNetwork()?.address != network.address {
+                // Wi-Fi dropped or changed under the scan: nothing was checked.
+                self.phase = .noWiFi
+            } else {
+                self.progress = 1
+                self.phase = .finished
+            }
         }
     }
 
     func cancel() {
-        guard phase == .asking || phase == .scanning else { return }
+        guard isBusy else { return }
+        if phase == .asking {
+            // No prompt can be covering the app if Stop could be tapped.
+            UserDefaults.standard.set(true, forKey: "askedLocalNetwork")
+        }
         task?.cancel()
         task = nil
         stopBrowsing()
-        phase = findings.isEmpty ? .idle : .finished
+        // A half-finished sweep is not a result, unless it already found one.
+        phase = foundLikelyCamera ? .finished : .idle
     }
 
     // MARK: - Port sweep
 
-    private func sweep(around address: String) async {
-        let prefix = address.split(separator: ".").prefix(3).joined(separator: ".")
+    private enum Probe { case open, closed, blocked }
+
+    /// Tries every port on every address. Returns true if iOS blocked the
+    /// traffic, in which case nothing can be said about the network.
+    private func sweep(_ network: (address: UInt32, mask: UInt32)) async -> Bool {
+        let mask = max(network.mask, Self.widestMask)
+        let first = (network.address & mask) &+ 1
+        let last = (network.address | ~mask) &- 1
+        guard first <= last else { return false }
+
+        // Port by port rather than host by host: each address then gets five
+        // separate chances, seconds apart, instead of one shared second.
         var jobs: [(host: String, port: UInt16)] = []
-        for last in 1...254 {
-            let host = "\(prefix).\(last)"
-            if host == address { continue }
-            for port in Self.ports {
-                jobs.append((host, port))
+        for port in Self.ports {
+            for ip in first...last where ip != network.address {
+                jobs.append(("\(ip >> 24).\((ip >> 16) & 255).\((ip >> 8) & 255).\(ip & 255)", port))
             }
         }
 
         let total = Double(jobs.count)
         var completed = 0.0
+        var blocked = false
 
-        await withTaskGroup(of: (String, UInt16, Bool).self) { group in
+        await withTaskGroup(of: (String, UInt16, Probe).self) { group in
             var remaining = jobs.makeIterator()
             func addProbe() {
                 guard let job = remaining.next() else { return }
                 group.addTask {
-                    let open = await WiFiScanner.isOpen(host: job.host, port: job.port)
-                    return (job.host, job.port, open)
+                    let result = await WiFiScanner.probe(host: job.host, port: job.port)
+                    return (job.host, job.port, result)
                 }
             }
             // A sliding window of concurrent probes.
-            for _ in 0..<48 { addProbe() }
+            for _ in 0..<64 { addProbe() }
 
-            for await (host, port, open) in group {
-                if Task.isCancelled {
+            for await (host, port, result) in group {
+                if Task.isCancelled || result == .blocked {
+                    blocked = (result == .blocked)
                     group.cancelAll()
                     break
                 }
                 completed += 1
                 progress = completed / total
-                if open {
+                if result == .open {
                     openPorts[host, default: []].insert(port)
                     publish()
                 }
                 addProbe()
             }
         }
+        return blocked
     }
 
-    /// True if a TCP connection to host:port succeeds within the timeout.
-    nonisolated private static func isOpen(host: String, port: UInt16, timeout: TimeInterval = 1) async -> Bool {
-        guard let nwPort = NWEndpoint.Port(rawValue: port) else { return false }
+    /// Tries one TCP connection, giving up after the timeout.
+    nonisolated private static func probe(host: String, port: UInt16, timeout: TimeInterval = 1) async -> Probe {
+        guard let nwPort = NWEndpoint.Port(rawValue: port) else { return .closed }
         let connection = NWConnection(host: NWEndpoint.Host(host), port: nwPort, using: .tcp)
         let once = Once()
         return await withCheckedContinuation { continuation in
-            @Sendable func finish(_ open: Bool) {
+            @Sendable func finish(_ result: Probe) {
                 guard once.claim() else { return }
                 connection.cancel()
-                continuation.resume(returning: open)
+                continuation.resume(returning: result)
             }
             connection.stateUpdateHandler = { state in
                 switch state {
                 case .ready:
-                    finish(true)
-                case .failed, .waiting:
-                    // Refused or unreachable: no need to wait out the timer.
-                    finish(false)
+                    finish(.open)
+                case .waiting:
+                    // Refused or unreachable, so there is no need to wait out
+                    // the timer; unless iOS itself is holding the traffic back.
+                    let denied = connection.currentPath?.unsatisfiedReason == .localNetworkDenied
+                    finish(denied ? .blocked : .closed)
+                case .failed:
+                    finish(.closed)
                 default:
                     break
                 }
             }
             connection.start(queue: .global(qos: .utility))
             DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + timeout) {
-                finish(false)
+                finish(.closed)
             }
         }
     }
@@ -195,11 +229,10 @@ final class WiFiScanner: ObservableObject {
             list.append(Finding(id: address,
                                 name: address,
                                 isLikelyCamera: !open.isDisjoint(with: Self.videoPorts),
-                                ports: open.sorted(),
                                 url: Self.webPage(at: address, open: open)))
         }
         for name in advertised {
-            list.append(Finding(id: "service:" + name, name: name, isLikelyCamera: true, ports: [], url: nil))
+            list.append(Finding(id: "service:" + name, name: name, isLikelyCamera: true, url: nil))
         }
         findings = list.sorted { a, b in
             if a.isLikelyCamera != b.isLikelyCamera { return a.isLikelyCamera }
@@ -279,30 +312,27 @@ final class WiFiScanner: ObservableObject {
 
     // MARK: - Local address
 
-    /// IPv4 address of the Wi-Fi interface (en0), if any.
-    nonisolated private static func wifiAddress() -> String? {
+    /// IPv4 address and netmask of the Wi-Fi interface (en0), in host byte order.
+    nonisolated private static func wifiNetwork() -> (address: UInt32, mask: UInt32)? {
         var list: UnsafeMutablePointer<ifaddrs>?
         guard getifaddrs(&list) == 0, let first = list else { return nil }
         defer { freeifaddrs(list) }
 
-        var result: String?
         var pointer: UnsafeMutablePointer<ifaddrs>? = first
         while let current = pointer {
             let interface = current.pointee
-            if let sa = interface.ifa_addr,
+            if let sa = interface.ifa_addr, let nm = interface.ifa_netmask,
                sa.pointee.sa_family == sa_family_t(AF_INET),
                String(cString: interface.ifa_name) == "en0" {
-                var addr = sockaddr_in()
-                memcpy(&addr, sa, MemoryLayout<sockaddr_in>.size)
-                var buffer = [CChar](repeating: 0, count: Int(INET_ADDRSTRLEN))
-                var sinAddr = addr.sin_addr
-                if inet_ntop(AF_INET, &sinAddr, &buffer, socklen_t(INET_ADDRSTRLEN)) != nil {
-                    result = String(cString: buffer)
-                }
+                var address = sockaddr_in()
+                var mask = sockaddr_in()
+                memcpy(&address, sa, MemoryLayout<sockaddr_in>.size)
+                memcpy(&mask, nm, MemoryLayout<sockaddr_in>.size)
+                return (UInt32(bigEndian: address.sin_addr.s_addr), UInt32(bigEndian: mask.sin_addr.s_addr))
             }
             pointer = interface.ifa_next
         }
-        return result
+        return nil
     }
 }
 

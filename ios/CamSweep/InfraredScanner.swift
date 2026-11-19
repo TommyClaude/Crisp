@@ -8,15 +8,22 @@ final class InfraredScanner: NSObject, ObservableObject, AVCaptureVideoDataOutpu
     enum Access { case unknown, granted, denied }
 
     let session = AVCaptureSession()
+    /// The on-screen preview. The camera needs it to say how frames must be
+    /// turned to match what the person sees.
+    weak var previewLayer: AVCaptureVideoPreviewLayer?
 
     @Published private(set) var access: Access = .unknown
+    /// True until the person has been asked for the camera, so the screen
+    /// can explain itself before the system prompt appears.
+    @Published private(set) var needsPermission =
+        !Demo.isOn && AVCaptureDevice.authorizationStatus(for: .video) == .notDetermined
     /// False until the first camera image has been analyzed.
     @Published private(set) var hasImage = false
     /// Bright spots only mean something in the dark.
     @Published private(set) var isDark = false
     /// Centers of bright spots, normalized to 0...1 within the video frame.
     @Published private(set) var spots: [CGPoint] = []
-    /// Pixel size of the (portrait) video frame the spots refer to.
+    /// Pixel size of the video frame the spots refer to.
     @Published private(set) var frameSize = CGSize(width: 480, height: 640)
     @Published private(set) var isFrontCamera = true
     @Published private(set) var torchOn = false
@@ -24,7 +31,9 @@ final class InfraredScanner: NSObject, ObservableObject, AVCaptureVideoDataOutpu
     private let output = AVCaptureVideoDataOutput()
     private let sessionQueue = DispatchQueue(label: "camsweep.camera.session")
     private let frameQueue = DispatchQueue(label: "camsweep.camera.frames")
+    // Touched on sessionQueue only.
     private var configured = false
+    private var previewAngle: CGFloat = 90
     // Touched on frameQueue only.
     private var lastAnalysis = Date.distantPast
     private var wasDark = false
@@ -44,6 +53,7 @@ final class InfraredScanner: NSObject, ObservableObject, AVCaptureVideoDataOutpu
         case .notDetermined:
             AVCaptureDevice.requestAccess(for: .video) { granted in
                 DispatchQueue.main.async {
+                    self.needsPermission = false
                     self.access = granted ? .granted : .denied
                     if granted { self.run() }
                 }
@@ -69,6 +79,7 @@ final class InfraredScanner: NSObject, ObservableObject, AVCaptureVideoDataOutpu
             for input in self.session.inputs { self.session.removeInput(input) }
             self.attachCamera(position)
             self.session.commitConfiguration()
+            self.alignPreview()
         }
     }
 
@@ -102,6 +113,7 @@ final class InfraredScanner: NSObject, ObservableObject, AVCaptureVideoDataOutpu
                 if self.session.canAddOutput(self.output) { self.session.addOutput(self.output) }
                 self.attachCamera(.front)
                 self.session.commitConfiguration()
+                self.alignPreview()
             }
             if !self.session.isRunning { self.session.startRunning() }
         }
@@ -113,15 +125,33 @@ final class InfraredScanner: NSObject, ObservableObject, AVCaptureVideoDataOutpu
               session.canAddInput(input) else { return }
         session.addInput(input)
 
-        // Deliver portrait, mirror-matched frames so spots line up with the preview.
+        // The analyzed frames must be turned exactly like the preview, or the
+        // rings land in the wrong place. The angle is not a constant: the
+        // front camera of the iPhone 17 family is mounted a quarter turn from
+        // earlier ones.
+        if let previewLayer {
+            previewAngle = AVCaptureDevice.RotationCoordinator(device: device, previewLayer: previewLayer)
+                .videoRotationAngleForHorizonLevelPreview
+        }
         if let connection = output.connection(with: .video) {
-            if connection.isVideoRotationAngleSupported(90) {
-                connection.videoRotationAngle = 90
+            if connection.isVideoRotationAngleSupported(previewAngle) {
+                connection.videoRotationAngle = previewAngle
             }
             if connection.isVideoMirroringSupported {
                 connection.automaticallyAdjustsVideoMirroring = false
                 connection.isVideoMirrored = (position == .front)
             }
+        }
+    }
+
+    /// Turns the preview to the same angle as the analyzed frames. Call on
+    /// the session queue once a configuration change is committed.
+    private func alignPreview() {
+        let angle = previewAngle
+        DispatchQueue.main.async {
+            guard let connection = self.previewLayer?.connection,
+                  connection.isVideoRotationAngleSupported(angle) else { return }
+            connection.videoRotationAngle = angle
         }
     }
 
@@ -145,48 +175,56 @@ final class InfraredScanner: NSObject, ObservableObject, AVCaptureVideoDataOutpu
               let base = CVPixelBufferGetBaseAddress(pixelBuffer) else { return }
         let pixels = base.assumingMemoryBound(to: UInt8.self)
 
+        // Every pixel is tested, because a distant LED is only a pixel or two
+        // wide. Hits are recorded per 8-pixel cell to keep the work bounded.
+        let cell = 8
+        let columns = (width + cell - 1) / cell
+        let rows = (height + cell - 1) / cell
+        var bright = [Bool](repeating: false, count: columns * rows)
         var totalLuma = 0
-        var sampleCount = 0
-        var brightPoints: [CGPoint] = []
-        let step = 4
 
-        var y = 0
-        while y < height {
-            var x = 0
-            let row = y * bytesPerRow
-            while x < width {
-                let offset = row + x * 4 // BGRA
+        for y in 0..<height {
+            var offset = y * bytesPerRow // BGRA
+            let cellRow = (y / cell) * columns
+            for x in 0..<width {
                 let b = Int(pixels[offset])
                 let g = Int(pixels[offset + 1])
                 let r = Int(pixels[offset + 2])
                 let luma = (299 * r + 587 * g + 114 * b) / 1000
                 totalLuma += luma
-                sampleCount += 1
-                if luma > 230 && brightPoints.count < 400 {
-                    brightPoints.append(CGPoint(x: Double(x) / Double(width),
-                                                y: Double(y) / Double(height)))
-                }
-                x += step
+                if luma > 230 { bright[cellRow + x / cell] = true }
+                offset += 4
             }
-            y += step
         }
 
-        let average = Double(totalLuma) / Double(max(sampleCount, 1))
+        let average = Double(totalLuma) / Double(width * height)
         // Two thresholds, so the status does not flicker at the boundary.
         let dark = average < (wasDark ? 70 : 55)
         wasDark = dark
-        let found = dark ? Self.cluster(brightPoints) : []
+
+        var points: [CGPoint] = []
+        if dark {
+            for index in bright.indices where bright[index] {
+                points.append(CGPoint(x: (Double(index % columns) + 0.5) * Double(cell) / Double(width),
+                                      y: (Double(index / columns) + 0.5) * Double(cell) / Double(height)))
+            }
+        }
+        let found = Self.cluster(points)
         let size = CGSize(width: width, height: height)
+        // iOS turns the torch off by itself (in the background, when hot), so
+        // ask the camera instead of remembering the last tap.
+        let torch = (connection.inputPorts.first?.input as? AVCaptureDeviceInput)?.device.isTorchActive ?? false
 
         DispatchQueue.main.async {
             self.hasImage = true
             self.isDark = dark
             self.spots = found
             if self.frameSize != size { self.frameSize = size }
+            if self.torchOn != torch { self.torchOn = torch }
         }
     }
 
-    /// Merges nearby bright pixels so each light source gets one marker.
+    /// Merges nearby bright cells so each light source gets one marker.
     private static func cluster(_ points: [CGPoint], radius: CGFloat = 0.06) -> [CGPoint] {
         var centers: [(sumX: CGFloat, sumY: CGFloat, count: Int)] = []
         for point in points {

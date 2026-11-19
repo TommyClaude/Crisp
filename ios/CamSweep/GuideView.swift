@@ -1,112 +1,124 @@
 import SwiftUI
 
-/// What to check by hand: where cameras hide, quick tests, and what to do
-/// if one turns up.
+/// What to check by hand: where cameras hide, a few quick tests, and what to
+/// do if one turns up. Three short pages, so nothing sits below a scroll.
 struct GuideView: View {
-    @Environment(\.dismiss) private var dismiss
+    enum Page: String, CaseIterable, Identifiable {
+        case places, checks, found
 
-    private struct Item: Identifiable {
-        let id = UUID()
-        let symbol: String
-        let text: LocalizedStringKey
+        var id: String { rawValue }
+
+        var title: LocalizedStringKey {
+            switch self {
+            case .places: "Where"
+            case .checks: "Checks"
+            case .found: "If found"
+            }
+        }
     }
 
-    private let places = [
-        Item(symbol: "sensor.fill", text: "Smoke detectors"),
-        Item(symbol: "alarm.fill", text: "Clocks"),
-        Item(symbol: "powerplug.fill", text: "Chargers"),
-        Item(symbol: "air.conditioner.horizontal.fill", text: "Vents"),
-        Item(symbol: "photo.artframe", text: "Frames"),
-        Item(symbol: "tv.fill", text: "TV boxes"),
+    @State var page: Page = .places
+    @Environment(\.dismiss) private var dismiss
+
+    private static let places: [(symbol: String, name: LocalizedStringKey)] = [
+        ("sensor.fill", "Smoke alarm"),
+        ("alarm.fill", "Clock"),
+        ("powerplug.fill", "Charger"),
+        ("air.conditioner.horizontal.fill", "Vent"),
+        ("photo.artframe", "Frame"),
+        ("tv.fill", "TV box"),
+        ("oval.portrait.fill", "Mirror"),
+        ("lamp.desk.fill", "Lamp"),
     ]
 
-    private let checks = [
-        Item(symbol: "flashlight.on.fill", text: "Shine a light around the room. A lens glints back."),
-        Item(symbol: "hand.point.up.left.fill", text: "Touch a mirror. No gap between your finger and its reflection is a warning sign."),
-        Item(symbol: "powerplug.fill", text: "Unplug devices you don't need, and feel for ones that are warm."),
+    private static let checks: [(symbol: String, text: LocalizedStringKey)] = [
+        ("flashlight.on.fill", "Shine a light around the room. A lens glints back."),
+        ("hand.point.up.left.fill", "Touch a mirror. No gap between your finger and its reflection is a warning sign."),
+        ("powerplug.fill", "Unplug what you don't need, and feel for devices that are warm."),
+        ("av.remote.fill", "Aim a TV remote at the infrared check. If its tip flashes on screen, the check works."),
     ]
 
-    private let actions = [
-        Item(symbol: "hand.raised.fill", text: "Don't touch or unplug it."),
-        Item(symbol: "camera.fill", text: "Cover it, then take photos."),
-        Item(symbol: "phone.fill", text: "Ask for another room and call the police."),
+    private static let steps: [LocalizedStringKey] = [
+        "Don't touch or unplug it.",
+        "Cover it, then take photos.",
+        "Ask for another room.",
+        "Report it to the police.",
     ]
 
     var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 16) {
-                Text("What to look for")
-                    .font(.title.bold())
-                    .padding(.top, 32)
+        VStack(alignment: .leading, spacing: 20) {
+            Text("Check by hand")
+                .font(.title.bold())
+                .padding(.top, 28)
+                .accessibilityAddTraits(.isHeader)
 
-                sectionTitle("Where cameras hide")
-                LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 10), count: 3), spacing: 10) {
-                    ForEach(places) { place in
-                        VStack(spacing: 10) {
-                            Image(systemName: place.symbol)
-                                .font(.system(size: 24, weight: .semibold))
-                                .foregroundStyle(Theme.accent)
-                                .frame(height: 30)
-                            Text(place.text)
-                                .font(.footnote.weight(.medium))
-                                .multilineTextAlignment(.center)
-                        }
-                        .frame(maxWidth: .infinity, minHeight: 96)
-                        .background(Theme.surface, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
-                    }
+            Picker("Section", selection: $page) {
+                ForEach(Page.allCases) { page in
+                    Text(page.title).tag(page)
                 }
-
-                sectionTitle("Quick checks")
-                rows(checks, color: Theme.accent)
-
-                sectionTitle("If you find one")
-                rows(actions, color: Theme.caution)
-
-                Text("No app can find every camera. Trust your eyes too.")
-                    .font(.footnote)
-                    .foregroundStyle(Theme.dim)
-                    .padding(.top, 8)
             }
-            .padding(.horizontal, 20)
-            .padding(.bottom, 20)
-        }
-        .safeAreaInset(edge: .bottom) {
+            .pickerStyle(.segmented)
+
+            ViewThatFits(in: .vertical) {
+                content.frame(maxHeight: .infinity, alignment: .top)
+                ScrollView { content }
+            }
+
+            Text("No app can find every camera. Trust your eyes too.")
+                .font(.footnote)
+                .foregroundStyle(Theme.secondary)
             Button("Done") { dismiss() }
-                .buttonStyle(SecondaryButtonStyle())
-                .padding(20)
-                .background(Theme.background)
+                .buttonStyle(CapsuleButtonStyle())
         }
-        .background(Theme.background.ignoresSafeArea())
+        .padding(.horizontal, 20)
+        .padding(.bottom, 16)
+        .foregroundStyle(Theme.text)
+        .background(Theme.surface.ignoresSafeArea())
         .presentationDragIndicator(.visible)
     }
 
-    private func sectionTitle(_ title: LocalizedStringKey) -> some View {
-        Text(title)
-            .font(.footnote.weight(.semibold))
-            .textCase(.uppercase)
-            .foregroundStyle(Theme.dim)
-            .padding(.top, 12)
-    }
-
-    private func rows(_ items: [Item], color: Color) -> some View {
-        VStack(spacing: 0) {
-            ForEach(items) { item in
-                HStack(alignment: .top, spacing: 14) {
-                    Image(systemName: item.symbol)
-                        .font(.system(size: 17, weight: .semibold))
-                        .foregroundStyle(color)
-                        .frame(width: 28)
-                    Text(item.text)
-                        .font(.subheadline)
-                        .fixedSize(horizontal: false, vertical: true)
-                    Spacer(minLength: 0)
+    @ViewBuilder private var content: some View {
+        switch page {
+        case .places:
+            VStack(alignment: .leading, spacing: 20) {
+                Text("Start with what faces the bed.")
+                    .foregroundStyle(Theme.secondary)
+                LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 8), count: 4), spacing: 20) {
+                    ForEach(Self.places, id: \.symbol) { place in
+                        VStack(spacing: 8) {
+                            Halo(size: 56) { Image(systemName: place.symbol) }
+                            Text(place.name)
+                                .font(.caption)
+                                .foregroundStyle(Theme.secondary)
+                        }
+                        .accessibilityElement(children: .combine)
+                    }
                 }
-                .padding(.vertical, 12)
+            }
+        case .checks:
+            VStack(alignment: .leading, spacing: 20) {
+                ForEach(Self.checks, id: \.symbol) { check in
+                    HStack(spacing: 16) {
+                        Halo(size: 44) { Image(systemName: check.symbol) }
+                            .accessibilityHidden(true)
+                        Text(check.text)
+                            .font(.subheadline)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                }
+            }
+        case .found:
+            VStack(alignment: .leading, spacing: 20) {
+                ForEach(Array(Self.steps.enumerated()), id: \.offset) { index, step in
+                    HStack(spacing: 16) {
+                        Halo(size: 44) { Text("\(index + 1)") }
+                            .accessibilityHidden(true)
+                        Text(step)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                }
             }
         }
-        .padding(.horizontal, 16)
-        .padding(.vertical, 4)
-        .background(Theme.surface, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
     }
 }
 

@@ -1,60 +1,67 @@
 import SwiftUI
 
 struct WiFiView: View {
-    @StateObject private var scanner = WiFiScanner()
+    @ObservedObject var scanner: WiFiScanner
     @State private var showHelp = false
+    @State private var showGuide = false
 
     var body: some View {
-        ZStack {
-            Theme.background.ignoresSafeArea()
-
+        Group {
             switch scanner.phase {
             case .idle:
-                stage(Emblem(symbol: "wifi"),
-                     title: "Scan this Wi-Fi",
-                     detail: "Looks for devices that stream video.") {
+                Stage {
+                    RingGauge { ringSymbol("wifi") }
+                    StatusBlock(title: "Scan this Wi-Fi", detail: "Looks for devices that stream video.")
+                } actions: {
                     Button("Start scan") { scanner.start() }
-                        .buttonStyle(PrimaryButtonStyle())
+                        .buttonStyle(CapsuleButtonStyle(isPrimary: true))
                 }
             case .asking:
-                stage(Emblem(symbol: "wifi", isActive: true),
-                     title: "Waiting for permission",
-                     detail: "Allow access to the local network to scan it.") {
-                    Button("Stop") { scanner.cancel() }
-                        .buttonStyle(SecondaryButtonStyle())
+                Stage {
+                    RingGauge { ringSymbol("wifi") }
+                    StatusBlock(title: "Getting ready", detail: "If iOS asks, allow access to the local network.")
+                } actions: {
+                    Button("Cancel") { scanner.cancel() }
+                        .buttonStyle(CapsuleButtonStyle())
                 }
             case .scanning:
-                stage(progressRing,
-                     title: "Scanning",
-                     detail: "Checking every address on this network.") {
-                    Button("Stop") { scanner.cancel() }
-                        .buttonStyle(SecondaryButtonStyle())
+                Stage {
+                    RingGauge(fraction: scanner.progress) {
+                        Text("\(Int(scanner.progress * 100))%")
+                            .font(.system(size: 64, weight: .bold, design: .rounded))
+                            .monospacedDigit()
+                            .contentTransition(.numericText())
+                    }
+                    .accessibilityLabel("Scan progress")
+                    .accessibilityValue("\(Int(scanner.progress * 100)) percent")
+                    StatusBlock(title: "Scanning this Wi-Fi", detail: scanningDetail)
+                } actions: {
+                    Button("Cancel") { scanner.cancel() }
+                        .buttonStyle(CapsuleButtonStyle())
                 }
             case .finished:
                 results
             case .denied:
-                ContentUnavailableView {
-                    Label("Local network access is off", systemImage: "lock")
-                } description: {
-                    Text("Allow Local Network for CamSweep in Settings, then scan again.")
+                Stage {
+                    Halo(size: 72, isLead: false) { Image(systemName: "lock") }
+                    StatusBlock(title: "Local network is off",
+                                detail: "Allow Local Network for CamSweep in Settings, then scan again.")
                 } actions: {
                     Button("Open Settings") { openAppSettings() }
-                        .buttonStyle(.bordered)
+                        .buttonStyle(CapsuleButtonStyle(isPrimary: true))
                     Button("Try again") { scanner.start() }
+                        .buttonStyle(CapsuleButtonStyle())
                 }
             case .noWiFi:
-                ContentUnavailableView {
-                    Label("Not on Wi-Fi", systemImage: "wifi.slash")
-                } description: {
-                    Text("Join the room's Wi-Fi, then scan.")
+                Stage {
+                    Halo(size: 72, isLead: false) { Image(systemName: "wifi.slash") }
+                    StatusBlock(title: "Not on Wi-Fi", detail: "Join the room's Wi-Fi, then scan.")
                 } actions: {
                     Button("Try again") { scanner.start() }
-                        .buttonStyle(.bordered)
+                        .buttonStyle(CapsuleButtonStyle(isPrimary: true))
                 }
             }
         }
-        .navigationTitle("Wi-Fi")
-        .navigationBarTitleDisplayMode(.inline)
         .toolbar {
             ToolbarItem(placement: .topBarTrailing) {
                 Button {
@@ -66,86 +73,95 @@ struct WiFiView: View {
             }
         }
         .sheet(isPresented: $showHelp) {
-            HelpSheet(title: "Wi-Fi scan", steps: [
-                .init(symbol: "wifi", text: "Join the room's Wi-Fi first. The scan only sees devices on the same network."),
-                .init(symbol: "video.fill", text: "A device that streams video is very likely a camera."),
-                .init(symbol: "globe", text: "A device with only a web page could be a router, a TV or a camera. Open it to see."),
-                .init(symbol: "eye.slash", text: "Many hotels hide guests from each other, and some cameras never join Wi-Fi. An empty result is not proof."),
-            ])
+            HelpSheet(title: "Scan the Wi-Fi",
+                      steps: ["Join the room's Wi-Fi.",
+                              "Tap Start scan and wait about a minute.",
+                              "Open anything it finds to see what it is."],
+                      tip: "Only devices on this Wi-Fi show up. Hotels often hide guests from each other, and some cameras never join Wi-Fi.")
         }
-        .onDisappear { scanner.cancel() }
+        .sheet(isPresented: $showGuide) {
+            GuideView(page: .found)
+        }
+        .onChange(of: scanner.phase) { _, phase in
+            // Say the outcome aloud; nothing else tells VoiceOver it changed.
+            let news: String? = switch phase {
+            case .finished: scanner.foundLikelyCamera ? "Scan finished. Possible camera." : "Scan finished. No camera spotted."
+            case .denied: "Local network is off."
+            case .noWiFi: "Not on Wi-Fi."
+            default: nil
+            }
+            if let news { AccessibilityNotification.Announcement(news).post() }
+        }
     }
 
-    /// One centered hero, a headline, and the screen's single action.
-    private func stage<Hero: View, Action: View>(_ hero: Hero,
-                                                 title: LocalizedStringKey,
-                                                 detail: LocalizedStringKey,
-                                                 @ViewBuilder action: () -> Action) -> some View {
-        VStack(spacing: 32) {
-            Spacer()
-            hero
-            Headline(title: title, detail: detail)
-            Spacer()
-            action()
-        }
-        .padding(20)
+    private func ringSymbol(_ name: String) -> some View {
+        Image(systemName: name)
+            .font(.system(size: 56, weight: .medium))
+            .foregroundStyle(Theme.secondary)
     }
 
-    private var progressRing: some View {
-        ZStack {
-            Circle()
-                .stroke(Theme.surface, lineWidth: 16)
-            Circle()
-                .trim(from: 0, to: scanner.progress)
-                .stroke(Theme.accent, style: StrokeStyle(lineWidth: 16, lineCap: .round))
-                .rotationEffect(.degrees(-90))
-                .animation(.linear(duration: 0.2), value: scanner.progress)
-            Text("\(Int(scanner.progress * 100))%")
-                .font(.system(size: 56, weight: .bold, design: .rounded))
-                .monospacedDigit()
-                .contentTransition(.numericText())
+    private var scanningDetail: LocalizedStringKey {
+        if !scanner.findings.isEmpty {
+            return scanner.findings.count == 1 ? "1 device so far" : "\(scanner.findings.count) devices so far"
         }
-        .frame(width: 216, height: 216)
-        .padding(12)
-        .accessibilityElement(children: .ignore)
-        .accessibilityLabel("Scan progress")
-        .accessibilityValue("\(Int(scanner.progress * 100)) percent")
+        return scanner.sweepsWholeNetwork ? "Checking each address." : "Checking the addresses nearest yours."
     }
 
     private var results: some View {
         ScrollView {
-            VStack(spacing: 24) {
+            VStack(spacing: 20) {
+                Halo(size: 72, isLead: scanner.foundLikelyCamera) {
+                    Image(systemName: scanner.foundLikelyCamera ? "video.fill" : "wifi")
+                }
+                .padding(.top, 24)
+                .accessibilityHidden(true)
+
                 if scanner.foundLikelyCamera {
-                    Emblem(symbol: "video.fill", color: Theme.alert)
-                    Headline(title: "Possible camera",
-                             detail: "A device on this Wi-Fi streams video.",
-                             color: Theme.alert)
+                    StatusBlock(title: "Possible camera",
+                                detail: "A clue, not proof. Look for it in the room.",
+                                isLead: true)
                 } else if scanner.findings.isEmpty {
-                    Emblem(symbol: "wifi")
-                    Headline(title: "Nothing found",
-                             detail: "No device answered. Hidden cameras can still be here, so check by hand too.")
+                    StatusBlock(title: "Nothing answered",
+                                detail: "That isn't proof. Some cameras never join Wi-Fi.")
                 } else {
-                    Emblem(symbol: "wifi")
-                    Headline(title: "No video streams",
-                             detail: "These devices are on this Wi-Fi. Open one to see what it is.")
+                    StatusBlock(title: "No camera spotted",
+                                detail: "Open a device to see what it is, and check the room by hand too.")
                 }
 
-                if !scanner.findings.isEmpty {
-                    VStack(spacing: 10) {
-                        ForEach(scanner.findings) { finding in
-                            FindingRow(finding: finding)
-                        }
+                VStack(spacing: 12) {
+                    ForEach(scanner.findings) { finding in
+                        FindingRow(finding: finding)
                     }
                 }
+
+                if scanner.foundLikelyCamera {
+                    Button("What to do now") { showGuide = true }
+                        .font(.headline)
+                        .frame(minHeight: 44)
+                }
+
+                Text(scanner.sweepsWholeNetwork
+                     ? "Only devices on this Wi-Fi show up."
+                     : "This network is large: only the addresses nearest yours were checked.")
+                    .font(.footnote)
+                    .foregroundStyle(Theme.secondary)
+                    .multilineTextAlignment(.center)
             }
-            .padding(20)
+            .padding(.horizontal, 20)
+            .padding(.bottom, 16)
         }
         .safeAreaInset(edge: .bottom) {
-            Button("Scan again") { scanner.start() }
-                .buttonStyle(SecondaryButtonStyle())
-                .padding(20)
-                .background(Theme.background)
+            Button {
+                scanner.start()
+            } label: {
+                Label("Scan again", systemImage: "arrow.counterclockwise")
+            }
+            .buttonStyle(CapsuleButtonStyle())
+            .padding(.horizontal, 20)
+            .padding(.vertical, 12)
+            .background(Theme.background)
         }
+        .background(Theme.background.ignoresSafeArea())
     }
 }
 
@@ -155,6 +171,7 @@ private struct FindingRow: View {
     var body: some View {
         if let url = finding.url {
             Link(destination: url) { row(opens: true) }
+                .accessibilityHint("Opens its web page")
         } else {
             row(opens: false)
         }
@@ -162,33 +179,36 @@ private struct FindingRow: View {
 
     private func row(opens: Bool) -> some View {
         HStack(spacing: 14) {
-            Image(systemName: finding.isLikelyCamera ? "video.fill" : "globe")
-                .font(.system(size: 18, weight: .semibold))
-                .foregroundStyle(finding.isLikelyCamera ? Theme.alert : Theme.dim)
-                .frame(width: 44, height: 44)
-                .background((finding.isLikelyCamera ? Theme.alert : Color.white).opacity(0.12), in: Circle())
-            VStack(alignment: .leading, spacing: 2) {
-                Text(finding.name)
-                    .font(.body.monospacedDigit().weight(.medium))
-                    .foregroundStyle(.white)
-                Text(finding.isLikelyCamera ? "Streams video" : "Has a web page")
-                    .font(.footnote)
-                    .foregroundStyle(Theme.dim)
+            Halo(size: 48, isLead: finding.isLikelyCamera) {
+                Image(systemName: finding.isLikelyCamera ? "video.fill" : "globe")
             }
+            // What it is comes first; the address is the quietest thing here.
+            VStack(alignment: .leading, spacing: 2) {
+                Text(finding.isLikelyCamera ? "Likely camera" : "Unknown device")
+                    .font(.headline)
+                    .foregroundStyle(Theme.text)
+                Text(finding.isLikelyCamera ? "\(finding.name) · streams video" : "\(finding.name) · web page only")
+                    .font(.footnote.monospacedDigit())
+                    .foregroundStyle(Theme.secondary)
+            }
+            .multilineTextAlignment(.leading)
             Spacer(minLength: 8)
             if opens {
-                Image(systemName: "arrow.up.right")
-                    .font(.footnote.weight(.semibold))
-                    .foregroundStyle(Theme.dim)
+                Text("Open")
+                    .font(.subheadline.weight(.semibold))
+                    .foregroundStyle(finding.isLikelyCamera ? Theme.onAccent : Theme.text)
+                    .padding(.horizontal, 14)
+                    .frame(minHeight: 34)
+                    .background(finding.isLikelyCamera ? Theme.accent : Theme.raised, in: Capsule())
             }
         }
-        .padding(14)
-        .background(Theme.surface, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+        .padding(16)
+        .card()
         .accessibilityElement(children: .combine)
     }
 }
 
 #Preview {
-    NavigationStack { WiFiView() }
+    NavigationStack { WiFiView(scanner: WiFiScanner()) }
         .preferredColorScheme(.dark)
 }

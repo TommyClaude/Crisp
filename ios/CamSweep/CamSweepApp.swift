@@ -6,7 +6,8 @@ struct CamSweepApp: App {
         WindowGroup {
             HomeView()
                 .preferredColorScheme(.dark)
-                .tint(Theme.accent)
+                // Navigation chrome stays quiet; amber is kept for findings.
+                .tint(Theme.text)
                 .fontDesign(.rounded)
         }
     }

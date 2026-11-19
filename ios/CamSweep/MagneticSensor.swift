@@ -11,7 +11,7 @@ final class MagneticSensor: ObservableObject {
     static let scaleMax: Double = 150
 
     @Published private(set) var isAvailable = true
-    /// Field strength above the baseline, in microtesla.
+    /// How far the field strength is from the baseline, in microtesla.
     @Published private(set) var microtesla: Double = 0
     @Published private(set) var level: Level = .calibrating
 
@@ -29,20 +29,28 @@ final class MagneticSensor: ObservableObject {
             level = .strong
             return
         }
-        guard motion.isMagnetometerAvailable else {
+        // Device motion reports the field with the phone's own magnetism
+        // removed. The raw magnetometer includes it, so its strength swings
+        // by tens of microtesla whenever the phone is merely turned.
+        let frame = CMAttitudeReferenceFrame.xArbitraryCorrectedZVertical
+        guard motion.isDeviceMotionAvailable,
+              CMMotionManager.availableAttitudeReferenceFrames().contains(frame) else {
             isAvailable = false
             return
         }
         resetBaseline()
-        motion.magnetometerUpdateInterval = 1.0 / 30.0
-        motion.startMagnetometerUpdates(to: .main) { [weak self] data, _ in
-            guard let self, let field = data?.magneticField else { return }
+        motion.deviceMotionUpdateInterval = 1.0 / 30.0
+        motion.startDeviceMotionUpdates(using: frame, to: .main) { [weak self] data, _ in
+            // Until iOS has calibrated the compass, the field reads as zero.
+            guard let self, let reading = data?.magneticField,
+                  reading.accuracy != .uncalibrated else { return }
+            let field = reading.field
             self.handle(sqrt(field.x * field.x + field.y * field.y + field.z * field.z))
         }
     }
 
     func stop() {
-        motion.stopMagnetometerUpdates()
+        motion.stopDeviceMotionUpdates()
     }
 
     /// Re-zero. Do this in the middle of the room, away from metal.
@@ -62,7 +70,8 @@ final class MagneticSensor: ObservableObject {
             baseline = baselineSamples.reduce(0, +) / Double(baselineSamples.count)
         }
 
-        microtesla = max(0, smoothed - baseline)
+        // Magnets and steel can weaken the field as well as strengthen it.
+        microtesla = abs(smoothed - baseline)
         if microtesla >= Self.strongAt {
             level = .strong
         } else if microtesla >= Self.elevatedAt {

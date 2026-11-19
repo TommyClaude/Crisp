@@ -6,55 +6,37 @@ struct InfraredView: View {
     @State private var showHelp = false
 
     var body: some View {
-        ZStack {
-            Color.black.ignoresSafeArea()
-
+        Group {
             if scanner.access == .denied {
-                ContentUnavailableView {
-                    Label("Camera access is off", systemImage: "video.slash")
-                } description: {
-                    Text("Allow the camera in Settings to look for infrared lights.")
+                Stage {
+                    Halo(size: 72, isLead: false) { Image(systemName: "video.slash") }
+                    StatusBlock(title: "Camera access is off",
+                                detail: "Allow the camera for CamSweep in Settings.")
                 } actions: {
                     Button("Open Settings") { openAppSettings() }
-                        .buttonStyle(.bordered)
+                        .buttonStyle(CapsuleButtonStyle(isPrimary: true))
+                }
+            } else if scanner.needsPermission {
+                // Ask for the camera after a tap, with the reason on screen.
+                Stage {
+                    RingGauge {
+                        Image(systemName: "moon.fill")
+                            .font(.system(size: 56, weight: .medium))
+                            .foregroundStyle(Theme.secondary)
+                    }
+                    StatusBlock(title: "Make the room dark",
+                                detail: "Night-vision lights show up on camera, though your eyes can't see them.")
+                } actions: {
+                    Button("Start camera") { scanner.start() }
+                        .buttonStyle(CapsuleButtonStyle(isPrimary: true))
                 }
             } else {
-                CameraLayer(scanner: scanner)
-                    .ignoresSafeArea()
-                VStack {
-                    if scanner.hasImage { status }
-                    Spacer()
-                    Text(scanner.isFrontCamera
-                         ? "Infrared lights glow on screen, even though your eyes can't see them."
-                         : "With the torch on, a camera lens shines back as a tiny glint.")
-                        .font(.footnote)
-                        .multilineTextAlignment(.center)
-                        .padding(.horizontal, 16)
-                        .padding(.vertical, 12)
-                        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
-                }
-                .padding(20)
+                camera
             }
         }
-        .navigationTitle("Infrared")
-        .navigationBarTitleDisplayMode(.inline)
         .toolbarBackground(.hidden, for: .navigationBar)
         .toolbar {
-            ToolbarItemGroup(placement: .topBarTrailing) {
-                if !scanner.isFrontCamera {
-                    Button {
-                        scanner.toggleTorch()
-                    } label: {
-                        Image(systemName: scanner.torchOn ? "flashlight.on.fill" : "flashlight.off.fill")
-                    }
-                    .accessibilityLabel("Torch")
-                }
-                Button {
-                    scanner.flipCamera()
-                } label: {
-                    Image(systemName: "arrow.triangle.2.circlepath.camera")
-                }
-                .accessibilityLabel("Switch camera")
+            ToolbarItem(placement: .topBarTrailing) {
                 Button {
                     showHelp = true
                 } label: {
@@ -64,50 +46,120 @@ struct InfraredView: View {
             }
         }
         .sheet(isPresented: $showHelp) {
-            HelpSheet(title: "Infrared check", steps: [
-                .init(symbol: "moon.fill", text: "Turn off the lights and close the curtains."),
-                .init(symbol: "iphone", text: "Sweep the phone slowly around the room."),
-                .init(symbol: "circle.dotted", text: "A steady glowing dot that your own eyes can't see may be a camera's night-vision light."),
-                .init(symbol: "av.remote", text: "To test it, aim a TV remote at the camera and press a button. Its tip should flash on screen."),
-                .init(symbol: "flashlight.on.fill", text: "Or switch to the back camera, turn on the torch and look for a tiny glint from a lens."),
-            ])
+            HelpSheet(title: "Look for infrared",
+                      steps: ["Lights off, curtains closed.",
+                              "Pan the phone slowly around the room.",
+                              "A ring marks a glowing dot. If your eyes can't see it, look closer."],
+                      tip: "To test it, aim a TV remote at the camera and press a button: its tip flashes on screen. Or flip to the back camera and use the torch to catch the glint of a lens.")
         }
-        .onAppear { scanner.start() }
+        .onChange(of: scanner.spots.isEmpty) { _, isEmpty in
+            if !isEmpty { AccessibilityNotification.Announcement("Glowing dot in view").post() }
+        }
+        .onAppear {
+            if !scanner.needsPermission { scanner.start() }
+        }
         .onDisappear { scanner.stop() }
-        .keepsScreenAwake()
     }
 
-    @ViewBuilder private var status: some View {
-        if scanner.torchOn {
-            StatusPill(symbol: "flashlight.on.fill", text: "Watch for a tiny glint", color: Theme.accent)
-        } else if !scanner.isDark {
-            StatusPill(symbol: "lightbulb.fill", text: "Too bright. Turn off the lights.", color: Theme.caution)
-        } else if scanner.spots.isEmpty {
-            StatusPill(symbol: "eye.fill", text: "No glowing dots in view", color: Theme.accent)
-        } else {
-            StatusPill(symbol: "exclamationmark.circle.fill",
-                       text: scanner.spots.count == 1 ? "1 glowing dot. Look closer." : "\(scanner.spots.count) glowing dots. Look closer.",
-                       color: Theme.alert)
+    private var camera: some View {
+        ZStack(alignment: .bottom) {
+            CameraLayer(scanner: scanner)
+                .ignoresSafeArea()
+            if isTooBright {
+                // A lit preview would light the room, and the person's face.
+                Color.black.opacity(0.6)
+                    .ignoresSafeArea()
+            }
+            // Keeps the navigation bar readable over a bright image.
+            LinearGradient(colors: [.black.opacity(0.6), .clear], startPoint: .top, endPoint: .bottom)
+                .frame(height: 150)
+                .frame(maxHeight: .infinity, alignment: .top)
+                .ignoresSafeArea()
+                .allowsHitTesting(false)
+            panel
+                .padding(12)
         }
+        .background(Color.black.ignoresSafeArea())
     }
-}
 
-private struct StatusPill: View {
-    let symbol: String
-    let text: LocalizedStringKey
-    let color: Color
+    private var isTooBright: Bool {
+        scanner.hasImage && scanner.isFrontCamera && !scanner.isDark
+    }
 
-    var body: some View {
-        HStack(spacing: 8) {
-            Image(systemName: symbol)
-                .foregroundStyle(color)
-            Text(text)
+    /// Status and controls together at the bottom, in thumb reach.
+    private var panel: some View {
+        let status = self.status
+        return HStack(spacing: 14) {
+            Halo(size: 56, isLead: status.isLead) {
+                if let count = status.count {
+                    Text("\(count)")
+                } else {
+                    Image(systemName: status.symbol)
+                }
+            }
+            VStack(alignment: .leading, spacing: 2) {
+                Text(status.title)
+                    .font(.title3.bold())
+                Text(status.detail)
+                    .font(.subheadline)
+                    .foregroundStyle(Theme.secondary)
+            }
+            .accessibilityElement(children: .combine)
+            Spacer(minLength: 4)
+            if !scanner.isFrontCamera {
+                Button {
+                    scanner.toggleTorch()
+                } label: {
+                    Image(systemName: scanner.torchOn ? "flashlight.on.fill" : "flashlight.off.fill")
+                        .frame(width: 48, height: 48)
+                        .background(Theme.text.opacity(0.1), in: Circle())
+                }
+                .accessibilityLabel("Torch")
+                .accessibilityValue(scanner.torchOn ? "On" : "Off")
+            }
+            Button {
+                scanner.flipCamera()
+            } label: {
+                Image(systemName: "arrow.triangle.2.circlepath.camera")
+                    .frame(width: 48, height: 48)
+                    .background(Theme.text.opacity(0.1), in: Circle())
+            }
+            .accessibilityLabel("Switch camera")
         }
-        .font(.subheadline.weight(.semibold))
-        .padding(.horizontal, 16)
-        .padding(.vertical, 10)
-        .background(.ultraThinMaterial, in: Capsule())
-        .accessibilityElement(children: .combine)
+        .padding(16)
+        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 28, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: 28, style: .continuous).strokeBorder(Theme.hairline, lineWidth: 1))
+        .dynamicTypeSize(...DynamicTypeSize.accessibility2)
+    }
+
+    private struct Status {
+        var count: Int?
+        var symbol = "eye"
+        let title: LocalizedStringKey
+        let detail: LocalizedStringKey
+        var isLead = false
+    }
+
+    private var status: Status {
+        if !scanner.hasImage {
+            return Status(symbol: "camera", title: "Starting camera", detail: "One moment.")
+        }
+        if !scanner.isFrontCamera {
+            // The back camera filters infrared out; it is for the glint test.
+            return scanner.torchOn
+                ? Status(symbol: "flashlight.on.fill", title: "Watch for a glint", detail: "A lens shines back as a tiny point.")
+                : Status(symbol: "flashlight.off.fill", title: "Turn on the torch", detail: "A lens shines back as a tiny point.")
+        }
+        if !scanner.isDark {
+            return Status(symbol: "sun.max.fill", title: "Too bright", detail: "Lights off, curtains closed.")
+        }
+        if scanner.spots.isEmpty {
+            return Status(title: "No glowing dots yet", detail: "Keep panning slowly.")
+        }
+        return Status(count: scanner.spots.count,
+                      title: scanner.spots.count == 1 ? "Glowing dot" : "Glowing dots",
+                      detail: "Could be a camera light. Look closer.",
+                      isLead: true)
     }
 }
 
@@ -121,16 +173,23 @@ private struct CameraLayer: View {
                 if Demo.isOn {
                     DemoRoom(lights: scanner.spots.map { place($0, in: geo.size) })
                 } else {
-                    CameraPreview(session: scanner.session)
+                    CameraPreview(scanner: scanner)
                 }
-                ForEach(Array(scanner.spots.enumerated()), id: \.offset) { _, spot in
-                    Circle()
-                        .stroke(Theme.alert, lineWidth: 3)
-                        .frame(width: 56, height: 56)
+                // Rings only mean something on the infrared (front) camera.
+                if scanner.isFrontCamera {
+                    ForEach(Array(scanner.spots.enumerated()), id: \.offset) { _, spot in
+                        ZStack {
+                            Circle()
+                                .strokeBorder(Theme.accent, lineWidth: 2)
+                                .frame(width: 56, height: 56)
+                            Circle()
+                                .strokeBorder(Theme.accent.opacity(0.3), lineWidth: 1)
+                                .frame(width: 80, height: 80)
+                        }
                         .position(place(spot, in: geo.size))
+                    }
                 }
             }
-            .animation(.linear(duration: 0.15), value: scanner.spots)
         }
         .accessibilityHidden(true)
     }
@@ -145,7 +204,7 @@ private struct CameraLayer: View {
 }
 
 private struct CameraPreview: UIViewRepresentable {
-    let session: AVCaptureSession
+    let scanner: InfraredScanner
 
     final class PreviewView: UIView {
         override class var layerClass: AnyClass { AVCaptureVideoPreviewLayer.self }
@@ -154,8 +213,9 @@ private struct CameraPreview: UIViewRepresentable {
     func makeUIView(context: Context) -> PreviewView {
         let view = PreviewView()
         if let layer = view.layer as? AVCaptureVideoPreviewLayer {
-            layer.session = session
+            layer.session = scanner.session
             layer.videoGravity = .resizeAspectFill
+            scanner.previewLayer = layer
         }
         return view
     }
@@ -170,7 +230,8 @@ private struct DemoRoom: View {
 
     var body: some View {
         ZStack {
-            LinearGradient(colors: [Color(white: 0.10), Color(white: 0.02)], startPoint: .top, endPoint: .bottom)
+            LinearGradient(colors: [Color(red: 0.07, green: 0.06, blue: 0.10), .black],
+                           startPoint: .top, endPoint: .bottom)
             ForEach(Array(lights.enumerated()), id: \.offset) { _, light in
                 Circle()
                     .fill(RadialGradient(colors: [.white, Color(red: 0.78, green: 0.62, blue: 1.0), .clear],

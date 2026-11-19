@@ -1,155 +1,200 @@
 import SwiftUI
 import UIKit
 
-/// The look of the app. It is dark on purpose: the infrared check needs a
-/// dark room, and a bright screen would light it up.
+/// The look of the app.
+///
+/// It is dark only, on true black: the infrared check needs a dark room and
+/// a bright screen would light it up. There is one accent, a warm amber, and
+/// it only ever means "look here". Nothing is green, because no result of
+/// this app means the room is clear.
 enum Theme {
-    static let background = Color(red: 0.035, green: 0.043, blue: 0.063)
-    static let surface = Color.white.opacity(0.07)
-    static let accent = Color(red: 0.36, green: 0.89, blue: 0.76)
-    static let caution = Color(red: 1.00, green: 0.74, blue: 0.33)
-    static let alert = Color(red: 1.00, green: 0.38, blue: 0.40)
-    static let dim = Color.white.opacity(0.62)
+    static let background = Color.black
+    static let surface = Color(red: 0.078, green: 0.067, blue: 0.055)
+    static let raised = Color(red: 0.133, green: 0.118, blue: 0.098)
+    static let hairline = Color(red: 1.0, green: 0.925, blue: 0.824).opacity(0.09)
+    static let text = Color(red: 0.961, green: 0.937, blue: 0.902)
+    static let secondary = Color(red: 0.659, green: 0.624, blue: 0.576)
+    static let accent = Color(red: 1.0, green: 0.71, blue: 0.278)
+    static let onAccent = Color(red: 0.106, green: 0.071, blue: 0.016)
+
+    static let cornerRadius: CGFloat = 24
 }
 
-/// Soft rings drifting outward: the app's "scanning" motif.
-struct Ripples: View {
-    var color: Color = Theme.accent
-    var isActive = true
+/// The app's motif: a soft disc inside a thin ring, holding a symbol or a
+/// number. Amber when it marks something to look at, quiet otherwise.
+struct Halo<Content: View>: View {
+    var size: CGFloat = 56
+    var isLead = true
+    @ViewBuilder var content: Content
 
     var body: some View {
-        TimelineView(.animation(paused: !isActive)) { timeline in
-            // At rest the rings hold still, always in the same place.
-            let time = isActive ? timeline.date.timeIntervalSinceReferenceDate : 0
-            ZStack {
-                ForEach(0..<3, id: \.self) { index in
-                    let phase = (time / 3 + Double(index) / 3).truncatingRemainder(dividingBy: 1)
-                    Circle()
-                        .stroke(color, lineWidth: 1.5)
-                        .scaleEffect(0.5 + 0.5 * phase)
-                        .opacity(0.5 * (1 - phase))
-                }
-            }
+        let color = isLead ? Theme.accent : Theme.text
+        ZStack {
+            Circle()
+                .strokeBorder(color.opacity(isLead ? 0.36 : 0.16), lineWidth: 1.5)
+            Circle()
+                .fill(color.opacity(isLead ? 0.13 : 0.06))
+                .padding(size / 10)
+            content
+                .font(.system(size: size * 0.4, weight: .semibold, design: .rounded))
+                .foregroundStyle(isLead ? Theme.accent : Theme.secondary)
         }
-        .accessibilityHidden(true)
+        .frame(width: size, height: size)
     }
 }
 
-/// A round emblem with a symbol in the middle, used as each screen's hero.
-struct Emblem: View {
-    let symbol: String
-    var color: Color = Theme.accent
-    var isActive = false
+/// The large ring every check is built around: the magnet gauge, the scan
+/// progress, or simply a frame for a symbol.
+struct RingGauge<Center: View>: View {
+    var fraction: Double = 0
+    var isLead = false
+    @ViewBuilder var center: Center
 
     var body: some View {
         ZStack {
-            Ripples(color: color, isActive: isActive)
             Circle()
-                .fill(color.opacity(0.14))
-                .frame(width: 112, height: 112)
-            Image(systemName: symbol)
-                .font(.system(size: 44, weight: .semibold))
-                .foregroundStyle(color)
+                .stroke(Theme.text.opacity(0.09), lineWidth: 10)
+            Circle()
+                .trim(from: 0, to: fraction)
+                .stroke(isLead ? Theme.accent : Theme.text.opacity(0.75),
+                        style: StrokeStyle(lineWidth: 10, lineCap: .round))
+                .rotationEffect(.degrees(-90))
+                .shadow(color: isLead ? Theme.accent.opacity(0.45) : .clear, radius: 10)
+                .animation(.easeOut(duration: 0.25), value: fraction)
+            center
         }
-        .frame(width: 240, height: 240)
-        .accessibilityHidden(true)
+        .frame(width: 232, height: 232)
+        .padding(14)
+        .accessibilityElement(children: .ignore)
     }
 }
 
-/// The one main action on a screen.
-struct PrimaryButtonStyle: ButtonStyle {
-    func makeBody(configuration: Configuration) -> some View {
-        configuration.label
-            .font(.headline)
-            .foregroundStyle(Theme.background)
-            .frame(maxWidth: .infinity, minHeight: 54)
-            .background(Theme.accent, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
-            .opacity(configuration.isPressed ? 0.75 : 1)
-    }
-}
-
-/// A quieter action next to (or instead of) the main one.
-struct SecondaryButtonStyle: ButtonStyle {
-    func makeBody(configuration: Configuration) -> some View {
-        configuration.label
-            .font(.headline)
-            .foregroundStyle(.white)
-            .frame(maxWidth: .infinity, minHeight: 54)
-            .background(Theme.surface, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
-            .opacity(configuration.isPressed ? 0.75 : 1)
-    }
-}
-
-/// A big headline with one supporting line, centered.
-struct Headline: View {
+/// The status of a check: one title and one supporting line, centered.
+struct StatusBlock: View {
+    var symbol: String?
     let title: LocalizedStringKey
     let detail: LocalizedStringKey
-    var color: Color = .white
+    var isLead = false
 
     var body: some View {
         VStack(spacing: 8) {
-            Text(title)
-                .font(.title2.bold())
-                .foregroundStyle(color)
+            HStack(spacing: 8) {
+                if let symbol {
+                    Image(systemName: symbol)
+                }
+                Text(title)
+            }
+            .font(.title.bold())
+            .foregroundStyle(isLead ? Theme.accent : Theme.text)
+            .accessibilityAddTraits(.isHeader)
+
             Text(detail)
                 .font(.callout)
-                .foregroundStyle(Theme.dim)
+                .foregroundStyle(Theme.secondary)
         }
         .multilineTextAlignment(.center)
         .frame(maxWidth: .infinity)
     }
 }
 
-/// Short how-to steps, shown from the "?" on each check.
-struct HelpSheet: View {
-    struct Step: Identifiable {
-        let id = UUID()
-        let symbol: String
-        let text: LocalizedStringKey
-    }
-
-    let title: LocalizedStringKey
-    let steps: [Step]
-    @Environment(\.dismiss) private var dismiss
+/// The layout every check shares: a hero and its status in the middle, one
+/// action at the bottom, in thumb reach. Scrolls only if large text needs it.
+struct Stage<Hero: View, Actions: View>: View {
+    @ViewBuilder var hero: Hero
+    @ViewBuilder var actions: Actions
 
     var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 24) {
-                Text(title)
-                    .font(.title2.bold())
-                    .padding(.top, 16)
-                ForEach(steps) { step in
-                    HStack(alignment: .top, spacing: 16) {
-                        Image(systemName: step.symbol)
-                            .font(.system(size: 20, weight: .semibold))
-                            .foregroundStyle(Theme.accent)
-                            .frame(width: 32)
-                        Text(step.text)
-                            .fixedSize(horizontal: false, vertical: true)
-                    }
-                }
+        let content = VStack(spacing: 28) { hero }
+        VStack(spacing: 12) {
+            ViewThatFits(in: .vertical) {
+                content.frame(maxHeight: .infinity)
+                ScrollView { content }
             }
-            .padding(24)
-            .frame(maxWidth: .infinity, alignment: .leading)
+            actions
         }
-        .safeAreaInset(edge: .bottom) {
-            Button("Got it") { dismiss() }
-                .buttonStyle(SecondaryButtonStyle())
-                .padding(.horizontal, 24)
-                .padding(.vertical, 12)
-                .background(Theme.background)
-        }
+        .padding(.horizontal, 20)
+        .padding(.bottom, 16)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(Theme.background.ignoresSafeArea())
-        .presentationDetents([.medium, .large])
-        .presentationDragIndicator(.visible)
+    }
+}
+
+/// Buttons are capsules; containers never are. `isPrimary` fills the button
+/// with the accent, for the one action that starts something.
+struct CapsuleButtonStyle: ButtonStyle {
+    var isPrimary = false
+
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .font(.headline)
+            .foregroundStyle(isPrimary ? Theme.onAccent : Theme.text)
+            .frame(maxWidth: .infinity, minHeight: 56)
+            .background(isPrimary ? Theme.accent : Theme.raised, in: Capsule())
+            .overlay(Capsule().strokeBorder(Theme.hairline, lineWidth: isPrimary ? 0 : 1))
+            .opacity(configuration.isPressed ? 0.7 : 1)
     }
 }
 
 extension View {
-    /// Keeps the screen awake while a hands-busy check is on screen.
-    func keepsScreenAwake() -> some View {
-        onAppear { UIApplication.shared.isIdleTimerDisabled = true }
-            .onDisappear { UIApplication.shared.isIdleTimerDisabled = false }
+    /// The shared container look: one radius, one fill, a hairline edge.
+    func card() -> some View {
+        background(Theme.surface, in: RoundedRectangle(cornerRadius: Theme.cornerRadius, style: .continuous))
+            .overlay(RoundedRectangle(cornerRadius: Theme.cornerRadius, style: .continuous)
+                .strokeBorder(Theme.hairline, lineWidth: 1))
+    }
+}
+
+/// Three numbered steps, shown from the "?" on each check.
+struct HelpSheet: View {
+    let title: LocalizedStringKey
+    let steps: [LocalizedStringKey]
+    var tip: LocalizedStringKey?
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 20) {
+                Text(title)
+                    .font(.title.bold())
+                    .padding(.top, 20)
+                    .accessibilityAddTraits(.isHeader)
+
+                ForEach(Array(steps.enumerated()), id: \.offset) { index, step in
+                    HStack(spacing: 16) {
+                        Halo(size: 44) { Text("\(index + 1)") }
+                            .accessibilityHidden(true)
+                        Text(step)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                }
+
+                if let tip {
+                    Text(tip)
+                        .font(.subheadline)
+                        .foregroundStyle(Theme.secondary)
+                        .padding(16)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .card()
+                }
+
+                Text("Whatever a check shows is a clue, not proof.")
+                    .font(.footnote)
+                    .foregroundStyle(Theme.secondary)
+            }
+            .padding(.horizontal, 20)
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+        .safeAreaInset(edge: .bottom) {
+            Button("Got it") { dismiss() }
+                .buttonStyle(CapsuleButtonStyle())
+                .padding(.horizontal, 20)
+                .padding(.vertical, 12)
+                .background(Theme.surface)
+        }
+        .foregroundStyle(Theme.text)
+        .background(Theme.surface.ignoresSafeArea())
+        .presentationDetents([.medium, .large])
+        .presentationDragIndicator(.visible)
     }
 }
 
