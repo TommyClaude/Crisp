@@ -24,9 +24,9 @@ enum Check: String, CaseIterable, Identifiable {
 
     var detail: LocalizedStringKey {
         switch self {
-        case .wifi: "Finds cameras on the network"
-        case .infrared: "Spots night-vision lights in the dark"
-        case .magnetic: "Senses hidden devices up close"
+        case .wifi: "Cameras on the network"
+        case .infrared: "Night-vision lights in the dark"
+        case .magnetic: "Hidden devices, up close"
         }
     }
 }
@@ -82,6 +82,7 @@ struct HomeView: View {
                 }
                 .padding(.horizontal, 20)
                 .padding(.bottom, 24)
+                .fontDesign(.rounded)
             }
             .background(Theme.background.ignoresSafeArea())
             .toolbar(.hidden, for: .navigationBar)

@@ -26,7 +26,7 @@ struct Ripples: View {
                     let phase = (time / 3 + Double(index) / 3).truncatingRemainder(dividingBy: 1)
                     Circle()
                         .stroke(color, lineWidth: 1.5)
-                        .scaleEffect(0.4 + 0.6 * phase)
+                        .scaleEffect(0.5 + 0.5 * phase)
                         .opacity(0.5 * (1 - phase))
                 }
             }

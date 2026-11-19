@@ -55,10 +55,6 @@ struct MagneticView: View {
     private var gauge: some View {
         ZStack {
             Circle()
-                .fill(RadialGradient(colors: [color.opacity(0.22), .clear],
-                                     center: .center, startRadius: 40, endRadius: 170))
-                .frame(width: 340, height: 340)
-            Circle()
                 .stroke(Theme.surface, lineWidth: 16)
             Circle()
                 .trim(from: 0, to: sensor.fraction)
@@ -76,6 +72,13 @@ struct MagneticView: View {
             }
         }
         .frame(width: 248, height: 248)
+        .background {
+            // A soft glow in the status color; it must not affect layout.
+            Circle()
+                .fill(RadialGradient(colors: [color.opacity(0.22), .clear],
+                                     center: .center, startRadius: 40, endRadius: 170))
+                .frame(width: 340, height: 340)
+        }
         .accessibilityElement(children: .ignore)
         .accessibilityLabel("Magnetic field")
         .accessibilityValue("\(Int(sensor.microtesla)) microtesla")

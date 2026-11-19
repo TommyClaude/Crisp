@@ -12,7 +12,7 @@ struct GuideView: View {
     }
 
     private let places = [
-        Item(symbol: "smoke.fill", text: "Smoke detectors"),
+        Item(symbol: "sensor.fill", text: "Smoke detectors"),
         Item(symbol: "alarm.fill", text: "Clocks"),
         Item(symbol: "powerplug.fill", text: "Chargers"),
         Item(symbol: "air.conditioner.horizontal.fill", text: "Vents"),
