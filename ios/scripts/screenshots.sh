@@ -1,11 +1,10 @@
 #!/bin/bash
 # Captures screenshots of CamSweep from the iOS simulator.
 #
-#   ios/scripts/screenshots.sh <path/to/CamSweep.app> <output dir> [screen ...]
+#   ios/scripts/screenshots.sh <path/to/CamSweep.app> <output dir> <screen>...
 #
-# With no screen names it captures the launch screen as launch.png. Each
-# screen name is passed to the app as "-demoScreen <name>" and saved as
-# <name>.png.
+# Each screen name is passed to the app as "-demoScreen <name>", which opens
+# that screen with sample data, and is saved as <output dir>/<name>.png.
 set -euo pipefail
 
 APP="$1"
@@ -44,21 +43,13 @@ xcrun simctl status_bar "$UDID" override --time "9:41" \
 xcrun simctl install "$UDID" "$APP"
 
 mkdir -p "$OUT"
-capture() {
-  local name="$1"
-  shift
-  xcrun simctl launch --terminate-running-process "$UDID" "$BUNDLE_ID" "$@" >/dev/null
+for screen in "$@"; do
+  xcrun simctl launch --terminate-running-process "$UDID" "$BUNDLE_ID" -demoScreen "$screen" >/dev/null
   sleep 6
-  xcrun simctl io "$UDID" screenshot "$OUT/$name.png"
-}
-
-if [ "$#" -eq 0 ]; then
-  capture launch
-else
-  for screen in "$@"; do
-    capture "$screen" -demoScreen "$screen"
-  done
-fi
+  xcrun simctl io "$UDID" screenshot "$OUT/$screen.png"
+  # 2x is plenty for a README and keeps the repository small.
+  sips -Z 1704 "$OUT/$screen.png" >/dev/null
+done
 
 xcrun simctl shutdown "$UDID"
 ls -la "$OUT"
