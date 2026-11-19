@@ -18,9 +18,9 @@ jobs:
   build:
     name: Build CamSweep (iOS simulator)
     runs-on: macos-15
-    timeout-minutes: 20
+    timeout-minutes: 25
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Xcode version
         run: xcodebuild -version
@@ -38,3 +38,14 @@ jobs:
             SYMROOT="$PWD/build" \
             -quiet \
             build
+
+      - name: Screenshots
+        working-directory: ios
+        run: scripts/screenshots.sh build/Debug-iphonesimulator/CamSweep.app build/screenshots
+
+      - name: Upload screenshots
+        uses: actions/upload-artifact@v5
+        with:
+          name: screenshots
+          path: ios/build/screenshots
+          if-no-files-found: error
