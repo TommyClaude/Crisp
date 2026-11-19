@@ -4,7 +4,10 @@ import SwiftUI
 struct CamSweepApp: App {
     var body: some Scene {
         WindowGroup {
-            ContentView()
+            HomeView()
+                .preferredColorScheme(.dark)
+                .tint(Theme.accent)
+                .fontDesign(.rounded)
         }
     }
 }
