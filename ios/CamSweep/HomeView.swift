@@ -175,7 +175,7 @@ private struct CheckCard: View {
             Halo(size: 56) { Image(systemName: check.symbol) }
             VStack(alignment: .leading, spacing: 4) {
                 Text(check.title)
-                    .font(.title3.bold())
+                    .font(.headline.bold())
                 Text(note ?? check.detail)
                     .font(.subheadline)
                     .foregroundStyle(note == nil ? Theme.secondary : Theme.accent)

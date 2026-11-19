@@ -125,9 +125,18 @@ struct WiFiView: View {
                 }
 
                 if scanner.foundLikelyCamera {
-                    Button("What to do now") { showGuide = true }
+                    Button {
+                        showGuide = true
+                    } label: {
+                        HStack(spacing: 6) {
+                            Text("What to do now")
+                            Image(systemName: "chevron.right")
+                                .font(.footnote.weight(.bold))
+                        }
                         .font(.headline)
+                        .foregroundStyle(Theme.accent)
                         .frame(minHeight: 44)
+                    }
                 }
 
                 Text(scanner.sweepsWholeNetwork
@@ -177,11 +186,11 @@ private struct FindingRow: View {
                 Text(finding.isLikelyCamera ? "Likely camera" : "Unknown device")
                     .font(.headline)
                     .foregroundStyle(Theme.text)
-                Text(finding.isLikelyCamera ? "\(finding.name) · streams video" : "\(finding.name) · web page only")
+                Text(finding.isLikelyCamera ? "Streams video · \(finding.name)" : "Web page only · \(finding.name)")
                     .font(.footnote.monospacedDigit())
                     .foregroundStyle(Theme.secondary)
                     .lineLimit(1)
-                    .truncationMode(.middle)
+                    .minimumScaleFactor(0.8)
             }
             .multilineTextAlignment(.leading)
             Spacer(minLength: 8)
@@ -189,12 +198,12 @@ private struct FindingRow: View {
                 Text("Open")
                     .font(.subheadline.weight(.semibold))
                     .foregroundStyle(finding.isLikelyCamera ? Theme.onAccent : Theme.text)
-                    .padding(.horizontal, 14)
+                    .padding(.horizontal, 12)
                     .frame(minHeight: 34)
                     .background(finding.isLikelyCamera ? Theme.accent : Theme.raised, in: Capsule())
             }
         }
-        .padding(16)
+        .padding(14)
         .card()
         .accessibilityElement(children: .combine)
     }

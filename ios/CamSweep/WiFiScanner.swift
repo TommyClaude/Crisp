@@ -46,7 +46,7 @@ final class WiFiScanner: ObservableObject {
     private var task: Task<Void, Never>?
 
     init() {
-        if Demo.isOn {
+        if Demo.screen == "wifi" {
             openPorts = ["192.168.1.47": [554, 8080], "192.168.1.1": [80, 443]]
             publish()
             progress = 1

@@ -34,7 +34,7 @@ if [ -z "$UDID" ]; then
 fi
 echo "Simulator: $(xcrun simctl list devices available | grep "$UDID" | sed 's/^ *//')"
 
-xcrun simctl bootstatus "$UDID" -b
+xcrun simctl bootstatus "$UDID" -b >/dev/null
 xcrun simctl ui "$UDID" appearance dark
 xcrun simctl status_bar "$UDID" override --time "9:41" \
   --dataNetwork wifi --wifiMode active --wifiBars 3 \
