@@ -8,9 +8,7 @@ final class InfraredScanner: NSObject, ObservableObject, AVCaptureVideoDataOutpu
     enum Access { case unknown, granted, denied }
 
     let session = AVCaptureSession()
-    /// The on-screen preview. The camera needs it to say how frames must be
-    /// turned to match what the person sees.
-    weak var previewLayer: AVCaptureVideoPreviewLayer?
+    private weak var previewLayer: AVCaptureVideoPreviewLayer?
 
     @Published private(set) var access: Access = .unknown
     /// True until the person has been asked for the camera, so the screen
@@ -70,6 +68,18 @@ final class InfraredScanner: NSObject, ObservableObject, AVCaptureVideoDataOutpu
         }
     }
 
+    /// Hands over the on-screen preview. The camera needs it to say how
+    /// frames must be turned to match what the person sees, and the preview
+    /// can appear before or after the camera is set up.
+    func attach(preview layer: AVCaptureVideoPreviewLayer) {
+        previewLayer = layer
+        sessionQueue.async {
+            guard let device = (self.session.inputs.first as? AVCaptureDeviceInput)?.device else { return }
+            self.matchPreviewRotation(for: device)
+            self.alignPreview()
+        }
+    }
+
     func flipCamera() {
         isFrontCamera.toggle()
         torchOn = false
@@ -125,22 +135,25 @@ final class InfraredScanner: NSObject, ObservableObject, AVCaptureVideoDataOutpu
               session.canAddInput(input) else { return }
         session.addInput(input)
 
-        // The analyzed frames must be turned exactly like the preview, or the
-        // rings land in the wrong place. The angle is not a constant: the
-        // front camera of the iPhone 17 family is mounted a quarter turn from
-        // earlier ones.
+        matchPreviewRotation(for: device)
+        if let connection = output.connection(with: .video), connection.isVideoMirroringSupported {
+            connection.automaticallyAdjustsVideoMirroring = false
+            connection.isVideoMirrored = (position == .front)
+        }
+    }
+
+    /// Turns the analyzed frames exactly like the preview, or the rings land
+    /// in the wrong place. The angle is not a constant: the front camera of
+    /// the iPhone 17 family is mounted a quarter turn from earlier ones.
+    /// Session queue only.
+    private func matchPreviewRotation(for device: AVCaptureDevice) {
         if let previewLayer {
             previewAngle = AVCaptureDevice.RotationCoordinator(device: device, previewLayer: previewLayer)
                 .videoRotationAngleForHorizonLevelPreview
         }
-        if let connection = output.connection(with: .video) {
-            if connection.isVideoRotationAngleSupported(previewAngle) {
-                connection.videoRotationAngle = previewAngle
-            }
-            if connection.isVideoMirroringSupported {
-                connection.automaticallyAdjustsVideoMirroring = false
-                connection.isVideoMirrored = (position == .front)
-            }
+        if let connection = output.connection(with: .video),
+           connection.isVideoRotationAngleSupported(previewAngle) {
+            connection.videoRotationAngle = previewAngle
         }
     }
 
@@ -242,7 +255,9 @@ final class InfraredScanner: NSObject, ObservableObject, AVCaptureVideoDataOutpu
             }
             if !merged { centers.append((point.x, point.y, 1)) }
         }
-        return centers.prefix(12).map {
+        // An LED is small. Keeping the smallest clusters stops one large
+        // bright area (a window, a TV) from using up every marker.
+        return centers.sorted { $0.count < $1.count }.prefix(12).map {
             CGPoint(x: $0.sumX / CGFloat($0.count), y: $0.sumY / CGFloat($0.count))
         }
     }

@@ -31,7 +31,8 @@ struct MagneticView: View {
                     .buttonStyle(CapsuleButtonStyle())
                 }
                 // The sensor sits at the top of the phone; say so where it is.
-                .overlay(alignment: .top) {
+                // An inset, so the gauge is laid out below it at any text size.
+                .safeAreaInset(edge: .top, spacing: 0) {
                     VStack(spacing: 2) {
                         Image(systemName: "chevron.compact.up")
                             .font(.title2.weight(.semibold))
@@ -40,6 +41,8 @@ struct MagneticView: View {
                             .font(.subheadline.weight(.medium))
                     }
                     .padding(.top, 4)
+                    .frame(maxWidth: .infinity)
+                    .background(Theme.background)
                     .accessibilityElement(children: .combine)
                 }
             } else {
@@ -72,7 +75,7 @@ struct MagneticView: View {
             new == .strong ? .warning : nil
         }
         .onChange(of: sensor.level) { _, new in
-            if new == .strong { AccessibilityNotification.Announcement("Strong field").post() }
+            if new == .strong { announce("Strong field") }
         }
         .onAppear { sensor.start() }
         .onDisappear { sensor.stop() }

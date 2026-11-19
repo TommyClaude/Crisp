@@ -115,7 +115,22 @@ struct HomeView: View {
             UIApplication.shared.isIdleTimerDisabled = awake
         }
         .onChange(of: scenePhase) { _, phase in
-            if phase == .background { wifi.cancel() }
+            // A suspended sweep would come back with holes in it.
+            if phase == .background && wifi.phase == .scanning { wifi.cancel() }
+        }
+        .onChange(of: wifi.phase) { _, phase in
+            // Here rather than on the Wi-Fi screen, because the scan may
+            // finish after the person has left that screen.
+            switch phase {
+            case .finished:
+                announce(wifi.foundLikelyCamera ? "Wi-Fi scan finished. Possible camera." : "Wi-Fi scan finished. No camera spotted.")
+            case .denied:
+                announce("Local network is off.")
+            case .noWiFi:
+                announce("Not on Wi-Fi.")
+            default:
+                break
+            }
         }
     }
 

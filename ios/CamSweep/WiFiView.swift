@@ -82,16 +82,6 @@ struct WiFiView: View {
         .sheet(isPresented: $showGuide) {
             GuideView(page: .found)
         }
-        .onChange(of: scanner.phase) { _, phase in
-            // Say the outcome aloud; nothing else tells VoiceOver it changed.
-            let news: String? = switch phase {
-            case .finished: scanner.foundLikelyCamera ? "Scan finished. Possible camera." : "Scan finished. No camera spotted."
-            case .denied: "Local network is off."
-            case .noWiFi: "Not on Wi-Fi."
-            default: nil
-            }
-            if let news { AccessibilityNotification.Announcement(news).post() }
-        }
     }
 
     private func ringSymbol(_ name: String) -> some View {
@@ -190,6 +180,8 @@ private struct FindingRow: View {
                 Text(finding.isLikelyCamera ? "\(finding.name) · streams video" : "\(finding.name) · web page only")
                     .font(.footnote.monospacedDigit())
                     .foregroundStyle(Theme.secondary)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
             }
             .multilineTextAlignment(.leading)
             Spacer(minLength: 8)

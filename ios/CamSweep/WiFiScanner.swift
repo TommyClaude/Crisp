@@ -31,10 +31,14 @@ final class WiFiScanner: ObservableObject {
 
     /// RTSP, the streaming protocol nearly every network camera speaks.
     private static let videoPorts: Set<UInt16> = [554, 8554]
-    private static let ports: [UInt16] = [554, 8554, 80, 8080, 443]
+    /// In sweep order. A web port goes first: the first packet to an address
+    /// is the one most easily lost, and it should not be the video check.
+    private static let ports: [UInt16] = [80, 554, 8554, 8080, 443]
     private static let videoServices = ["_rtsp._tcp", "_axis-video._tcp"]
     /// The sweep covers at most a /22: the 1022 addresses around the phone.
     private static let widestMask: UInt32 = 0xFFFF_FC00
+    /// And never less than a /24, whatever the lease says.
+    private static let narrowestMask: UInt32 = 0xFFFF_FF00
 
     private var openPorts: [String: Set<UInt16>] = [:]
     private var advertised: Set<String> = []
@@ -77,14 +81,16 @@ final class WiFiScanner: ObservableObject {
             }
             self.phase = .scanning
             self.browse()
-            let blocked = await self.sweep(network)
+            let end = await self.sweep(network)
             guard !Task.isCancelled else { return }
             self.stopBrowsing()
 
-            if blocked {
+            let lostWiFi = end == .offline || WiFiScanner.wifiNetwork()?.address != network.address
+            if end == .blocked {
                 self.phase = .denied
-            } else if WiFiScanner.wifiNetwork()?.address != network.address {
-                // Wi-Fi dropped or changed under the scan: nothing was checked.
+            } else if lostWiFi && !self.foundLikelyCamera {
+                // Wi-Fi dropped or changed under the scan. Without a find,
+                // nothing can be said about the network.
                 self.phase = .noWiFi
             } else {
                 self.progress = 1
@@ -108,15 +114,16 @@ final class WiFiScanner: ObservableObject {
 
     // MARK: - Port sweep
 
-    private enum Probe { case open, closed, blocked }
+    /// `blocked`: iOS is holding local traffic back. `offline`: Wi-Fi is gone.
+    private enum Probe { case open, closed, blocked, offline }
 
-    /// Tries every port on every address. Returns true if iOS blocked the
-    /// traffic, in which case nothing can be said about the network.
-    private func sweep(_ network: (address: UInt32, mask: UInt32)) async -> Bool {
-        let mask = max(network.mask, Self.widestMask)
+    /// Tries every port on every address. Returns `.blocked` or `.offline`
+    /// if it had to stop for that reason, and `.closed` once it ran through.
+    private func sweep(_ network: (address: UInt32, mask: UInt32)) async -> Probe {
+        let mask = min(max(network.mask, Self.widestMask), Self.narrowestMask)
         let first = (network.address & mask) &+ 1
         let last = (network.address | ~mask) &- 1
-        guard first <= last else { return false }
+        guard first <= last else { return .closed }
 
         // Port by port rather than host by host: each address then gets five
         // separate chances, seconds apart, instead of one shared second.
@@ -129,7 +136,7 @@ final class WiFiScanner: ObservableObject {
 
         let total = Double(jobs.count)
         var completed = 0.0
-        var blocked = false
+        var end = Probe.closed
 
         await withTaskGroup(of: (String, UInt16, Probe).self) { group in
             var remaining = jobs.makeIterator()
@@ -144,8 +151,8 @@ final class WiFiScanner: ObservableObject {
             for _ in 0..<64 { addProbe() }
 
             for await (host, port, result) in group {
-                if Task.isCancelled || result == .blocked {
-                    blocked = (result == .blocked)
+                if result == .blocked || result == .offline { end = result }
+                if Task.isCancelled || end != .closed {
                     group.cancelAll()
                     break
                 }
@@ -158,13 +165,17 @@ final class WiFiScanner: ObservableObject {
                 addProbe()
             }
         }
-        return blocked
+        return end
     }
 
     /// Tries one TCP connection, giving up after the timeout.
     nonisolated private static func probe(host: String, port: UInt16, timeout: TimeInterval = 1) async -> Probe {
         guard let nwPort = NWEndpoint.Port(rawValue: port) else { return .closed }
-        let connection = NWConnection(host: NWEndpoint.Host(host), port: nwPort, using: .tcp)
+        // Wi-Fi only: a private address must never be tried over cellular,
+        // where it would just time out and look like a closed port.
+        let parameters = NWParameters.tcp
+        parameters.requiredInterfaceType = .wifi
+        let connection = NWConnection(host: NWEndpoint.Host(host), port: nwPort, using: parameters)
         let once = Once()
         return await withCheckedContinuation { continuation in
             @Sendable func finish(_ result: Probe) {
@@ -177,10 +188,17 @@ final class WiFiScanner: ObservableObject {
                 case .ready:
                     finish(.open)
                 case .waiting:
-                    // Refused or unreachable, so there is no need to wait out
-                    // the timer; unless iOS itself is holding the traffic back.
-                    let denied = connection.currentPath?.unsatisfiedReason == .localNetworkDenied
-                    finish(denied ? .blocked : .closed)
+                    // Usually refused or unreachable, so there is no need to
+                    // wait out the timer. But with no usable path at all the
+                    // probe never left the phone, and that is not "closed".
+                    let path = connection.currentPath
+                    if path?.unsatisfiedReason == .localNetworkDenied {
+                        finish(.blocked)
+                    } else if path?.status == .unsatisfied {
+                        finish(.offline)
+                    } else {
+                        finish(.closed)
+                    }
                 case .failed:
                     finish(.closed)
                 default:

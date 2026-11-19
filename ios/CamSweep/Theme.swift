@@ -1,5 +1,6 @@
 import SwiftUI
 import UIKit
+import Accessibility
 
 /// The look of the app.
 ///
@@ -196,6 +197,14 @@ struct HelpSheet: View {
         .presentationDetents([.medium, .large])
         .presentationDragIndicator(.visible)
     }
+}
+
+/// Speaks a result to VoiceOver, ahead of whatever focus change comes with it.
+@MainActor
+func announce(_ text: String) {
+    var message = AttributedString(text)
+    message.accessibilitySpeechAnnouncementPriority = .high
+    AccessibilityNotification.Announcement(message).post()
 }
 
 @MainActor

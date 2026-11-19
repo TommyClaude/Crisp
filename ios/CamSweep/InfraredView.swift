@@ -53,7 +53,7 @@ struct InfraredView: View {
                       tip: "To test it, aim a TV remote at the camera and press a button: its tip flashes on screen. Or flip to the back camera and use the torch to catch the glint of a lens.")
         }
         .onChange(of: scanner.spots.isEmpty) { _, isEmpty in
-            if !isEmpty { AccessibilityNotification.Announcement("Glowing dot in view").post() }
+            if !isEmpty && scanner.isFrontCamera { announce("Glowing dot in view") }
         }
         .onAppear {
             if !scanner.needsPermission { scanner.start() }
@@ -70,9 +70,11 @@ struct InfraredView: View {
                 Color.black.opacity(0.6)
                     .ignoresSafeArea()
             }
-            // Keeps the navigation bar readable over a bright image.
-            LinearGradient(colors: [.black.opacity(0.6), .clear], startPoint: .top, endPoint: .bottom)
-                .frame(height: 150)
+            // Keeps the navigation bar readable over a bright image: full
+            // strength behind the bar, fading out below it.
+            LinearGradient(colors: [.black.opacity(0.7), .black.opacity(0.7), .clear],
+                           startPoint: .top, endPoint: .bottom)
+                .frame(height: 180)
                 .frame(maxHeight: .infinity, alignment: .top)
                 .ignoresSafeArea()
                 .allowsHitTesting(false)
@@ -127,7 +129,7 @@ struct InfraredView: View {
             .accessibilityLabel("Switch camera")
         }
         .padding(16)
-        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 28, style: .continuous))
+        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 28, style: .continuous))
         .overlay(RoundedRectangle(cornerRadius: 28, style: .continuous).strokeBorder(Theme.hairline, lineWidth: 1))
         .dynamicTypeSize(...DynamicTypeSize.accessibility2)
     }
@@ -215,7 +217,7 @@ private struct CameraPreview: UIViewRepresentable {
         if let layer = view.layer as? AVCaptureVideoPreviewLayer {
             layer.session = scanner.session
             layer.videoGravity = .resizeAspectFill
-            scanner.previewLayer = layer
+            scanner.attach(preview: layer)
         }
         return view
     }

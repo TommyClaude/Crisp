@@ -22,6 +22,7 @@ final class MagneticSensor: ObservableObject {
     private var baseline: Double = 0
     private var baselineSamples: [Double] = []
     private var smoothed: Double = 0
+    private var bestAccuracy = CMMagneticFieldCalibrationAccuracy.uncalibrated
 
     func start() {
         if Demo.isOn {
@@ -39,11 +40,18 @@ final class MagneticSensor: ObservableObject {
             return
         }
         resetBaseline()
+        bestAccuracy = .uncalibrated
         motion.deviceMotionUpdateInterval = 1.0 / 30.0
         motion.startDeviceMotionUpdates(using: frame, to: .main) { [weak self] data, _ in
             // Until iOS has calibrated the compass, the field reads as zero.
             guard let self, let reading = data?.magneticField,
                   reading.accuracy != .uncalibrated else { return }
+            if reading.accuracy.rawValue > self.bestAccuracy.rawValue {
+                // A better compass fit shifts every reading, so measure the
+                // baseline again. Accuracy has three levels, which bounds this.
+                self.bestAccuracy = reading.accuracy
+                self.resetBaseline()
+            }
             let field = reading.field
             self.handle(sqrt(field.x * field.x + field.y * field.y + field.z * field.z))
         }
