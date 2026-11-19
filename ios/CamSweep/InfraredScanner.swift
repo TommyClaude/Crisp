@@ -10,6 +10,8 @@ final class InfraredScanner: NSObject, ObservableObject, AVCaptureVideoDataOutpu
     let session = AVCaptureSession()
 
     @Published private(set) var access: Access = .unknown
+    /// False until the first camera image has been analyzed.
+    @Published private(set) var hasImage = false
     /// Bright spots only mean something in the dark.
     @Published private(set) var isDark = false
     /// Centers of bright spots, normalized to 0...1 within the video frame.
@@ -30,6 +32,7 @@ final class InfraredScanner: NSObject, ObservableObject, AVCaptureVideoDataOutpu
     func start() {
         if Demo.isOn {
             access = .granted
+            hasImage = true
             isDark = true
             spots = [CGPoint(x: 0.27, y: 0.36), CGPoint(x: 0.70, y: 0.55)]
             return
@@ -176,6 +179,7 @@ final class InfraredScanner: NSObject, ObservableObject, AVCaptureVideoDataOutpu
         let size = CGSize(width: width, height: height)
 
         DispatchQueue.main.async {
+            self.hasImage = true
             self.isDark = dark
             self.spots = found
             if self.frameSize != size { self.frameSize = size }

@@ -113,26 +113,32 @@ struct HelpSheet: View {
     @Environment(\.dismiss) private var dismiss
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 24) {
-            Text(title)
-                .font(.title2.bold())
-                .padding(.top, 28)
-            ForEach(steps) { step in
-                HStack(alignment: .top, spacing: 16) {
-                    Image(systemName: step.symbol)
-                        .font(.system(size: 20, weight: .semibold))
-                        .foregroundStyle(Theme.accent)
-                        .frame(width: 32)
-                    Text(step.text)
-                        .fixedSize(horizontal: false, vertical: true)
+        ScrollView {
+            VStack(alignment: .leading, spacing: 24) {
+                Text(title)
+                    .font(.title2.bold())
+                    .padding(.top, 16)
+                ForEach(steps) { step in
+                    HStack(alignment: .top, spacing: 16) {
+                        Image(systemName: step.symbol)
+                            .font(.system(size: 20, weight: .semibold))
+                            .foregroundStyle(Theme.accent)
+                            .frame(width: 32)
+                        Text(step.text)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
                 }
             }
-            Spacer(minLength: 0)
+            .padding(24)
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+        .safeAreaInset(edge: .bottom) {
             Button("Got it") { dismiss() }
                 .buttonStyle(SecondaryButtonStyle())
+                .padding(.horizontal, 24)
+                .padding(.vertical, 12)
+                .background(Theme.background)
         }
-        .padding(24)
-        .frame(maxWidth: .infinity, alignment: .leading)
         .background(Theme.background.ignoresSafeArea())
         .presentationDetents([.medium, .large])
         .presentationDragIndicator(.visible)

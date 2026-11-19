@@ -39,7 +39,7 @@ struct WiFiView: View {
                     Text("Allow Local Network for CamSweep in Settings, then scan again.")
                 } actions: {
                     Button("Open Settings") { openAppSettings() }
-                        .buttonStyle(.borderedProminent)
+                        .buttonStyle(.bordered)
                     Button("Try again") { scanner.start() }
                 }
             case .noWiFi:
@@ -49,7 +49,7 @@ struct WiFiView: View {
                     Text("Join the room's Wi-Fi, then scan.")
                 } actions: {
                     Button("Try again") { scanner.start() }
-                        .buttonStyle(.borderedProminent)
+                        .buttonStyle(.bordered)
                 }
             }
         }

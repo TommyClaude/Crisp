@@ -16,13 +16,13 @@ struct InfraredView: View {
                     Text("Allow the camera in Settings to look for infrared lights.")
                 } actions: {
                     Button("Open Settings") { openAppSettings() }
-                        .buttonStyle(.borderedProminent)
+                        .buttonStyle(.bordered)
                 }
             } else {
                 CameraLayer(scanner: scanner)
                     .ignoresSafeArea()
                 VStack {
-                    status
+                    if scanner.hasImage { status }
                     Spacer()
                     Text(scanner.isFrontCamera
                          ? "Infrared lights glow on screen, even though your eyes can't see them."
