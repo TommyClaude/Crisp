@@ -176,6 +176,10 @@ private struct FindingRow: View {
         }
     }
 
+    private var reason: String {
+        finding.isLikelyCamera ? "Streams video" : "Web page only"
+    }
+
     private func row(opens: Bool) -> some View {
         HStack(spacing: 14) {
             Halo(size: 48, isLead: finding.isLikelyCamera) {
@@ -186,11 +190,18 @@ private struct FindingRow: View {
                 Text(finding.isLikelyCamera ? "Likely camera" : "Unknown device")
                     .font(.headline)
                     .foregroundStyle(Theme.text)
-                Text(finding.isLikelyCamera ? "Streams video · \(finding.name)" : "Web page only · \(finding.name)")
-                    .font(.footnote.monospacedDigit())
-                    .foregroundStyle(Theme.secondary)
-                    .lineLimit(1)
-                    .minimumScaleFactor(0.8)
+                ViewThatFits(in: .horizontal) {
+                    Text("\(reason) · \(finding.name)")
+                        .lineLimit(1)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(reason)
+                        Text(finding.name)
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                    }
+                }
+                .font(.footnote.monospacedDigit())
+                .foregroundStyle(Theme.secondary)
             }
             .multilineTextAlignment(.leading)
             Spacer(minLength: 8)

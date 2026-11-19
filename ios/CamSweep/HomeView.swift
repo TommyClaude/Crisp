@@ -122,12 +122,16 @@ struct HomeView: View {
             // Here rather than on the Wi-Fi screen, because the scan may
             // finish after the person has left that screen.
             switch phase {
+            case .scanning:
+                // The permission prompt was answered on the way out of the app.
+                if scenePhase == .background { wifi.cancel() }
             case .finished:
-                announce(wifi.foundLikelyCamera ? "Wi-Fi scan finished. Possible camera." : "Wi-Fi scan finished. No camera spotted.")
+                announce(wifi.foundLikelyCamera ? "Wi-Fi scan finished. Possible camera." : "Wi-Fi scan finished. No camera spotted.",
+                         urgent: true)
             case .denied:
-                announce("Local network is off.")
+                announce("Local network is off.", urgent: true)
             case .noWiFi:
-                announce("Not on Wi-Fi.")
+                announce("Not on Wi-Fi.", urgent: true)
             default:
                 break
             }

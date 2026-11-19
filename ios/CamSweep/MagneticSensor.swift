@@ -48,9 +48,10 @@ final class MagneticSensor: ObservableObject {
                   reading.accuracy != .uncalibrated else { return }
             if reading.accuracy.rawValue > self.bestAccuracy.rawValue {
                 // A better compass fit shifts every reading, so measure the
-                // baseline again. Accuracy has three levels, which bounds this.
+                // baseline again; but not while the gauge is showing a find,
+                // or the object under the phone would become the new zero.
                 self.bestAccuracy = reading.accuracy
-                self.resetBaseline()
+                if self.level == .calibrating || self.level == .normal { self.resetBaseline() }
             }
             let field = reading.field
             self.handle(sqrt(field.x * field.x + field.y * field.y + field.z * field.z))

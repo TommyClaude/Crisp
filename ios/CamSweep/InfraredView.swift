@@ -52,8 +52,8 @@ struct InfraredView: View {
                               "A ring marks a glowing dot. If your eyes can't see it, look closer."],
                       tip: "To test it, aim a TV remote at the camera and press a button: its tip flashes on screen. Or flip to the back camera and use the torch to catch the glint of a lens.")
         }
-        .onChange(of: scanner.spots.isEmpty) { _, isEmpty in
-            if !isEmpty && scanner.isFrontCamera { announce("Glowing dot in view") }
+        .onChange(of: scanner.isFrontCamera && !scanner.spots.isEmpty) { _, showing in
+            if showing { announce("Glowing dot in view") }
         }
         .onAppear {
             if !scanner.needsPermission { scanner.start() }

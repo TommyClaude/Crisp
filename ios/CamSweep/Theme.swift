@@ -199,11 +199,13 @@ struct HelpSheet: View {
     }
 }
 
-/// Speaks a result to VoiceOver, ahead of whatever focus change comes with it.
+/// Speaks a change to VoiceOver. `urgent` puts it ahead of the focus change
+/// that comes with it; keep that for one-off results, since an urgent
+/// announcement cannot be interrupted.
 @MainActor
-func announce(_ text: String) {
+func announce(_ text: String, urgent: Bool = false) {
     var message = AttributedString(text)
-    message.accessibilitySpeechAnnouncementPriority = .high
+    if urgent { message.accessibilitySpeechAnnouncementPriority = .high }
     AccessibilityNotification.Announcement(message).post()
 }
 
