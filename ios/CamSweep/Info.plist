@@ -11,6 +11,7 @@
 		<string>_rtsp._tcp</string>
 		<string>_http._tcp</string>
 		<string>_axis-video._tcp</string>
+		<string>_camsweep-check._tcp</string>
 	</array>
 </dict>
 </plist>
